@@ -1,0 +1,114 @@
+from datetime import datetime, timezone
+from typing import List, Optional
+from uuid import UUID
+
+from sqlalchemy import func, select
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.models.ticket import Ticket, TicketPurchase
+from app.repositories.base import BaseRepository
+
+
+class TicketRepository(BaseRepository[Ticket]):
+    def __init__(self, model, session: AsyncSession):
+        super().__init__(model, session)
+
+    async def get_by_ticket_code(self, code: str) -> Optional[Ticket]:
+        result = await self.session.execute(
+            select(Ticket).where(Ticket.ticket_code == code)
+        )
+        return result.scalar_one_or_none()
+
+    async def get_user_tickets(
+        self, user_id: UUID, skip: int = 0, limit: int = 20
+    ) -> List[Ticket]:
+        result = await self.session.execute(
+            select(Ticket)
+            .where(Ticket.user_id == user_id)
+            .order_by(Ticket.purchase_date.desc())
+            .offset(skip)
+            .limit(limit)
+        )
+        return list(result.scalars().all())
+
+    async def get_event_tickets(self, event_id: UUID) -> List[Ticket]:
+        result = await self.session.execute(
+            select(Ticket).where(Ticket.event_id == event_id)
+        )
+        return list(result.scalars().all())
+
+    async def mark_as_used(
+        self, ticket_id: UUID, scanned_by: UUID
+    ) -> Optional[Ticket]:
+        ticket = await self.get_by_id(ticket_id, id_field="ticket_id")
+        if ticket and ticket.ticket_status == "valid":
+            ticket.ticket_status = "used"
+            ticket.used_at = datetime.now(timezone.utc)
+            ticket.scanned_by = scanned_by
+            await self.session.flush()
+            await self.session.refresh(ticket)
+            return ticket
+        return None
+
+    async def count_by_event(self, event_id: UUID) -> int:
+        result = await self.session.execute(
+            select(func.count()).select_from(Ticket).where(
+                Ticket.event_id == event_id
+            )
+        )
+        return result.scalar_one()
+
+    async def count_used_by_event(self, event_id: UUID) -> int:
+        result = await self.session.execute(
+            select(func.count()).select_from(Ticket).where(
+                Ticket.event_id == event_id,
+                Ticket.ticket_status == "used",
+            )
+        )
+        return result.scalar_one()
+
+    async def count_user_tickets_for_type(
+        self, user_id: UUID, ticket_type_id: UUID
+    ) -> int:
+        result = await self.session.execute(
+            select(func.count()).select_from(Ticket).where(
+                Ticket.user_id == user_id,
+                Ticket.ticket_type_id == ticket_type_id,
+                Ticket.ticket_status != "cancelled",
+            )
+        )
+        return result.scalar_one()
+
+
+class TicketPurchaseRepository(BaseRepository[TicketPurchase]):
+    def __init__(self, model, session: AsyncSession):
+        super().__init__(model, session)
+
+    async def get_by_user(
+        self, user_id: UUID, skip: int = 0, limit: int = 20
+    ) -> List[TicketPurchase]:
+        result = await self.session.execute(
+            select(TicketPurchase)
+            .where(TicketPurchase.user_id == user_id)
+            .order_by(TicketPurchase.purchased_at.desc())
+            .offset(skip)
+            .limit(limit)
+        )
+        return list(result.scalars().all())
+
+    async def get_by_event(self, event_id: UUID) -> List[TicketPurchase]:
+        result = await self.session.execute(
+            select(TicketPurchase)
+            .where(TicketPurchase.event_id == event_id)
+            .order_by(TicketPurchase.purchased_at.desc())
+        )
+        return list(result.scalars().all())
+
+    async def get_revenue_by_event(self, event_id: UUID) -> float:
+        result = await self.session.execute(
+            select(func.sum(TicketPurchase.total_amount)).where(
+                TicketPurchase.event_id == event_id,
+                TicketPurchase.payment_status == "completed",
+            )
+        )
+        return float(result.scalar_one() or 0)
