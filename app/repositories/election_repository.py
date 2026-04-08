@@ -35,12 +35,18 @@ class ElectionRepository(BaseRepository[Election]):
         )
         return list(result.scalars().all())
 
-    async def get_elections_by_creator(self, user_id: UUID) -> List[Election]:
-        result = await self.session.execute(
-            select(Election)
-            .where(Election.created_by == user_id)
-            .order_by(Election.created_at.desc())
-        )
+    async def get_elections_by_creator(
+        self,
+        user_id: UUID,
+        skip: int = 0,
+        limit: int = 20,
+        status: Optional[str] = None,
+    ) -> List[Election]:
+        query = select(Election).where(Election.created_by == user_id)
+        if status:
+            query = query.where(Election.status == status)
+        query = query.order_by(Election.created_at.desc()).offset(skip).limit(limit)
+        result = await self.session.execute(query)
         return list(result.scalars().all())
 
     async def get_elections_by_status(

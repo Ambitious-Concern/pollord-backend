@@ -34,11 +34,18 @@ class EventRepository(BaseRepository[Event]):
         result = await self.session.execute(query)
         return list(result.scalars().all())
 
-    async def get_events_by_creator(self, user_id: UUID) -> List[Event]:
+    async def get_events_by_creator(
+        self,
+        user_id: UUID,
+        skip: int = 0,
+        limit: int = 20,
+    ) -> List[Event]:
         result = await self.session.execute(
             select(Event)
             .where(Event.created_by == user_id)
             .order_by(Event.created_at.desc())
+            .offset(skip)
+            .limit(limit)
         )
         return list(result.scalars().all())
 

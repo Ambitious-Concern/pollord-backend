@@ -86,3 +86,33 @@ class UserRepository(BaseRepository[User]):
     async def get_all_roles(self) -> List[Role]:
         result = await self.session.execute(select(Role))
         return list(result.scalars().all())
+
+    async def has_role(self, user_id: UUID, role_name: str) -> bool:
+        result = await self.session.execute(
+            select(UserRole)
+            .join(Role, UserRole.role_id == Role.role_id)
+            .where(UserRole.user_id == user_id, Role.role_name == role_name)
+        )
+        return result.scalar_one_or_none() is not None
+
+    async def grant_roles_by_name(
+        self, user_id: UUID, role_names: List[str], granted_by: Optional[UUID] = None
+    ) -> None:
+        """Assign system roles by name if not already assigned."""
+        for name in role_names:
+            role = await self.get_role_by_name(name)
+            if role and not await self.has_role(user_id, name):
+                await self.assign_role(user_id, role.role_id, assigned_by=granted_by)
+
+    async def revoke_roles_by_name(self, user_id: UUID, role_names: List[str]) -> None:
+        """Remove specific system roles from a user."""
+        for name in role_names:
+            result = await self.session.execute(
+                select(UserRole)
+                .join(Role, UserRole.role_id == Role.role_id)
+                .where(UserRole.user_id == user_id, Role.role_name == name)
+            )
+            ur = result.scalar_one_or_none()
+            if ur:
+                await self.session.delete(ur)
+        await self.session.flush()

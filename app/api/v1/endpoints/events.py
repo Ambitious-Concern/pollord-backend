@@ -24,6 +24,17 @@ from app.schemas.event import (
 router = APIRouter(prefix="/events", tags=["Events"])
 
 ORGANIZER_ROLES = ("System Administrator", "Event Organizer")
+SYSTEM_ADMIN = "System Administrator"
+
+
+def _owns_event(event, current_user: User) -> bool:
+    user_roles = [ur.role.role_name for ur in current_user.user_roles]
+    return event.created_by == current_user.user_id or SYSTEM_ADMIN in user_roles
+
+
+def _require_event_ownership(event, current_user: User) -> None:
+    if not _owns_event(event, current_user):
+        raise HTTPException(status_code=403, detail="You do not have access to this event")
 
 
 @router.post("/", response_model=EventResponse, status_code=201)
@@ -55,16 +66,13 @@ async def list_events(
     skip: int = 0,
     limit: int = 20,
     category: Optional[str] = None,
-    current_user: User = Depends(get_current_active_user),
+    current_user: User = Depends(require_roles(*ORGANIZER_ROLES)),
 ):
+    """Return only the events created by the current user."""
     event_repo = EventRepository(Event, db)
-    user_roles = [ur.role.role_name for ur in current_user.user_roles]
-
-    if any(r in ORGANIZER_ROLES for r in user_roles):
-        events = await event_repo.get_all(skip=skip, limit=limit)
-    else:
-        events = await event_repo.get_published_events(skip, limit, category)
-
+    events = await event_repo.get_events_by_creator(
+        current_user.user_id, skip=skip, limit=limit
+    )
     return [EventResponse.model_validate(e) for e in events]
 
 
@@ -107,6 +115,7 @@ async def update_event(
     event = await event_repo.get_by_id(event_id, id_field="event_id")
     if not event:
         raise HTTPException(status_code=404, detail="Event not found")
+    _require_event_ownership(event, current_user)
 
     update_data = data.model_dump(exclude_unset=True)
     updated = await event_repo.update(event_id, update_data, id_field="event_id")
@@ -123,6 +132,7 @@ async def publish_event(
     event = await event_repo.get_by_id(event_id, id_field="event_id")
     if not event:
         raise HTTPException(status_code=404, detail="Event not found")
+    _require_event_ownership(event, current_user)
     if event.status != "draft":
         raise HTTPException(status_code=400, detail="Only draft events can be published")
 
@@ -140,6 +150,7 @@ async def cancel_event(
     event = await event_repo.get_by_id(event_id, id_field="event_id")
     if not event:
         raise HTTPException(status_code=404, detail="Event not found")
+    _require_event_ownership(event, current_user)
 
     await event_repo.update_status(event_id, "cancelled")
 
@@ -171,6 +182,7 @@ async def create_ticket_type(
     event = await event_repo.get_by_id(event_id, id_field="event_id")
     if not event:
         raise HTTPException(status_code=404, detail="Event not found")
+    _require_event_ownership(event, current_user)
 
     tt_repo = TicketTypeRepository(TicketType, db)
     ticket_type = await tt_repo.create(
@@ -202,6 +214,12 @@ async def update_ticket_type(
     current_user: User = Depends(require_roles(*ORGANIZER_ROLES)),
     db: AsyncSession = Depends(get_db),
 ):
+    event_repo = EventRepository(Event, db)
+    event = await event_repo.get_by_id(event_id, id_field="event_id")
+    if not event:
+        raise HTTPException(status_code=404, detail="Event not found")
+    _require_event_ownership(event, current_user)
+
     tt_repo = TicketTypeRepository(TicketType, db)
     tt = await tt_repo.get_by_id(type_id, id_field="ticket_type_id")
     if not tt or tt.event_id != event_id:

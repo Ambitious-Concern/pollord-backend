@@ -1,10 +1,12 @@
 import logging
 from contextlib import asynccontextmanager
+from pathlib import Path
 
 from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
+from fastapi.staticfiles import StaticFiles
 from slowapi import _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
 from starlette.exceptions import HTTPException as StarletteHTTPException
@@ -26,6 +28,8 @@ logger = logging.getLogger(__name__)
 async def lifespan(app: FastAPI):
     # Startup
     logger.info("Starting Pollard API...")
+    # Ensure upload directory exists
+    Path(settings.UPLOAD_DIR).mkdir(parents=True, exist_ok=True)
     from app.db.init_db import init_db
     await init_db()
     logger.info("Pollard API started successfully")
@@ -61,6 +65,11 @@ app.add_middleware(RequestLoggingMiddleware)
 # Routers
 app.include_router(api_router)
 app.include_router(ws_router)
+
+# Static files (KYC uploads, etc.)
+upload_dir = Path(settings.UPLOAD_DIR)
+upload_dir.mkdir(parents=True, exist_ok=True)
+app.mount("/uploads", StaticFiles(directory=str(upload_dir)), name="uploads")
 
 
 # Exception handlers

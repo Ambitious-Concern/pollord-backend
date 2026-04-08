@@ -41,6 +41,8 @@ class UserResponse(BaseModel):
     phone_number: Optional[str] = None
     email_verified: bool
     account_status: str
+    has_organization: bool = False
+    organization_verified: bool = False
     created_at: datetime
     roles: List[str] = []
 

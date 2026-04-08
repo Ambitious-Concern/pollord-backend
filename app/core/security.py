@@ -67,6 +67,23 @@ def create_password_reset_token(user_id: str) -> str:
     return jwt.encode(to_encode, settings.JWT_SECRET_KEY, algorithm=settings.JWT_ALGORITHM)
 
 
+def create_candidate_result_token(
+    candidate_id: str, election_id: str, election_end: Optional[datetime] = None
+) -> str:
+    """Token that expires 2 weeks after the election ends (or 2 weeks from now if end is unknown)."""
+    base = election_end if election_end else datetime.now(timezone.utc)
+    if base.tzinfo is None:
+        base = base.replace(tzinfo=timezone.utc)
+    expire = base + timedelta(weeks=2)
+    to_encode = {
+        "sub": candidate_id,
+        "election_id": election_id,
+        "type": "candidate_result",
+        "exp": expire,
+    }
+    return jwt.encode(to_encode, settings.JWT_SECRET_KEY, algorithm=settings.JWT_ALGORITHM)
+
+
 # Vote encryption (AES-256-GCM)
 def _get_aes_key() -> bytes:
     key = settings.AES_ENCRYPTION_KEY
@@ -98,6 +115,16 @@ def decrypt_vote(encrypted: bytes) -> dict:
 # Voter anonymization (HMAC-SHA256)
 def generate_voter_hash(user_id: UUID, election_id: UUID) -> str:
     message = f"{user_id}{election_id}"
+    return hmac.new(
+        settings.HMAC_SECRET_KEY.encode(),
+        message.encode(),
+        hashlib.sha256,
+    ).hexdigest()
+
+
+def generate_anonymous_voter_hash(ip: str, user_agent: str, election_id: UUID) -> str:
+    """Voter hash for unauthenticated public-election voters, keyed by IP + UA."""
+    message = f"anon:{ip}:{user_agent}:{election_id}"
     return hmac.new(
         settings.HMAC_SECRET_KEY.encode(),
         message.encode(),

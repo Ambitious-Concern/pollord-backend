@@ -4,6 +4,7 @@ from app.models.vote import Vote, VoteReceipt
 from app.models.event import Event, TicketType
 from app.models.ticket import Ticket, TicketPurchase
 from app.models.audit_log import AuditLog
+from app.models.organization import Organization, OrganizationMember
 
 __all__ = [
     "User",
@@ -19,4 +20,6 @@ __all__ = [
     "Ticket",
     "TicketPurchase",
     "AuditLog",
+    "Organization",
+    "OrganizationMember",
 ]

@@ -2,14 +2,18 @@ from typing import List, Optional
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException
+from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.dependencies import require_roles
 from app.db.base import get_db
 from app.models.audit_log import AuditLog
+from app.models.organization import Organization
 from app.models.user import User
 from app.repositories.audit_log_repository import AuditLogRepository
+from app.repositories.organization_repository import OrganizationRepository
 from app.repositories.user_repository import UserRepository
+from app.schemas.organization import OrganizationResponse
 from app.schemas.user import (
     AssignRoles,
     AuditLogResponse,
@@ -160,3 +164,114 @@ async def list_audit_logs(
         logs = await audit_repo.get_recent(skip, limit)
 
     return [AuditLogResponse.model_validate(log) for log in logs]
+
+
+# --- Organization management ---
+
+class VerifyOrganizationRequest(BaseModel):
+    is_verified: bool
+
+
+def _org_to_response(org: Organization) -> OrganizationResponse:
+    from app.schemas.organization import OrganizationMemberResponse
+    members = []
+    for m in (org.members or []):
+        members.append(
+            OrganizationMemberResponse(
+                member_id=m.member_id,
+                org_id=m.org_id,
+                user_id=m.user_id,
+                role=m.role,
+                joined_at=m.joined_at,
+                user_name=m.user.full_name if m.user else None,
+                user_email=m.user.email if m.user else None,
+            )
+        )
+    return OrganizationResponse(
+        org_id=org.org_id,
+        name=org.name,
+        description=org.description,
+        logo_url=org.logo_url,
+        website=org.website,
+        address=org.address,
+        phone=org.phone,
+        email=org.email,
+        industry=org.industry,
+        is_verified=org.is_verified,
+        kyc_document_front=org.kyc_document_front,
+        kyc_document_back=org.kyc_document_back,
+        owner_id=org.owner_id,
+        created_at=org.created_at,
+        updated_at=org.updated_at,
+        members=members,
+    )
+
+
+@router.get("/organizations", response_model=List[OrganizationResponse])
+async def list_organizations(
+    current_user: User = Depends(require_roles(ADMIN_ROLE)),
+    db: AsyncSession = Depends(get_db),
+    skip: int = 0,
+    limit: int = 50,
+    verified: Optional[bool] = None,
+):
+    from sqlalchemy import select
+    from sqlalchemy.orm import selectinload
+    from app.models.organization import OrganizationMember
+
+    query = (
+        select(Organization)
+        .options(selectinload(Organization.members).selectinload(OrganizationMember.user))
+        .order_by(Organization.created_at.desc())
+        .offset(skip)
+        .limit(limit)
+    )
+    if verified is not None:
+        query = query.where(Organization.is_verified == verified)
+
+    result = await db.execute(query)
+    orgs = list(result.scalars().all())
+    return [_org_to_response(o) for o in orgs]
+
+
+@router.put("/organizations/{org_id}/verify", response_model=OrganizationResponse)
+async def verify_organization(
+    org_id: UUID,
+    data: VerifyOrganizationRequest,
+    current_user: User = Depends(require_roles(ADMIN_ROLE)),
+    db: AsyncSession = Depends(get_db),
+):
+    repo = OrganizationRepository(Organization, db)
+    org = await repo.get_with_members(org_id)
+    if not org:
+        raise HTTPException(status_code=404, detail="Organization not found")
+
+    await repo.update(org_id, {"is_verified": data.is_verified}, id_field="org_id")
+
+    await AuditLogRepository(AuditLog, db).log_action(
+        action_type="VERIFY_ORGANIZATION" if data.is_verified else "REJECT_ORGANIZATION",
+        entity_type="Organization",
+        entity_id=org_id,
+        user_id=current_user.user_id,
+        changes={"is_verified": data.is_verified},
+    )
+
+    # Notify organization owner
+    if org.owner and org.owner.email:
+        from app.services.email_service import _base_template, send_email
+        from app.core.config import settings
+        status_word = "approved" if data.is_verified else "rejected"
+        subject = f"Organization {status_word.capitalize()} — Pollord"
+        content = f"""
+        <h2>Organization {status_word.capitalize()}</h2>
+        <p>Your organization <span class="highlight">{org.name}</span> has been <strong>{status_word}</strong>.</p>
+        {'<p>You can now create elections and events.</p>' if data.is_verified else '<p>Please contact support for more information.</p>'}
+        <p style="text-align:center; margin-top:24px;">
+          <a href="{settings.FRONTEND_URL}/dashboard" class="btn">Go to Dashboard</a>
+        </p>
+        """
+        html = _base_template(content, f"Your organization has been {status_word}")
+        send_email(org.owner.email, subject, html)
+
+    org = await repo.get_with_members(org_id)
+    return _org_to_response(org)

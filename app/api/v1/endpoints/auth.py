@@ -94,3 +94,26 @@ async def verify_email(
     service = _get_auth_service(db)
     await service.verify_email(data.token)
     return {"message": "Email verified successfully"}
+
+
+@router.post("/verify-otp")
+async def verify_otp(
+    data: dict,
+    db: AsyncSession = Depends(get_db),
+):
+    """Verify OTP code sent to email. Body: { email, otp_code }"""
+    service = _get_auth_service(db)
+    email = data.get("email", "")
+    otp_code = data.get("otp_code", "")
+    return await service.verify_otp(email, otp_code)
+
+
+@router.post("/resend-otp")
+async def resend_otp(
+    data: dict,
+    db: AsyncSession = Depends(get_db),
+):
+    """Resend OTP code. Body: { email }"""
+    service = _get_auth_service(db)
+    email = data.get("email", "")
+    return await service.resend_otp(email)

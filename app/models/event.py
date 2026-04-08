@@ -30,9 +30,7 @@ class Event(TimestampMixin, Base):
     location: Mapped[str] = mapped_column(String(500), nullable=False)
     category: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
     capacity: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
-    banner_image_url: Mapped[Optional[str]] = mapped_column(
-        String(500), nullable=True
-    )
+    banner_image_url: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     status: Mapped[str] = mapped_column(String(20), default="draft", index=True)
     created_by: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), ForeignKey("users.user_id"), nullable=False

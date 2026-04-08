@@ -7,7 +7,8 @@ from pydantic import BaseModel, ConfigDict
 
 class CastVote(BaseModel):
     election_id: UUID
-    candidate_ids: List[UUID]
+    candidate_ids: Optional[List[UUID]] = None
+    candidate_short_codes: Optional[List[str]] = None
 
 
 class VoteReceiptResponse(BaseModel):

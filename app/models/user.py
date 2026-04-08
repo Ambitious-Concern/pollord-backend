@@ -35,6 +35,10 @@ class User(TimestampMixin, Base):
     last_login_at: Mapped[Optional[datetime]] = mapped_column(
         DateTime(timezone=True), nullable=True
     )
+    otp_code: Mapped[Optional[str]] = mapped_column(String(6), nullable=True)
+    otp_expires_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
 
     # Relationships
     user_roles: Mapped[List["UserRole"]] = relationship(

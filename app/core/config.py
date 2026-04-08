@@ -11,6 +11,7 @@ class Settings(BaseSettings):
     APP_NAME: str = "Pollard API"
     APP_VERSION: str = "1.0.0"
     DEBUG: bool = False
+    FRONTEND_URL: str = "http://localhost:3000"
 
     # Database
     DATABASE_URL: str = "postgresql+asyncpg://pollard:pollard@db:5432/pollard"
@@ -22,7 +23,7 @@ class Settings(BaseSettings):
     SECRET_KEY: str = "change-me-in-production"
     JWT_SECRET_KEY: str = "change-me-jwt-secret"
     JWT_ALGORITHM: str = "HS256"
-    ACCESS_TOKEN_EXPIRE_MINUTES: int = 1440  # 24 hours
+    ACCESS_TOKEN_EXPIRE_MINUTES: int = 1440
     REFRESH_TOKEN_EXPIRE_DAYS: int = 7
 
     # Password
@@ -32,13 +33,21 @@ class Settings(BaseSettings):
     AES_ENCRYPTION_KEY: str = "change-me-must-be-32-bytes-hex-encoded-key"
     HMAC_SECRET_KEY: str = "change-me-hmac-secret"
 
-    # Email
-    MAIL_USERNAME: str = ""
+    # Email (Zoho SMTP)
+    MAIL_HOST: str = "smtp.zoho.com"
+    MAIL_PORT: int = 465
+    MAIL_USERNAME: str = "noreply@theallex.com"
     MAIL_PASSWORD: str = ""
-    MAIL_FROM: str = "noreply@pollard.com"
-    MAIL_SERVER: str = "smtp.gmail.com"
-    MAIL_PORT: int = 587
-    MAIL_FROM_NAME: str = "Pollard Platform"
+    MAIL_FROM: str = "noreply@theallex.com"
+    MAIL_FROM_NAME: str = "Pollord"
+    MAIL_USE_SSL: bool = True
+    MAIL_USE_TLS: bool = False
+
+    # OTP
+    OTP_EXPIRE_MINUTES: int = 10
+
+    # File uploads
+    UPLOAD_DIR: str = "./uploads"
 
     # CORS
     CORS_ORIGINS: str = '["http://localhost:3000","http://localhost:8080"]'

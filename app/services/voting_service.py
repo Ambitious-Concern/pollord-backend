@@ -61,46 +61,83 @@ class VotingService:
                 detail="Election is not within voting period",
             )
 
-        # 2. Verify eligibility
-        is_eligible = await self.election_repo.is_user_eligible(
-            data.election_id, user_id
+        # 2. Resolve candidate selection (IDs or short codes)
+        if data.candidate_short_codes:
+            code_map = {
+                c.short_code.upper(): c.candidate_id
+                for c in election.candidates
+                if c.short_code
+            }
+            resolved = []
+            for code in data.candidate_short_codes:
+                cid = code_map.get(code.upper())
+                if not cid:
+                    raise HTTPException(
+                        status_code=status.HTTP_400_BAD_REQUEST,
+                        detail=f"Unknown candidate code: {code}",
+                    )
+                resolved.append(cid)
+            candidate_ids = resolved
+        elif data.candidate_ids:
+            candidate_ids = data.candidate_ids
+        else:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Provide either candidate_ids or candidate_short_codes",
+            )
+
+        # 3. Verify eligibility — skipped for open public elections
+        open_election = (
+            election.visibility == "public" and not election.require_verification
         )
-        if not is_eligible:
-            raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
-                detail="You are not eligible to vote in this election",
+        if not open_election:
+            is_eligible = await self.election_repo.is_user_eligible(
+                data.election_id, user_id
             )
+            if not is_eligible:
+                raise HTTPException(
+                    status_code=status.HTTP_403_FORBIDDEN,
+                    detail="You are not eligible to vote in this election",
+                )
 
-        # 3. Generate voter hash and check duplicate
-        voter_hash = self.crypto.generate_voter_hash(user_id, data.election_id)
-        if await self.vote_repo.has_voted(voter_hash, data.election_id):
-            raise HTTPException(
-                status_code=status.HTTP_409_CONFLICT,
-                detail="You have already voted in this election",
-            )
+        # 4. Generate voter hash and check duplicate
+        allow_revoting = getattr(election, "allow_revoting", False)
+        base_hash = self.crypto.generate_voter_hash(user_id, data.election_id)
+        if allow_revoting:
+            # Mix in a random nonce and re-hash to keep the 64-char size
+            import uuid as _uuid
+            import hashlib as _hashlib
+            voter_hash = _hashlib.sha256(f"{base_hash}:{_uuid.uuid4().hex}".encode()).hexdigest()
+        else:
+            voter_hash = base_hash
+            if await self.vote_repo.has_voted(voter_hash, data.election_id):
+                raise HTTPException(
+                    status_code=status.HTTP_409_CONFLICT,
+                    detail="You have already voted in this election",
+                )
 
-        # 4. Validate candidate IDs
+        # 5. Validate candidate IDs belong to this election
         valid_ids = {c.candidate_id for c in election.candidates}
-        for cid in data.candidate_ids:
+        for cid in candidate_ids:
             if cid not in valid_ids:
                 raise HTTPException(
                     status_code=status.HTTP_400_BAD_REQUEST,
                     detail=f"Invalid candidate ID: {cid}",
                 )
 
-        # 5. Enforce voting type constraints
-        if election.election_type == "single_choice" and len(data.candidate_ids) != 1:
+        # 6. Enforce voting type constraints
+        if election.election_type == "single_choice" and len(candidate_ids) != 1:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail="Single choice election requires exactly one candidate",
             )
 
-        # 6. Encrypt vote data
+        # 7. Encrypt vote data
         encrypted = self.crypto.encrypt_vote_data(
-            [str(cid) for cid in data.candidate_ids]
+            [str(cid) for cid in candidate_ids]
         )
 
-        # 7. Sign the vote
+        # 8. Sign the vote
         cast_at = now.isoformat()
         signature = self.crypto.sign_vote(encrypted, cast_at)
 
@@ -150,14 +187,18 @@ class VotingService:
                 detail="Election not found",
             )
 
-        is_eligible = await self.election_repo.is_user_eligible(
-            election_id, user_id
+        open_election = (
+            election.visibility == "public" and not election.require_verification
         )
-        if not is_eligible:
-            raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
-                detail="You are not eligible to vote in this election",
+        if not open_election:
+            is_eligible = await self.election_repo.is_user_eligible(
+                election_id, user_id
             )
+            if not is_eligible:
+                raise HTTPException(
+                    status_code=status.HTTP_403_FORBIDDEN,
+                    detail="You are not eligible to vote in this election",
+                )
 
         return ElectionWithCandidates(
             election_id=election.election_id,
@@ -175,6 +216,7 @@ class VotingService:
                     candidate_id=c.candidate_id,
                     election_id=c.election_id,
                     name=c.name,
+                    short_code=c.short_code,
                     description=c.description,
                     image_url=c.image_url,
                     display_order=c.display_order,
@@ -199,6 +241,54 @@ class VotingService:
             receipt_code=receipt.receipt_code,
             election_id=receipt.election_id,
             issued_at=receipt.issued_at,
+        )
+
+    async def get_live_results(self, election_id: UUID) -> ElectionResults:
+        """Returns live tallies for any election status (active, scheduled, etc.)."""
+        election = await self.election_repo.get_with_candidates(election_id)
+        if not election:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Election not found",
+            )
+
+        votes = await self.vote_repo.get_votes_by_election(election_id)
+        candidate_counts: dict[UUID, int] = {}
+
+        for vote in votes:
+            decrypted = self.crypto.decrypt_vote_data(vote.vote_data)
+            for cid_str in decrypted.get("candidate_ids", []):
+                cid = UUID(cid_str)
+                candidate_counts[cid] = candidate_counts.get(cid, 0) + 1
+
+        total_votes = len(votes)
+        total_eligible = await self.election_repo.count_eligible_voters(election_id)
+
+        results = []
+        for candidate in election.candidates:
+            count = candidate_counts.get(candidate.candidate_id, 0)
+            percentage = (count / total_votes * 100) if total_votes > 0 else 0
+            results.append(
+                CandidateResult(
+                    candidate_id=candidate.candidate_id,
+                    name=candidate.name,
+                    vote_count=count,
+                    percentage=round(percentage, 2),
+                )
+            )
+
+        results.sort(key=lambda r: r.vote_count, reverse=True)
+        turnout = (total_votes / total_eligible * 100) if total_eligible > 0 else 0
+
+        return ElectionResults(
+            election_id=election.election_id,
+            title=election.title,
+            election_type=election.election_type,
+            total_votes=total_votes,
+            total_eligible_voters=total_eligible,
+            turnout_percentage=round(turnout, 2),
+            results=results,
+            status=election.status,
         )
 
     async def get_results(self, election_id: UUID) -> ElectionResults:
