@@ -46,11 +46,24 @@ class Settings(BaseSettings):
     # OTP
     OTP_EXPIRE_MINUTES: int = 10
 
+    # Paystack
+    PAYSTACK_SECRET_KEY: str = "sk_test_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+    PAYSTACK_PUBLIC_KEY: str = "pk_test_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+    VOTE_PRICE: int = 100          # in smallest currency unit — 100 pesewas = ₵1 per vote
+    VOTE_CURRENCY: str = "GHS"     # Ghana Cedis
+
     # File uploads
     UPLOAD_DIR: str = "./uploads"
 
     # CORS
-    CORS_ORIGINS: str = '["http://localhost:3000","http://localhost:8080"]'
+    CORS_ORIGINS: str = '["http://localhost:3000","http://localhost:3001","http://localhost:8080"]'
+
+    # WhatsApp (Meta Cloud API)
+    WHATSAPP_ACCESS_TOKEN: str = ""
+    WHATSAPP_PHONE_NUMBER_ID: str = ""
+    WHATSAPP_VERIFY_TOKEN: str = "pollord-whatsapp-verify"
+    WHATSAPP_APP_SECRET: str = ""       # Meta App Secret for webhook signature verification
+    WHATSAPP_API_VERSION: str = "v19.0"
 
     # Rate Limiting
     RATE_LIMIT_DEFAULT: str = "100/minute"

@@ -3,6 +3,7 @@ from typing import AsyncGenerator
 
 import pytest_asyncio
 from httpx import ASGITransport, AsyncClient
+from sqlalchemy.pool import NullPool
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from app.core.security import create_access_token, hash_password
@@ -14,7 +15,10 @@ TEST_DATABASE_URL = os.getenv(
     "postgresql+asyncpg://pollard:pollard@localhost:5432/pollard_test",
 )
 
-test_engine = create_async_engine(TEST_DATABASE_URL, echo=False)
+# NullPool prevents connection pool state from being shared across async event
+# loop scopes, which avoids "Future attached to a different loop" errors with
+# asyncpg under pytest-asyncio.
+test_engine = create_async_engine(TEST_DATABASE_URL, echo=False, poolclass=NullPool)
 test_session_maker = async_sessionmaker(
     test_engine, class_=AsyncSession, expire_on_commit=False
 )

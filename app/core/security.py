@@ -132,6 +132,16 @@ def generate_anonymous_voter_hash(ip: str, user_agent: str, election_id: UUID) -
     ).hexdigest()
 
 
+def generate_whatsapp_voter_hash(phone: str, election_id: UUID) -> str:
+    """Voter hash for WhatsApp voters, keyed by phone number. Phone is never stored."""
+    message = f"whatsapp:{phone}:{election_id}"
+    return hmac.new(
+        settings.HMAC_SECRET_KEY.encode(),
+        message.encode(),
+        hashlib.sha256,
+    ).hexdigest()
+
+
 # Vote signing
 def sign_vote(vote_data: bytes, cast_at: str) -> str:
     message = vote_data + cast_at.encode()

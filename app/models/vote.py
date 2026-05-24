@@ -2,7 +2,7 @@ import uuid
 from datetime import datetime
 from typing import TYPE_CHECKING
 
-from sqlalchemy import DateTime, ForeignKey, LargeBinary, String, UniqueConstraint, func
+from sqlalchemy import DateTime, ForeignKey, Integer, LargeBinary, String, UniqueConstraint, func
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -29,6 +29,7 @@ class Vote(Base):
     voter_hash: Mapped[str] = mapped_column(String(64), nullable=False)
     vote_data: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
     vote_signature: Mapped[str] = mapped_column(String(128), nullable=False)
+    count: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
     cast_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now()
     )

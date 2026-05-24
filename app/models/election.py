@@ -49,6 +49,7 @@ class Election(TimestampMixin, Base):
     enable_notifications: Mapped[bool] = mapped_column(Boolean, default=True)
     max_selections: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
     allow_revoting: Mapped[bool] = mapped_column(Boolean, default=False)
+    vote_price: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
     settings_extra: Mapped[Optional[dict]] = mapped_column(JSONB, nullable=True)
 
     # Relationships

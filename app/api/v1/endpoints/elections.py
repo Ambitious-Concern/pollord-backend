@@ -15,6 +15,7 @@ from app.db.base import get_db
 from app.models.audit_log import AuditLog
 from app.models.election import Candidate, CandidateAccessOTP, Election, EligibleVoter
 from app.models.organization import Organization
+from app.models.platform_setting import PlatformSetting
 from app.models.user import User
 from app.repositories.audit_log_repository import AuditLogRepository
 from app.repositories.election_repository import CandidateRepository, ElectionRepository
@@ -60,19 +61,51 @@ SETTINGS_FIELDS = (
     "randomize_candidate_order",
     "enable_notifications",
     "max_selections",
+    "allow_revoting",
+    "vote_price",
 )
 
 
 def _extract_settings(data) -> dict:
     """Extract settings fields from an ElectionCreate/Update payload."""
     result = {}
-    settings = getattr(data, "settings", None)
-    if settings:
+    s = getattr(data, "settings", None)
+    if s:
         for field in SETTINGS_FIELDS:
-            val = getattr(settings, field, None)
+            val = getattr(s, field, None)
             if val is not None:
                 result[field] = val
     return result
+
+
+async def _get_global_vote_price(db: AsyncSession) -> int:
+    from sqlalchemy import select
+    result = await db.execute(
+        select(PlatformSetting).where(PlatformSetting.key == "vote_price")
+    )
+    row = result.scalar_one_or_none()
+    if row:
+        try:
+            return int(row.value)
+        except (ValueError, TypeError):
+            pass
+    return settings.VOTE_PRICE
+
+
+async def _validate_vote_price(data, db: AsyncSession) -> None:
+    """Raise if a per-election vote_price is set below the global platform price."""
+    s = getattr(data, "settings", None)
+    if not s:
+        return
+    price = getattr(s, "vote_price", None)
+    if price is None:
+        return
+    global_price = await _get_global_vote_price(db)
+    if price < global_price:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Vote price (₵{price / 100:.2f}) cannot be less than the global platform price (₵{global_price / 100:.2f})",
+        )
 
 
 # =========================================================================
@@ -172,6 +205,8 @@ async def create_election(
     election_repo = ElectionRepository(Election, db)
     audit_repo = AuditLogRepository(AuditLog, db)
 
+    await _validate_vote_price(data, db)
+
     create_data = {
         "title": data.title,
         "description": data.description,
@@ -270,6 +305,8 @@ async def update_election(
             status_code=400,
             detail="Cannot modify election after voting has started",
         )
+
+    await _validate_vote_price(data, db)
 
     update_data = data.model_dump(exclude_unset=True, exclude={"settings"})
     update_data.update(_extract_settings(data))

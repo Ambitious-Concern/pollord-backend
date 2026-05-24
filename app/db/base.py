@@ -9,6 +9,7 @@ engine = create_async_engine(
     echo=settings.DEBUG,
     pool_size=20,
     max_overflow=10,
+    connect_args={"server_settings": {"search_path": "public"}},
 )
 
 async_session_maker = async_sessionmaker(

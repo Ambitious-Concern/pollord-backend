@@ -148,6 +148,7 @@ class VotingService:
                 "voter_hash": voter_hash,
                 "vote_data": encrypted,
                 "vote_signature": signature,
+                "count": 1,
             }
         )
 
@@ -256,12 +257,13 @@ class VotingService:
         candidate_counts: dict[UUID, int] = {}
 
         for vote in votes:
+            weight = getattr(vote, "count", 1)
             decrypted = self.crypto.decrypt_vote_data(vote.vote_data)
             for cid_str in decrypted.get("candidate_ids", []):
                 cid = UUID(cid_str)
-                candidate_counts[cid] = candidate_counts.get(cid, 0) + 1
+                candidate_counts[cid] = candidate_counts.get(cid, 0) + weight
 
-        total_votes = len(votes)
+        total_votes = sum(getattr(v, "count", 1) for v in votes)
         total_eligible = await self.election_repo.count_eligible_voters(election_id)
 
         results = []
@@ -310,12 +312,13 @@ class VotingService:
         candidate_counts: dict[UUID, int] = {}
 
         for vote in votes:
+            weight = getattr(vote, "count", 1)
             decrypted = self.crypto.decrypt_vote_data(vote.vote_data)
             for cid_str in decrypted.get("candidate_ids", []):
                 cid = UUID(cid_str)
-                candidate_counts[cid] = candidate_counts.get(cid, 0) + 1
+                candidate_counts[cid] = candidate_counts.get(cid, 0) + weight
 
-        total_votes = len(votes)
+        total_votes = sum(getattr(v, "count", 1) for v in votes)
         total_eligible = await self.election_repo.count_eligible_voters(election_id)
 
         results = []

@@ -53,6 +53,18 @@ class ElectionSettings(BaseModel):
     enable_notifications: bool = True
     max_selections: Optional[int] = None
     allow_revoting: bool = False
+    vote_price: Optional[int] = None  # pesewas; None = inherit global platform price
+
+    @field_validator("vote_price")
+    @classmethod
+    def validate_vote_price(cls, v: Optional[int]) -> Optional[int]:
+        if v is None:
+            return v
+        if v < 100:
+            raise ValueError("Vote price must be at least 100 pesewas (₵1)")
+        if v % 100 != 0:
+            raise ValueError("Vote price must be a multiple of 100 pesewas")
+        return v
 
     @field_validator("visibility")
     @classmethod
@@ -130,6 +142,7 @@ class ElectionResponse(BaseModel):
     enable_notifications: bool = True
     max_selections: Optional[int] = None
     allow_revoting: bool = False
+    vote_price: Optional[int] = None  # None means election uses the global platform price
 
 
 class ElectionPublicResponse(BaseModel):
@@ -151,6 +164,7 @@ class ElectionPublicResponse(BaseModel):
 
 class ElectionWithCandidates(ElectionResponse):
     candidates: List[CandidateResponse] = []
+    effective_vote_price: int = 100  # resolved price (global or per-election), always set
 
 
 # --- Eligible Voter schemas ---

@@ -5,6 +5,7 @@ from app.models.event import Event, TicketType
 from app.models.ticket import Ticket, TicketPurchase
 from app.models.audit_log import AuditLog
 from app.models.organization import Organization, OrganizationMember
+from app.models.transaction import Transaction
 
 __all__ = [
     "User",
@@ -22,4 +23,5 @@ __all__ = [
     "AuditLog",
     "Organization",
     "OrganizationMember",
+    "Transaction",
 ]

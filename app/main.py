@@ -28,7 +28,6 @@ logger = logging.getLogger(__name__)
 async def lifespan(app: FastAPI):
     # Startup
     logger.info("Starting Pollard API...")
-    # Ensure upload directory exists
     Path(settings.UPLOAD_DIR).mkdir(parents=True, exist_ok=True)
     from app.db.init_db import init_db
     await init_db()
@@ -36,6 +35,8 @@ async def lifespan(app: FastAPI):
     yield
     # Shutdown
     logger.info("Shutting down Pollard API...")
+    from app.core.redis import close_redis
+    await close_redis()
 
 
 app = FastAPI(

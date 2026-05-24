@@ -50,6 +50,23 @@ class OrganizationMemberInvite(BaseModel):
 router = APIRouter(prefix="/organizations", tags=["Organizations"])
 
 
+class OrganizationPublicResponse(BaseModel):
+    """Subset of org data safe to expose without authentication."""
+    org_id: UUID
+    name: str
+    description: Optional[str] = None
+    logo_url: Optional[str] = None
+    website: Optional[str] = None
+    address: Optional[str] = None
+    phone: Optional[str] = None
+    email: Optional[str] = None
+    industry: Optional[str] = None
+    is_verified: bool
+    owner_id: UUID
+    created_at: datetime
+    member_count: int
+
+
 def _member_to_response(m: OrganizationMember) -> OrganizationMemberResponse:
     return OrganizationMemberResponse(
         member_id=m.member_id,
@@ -127,6 +144,70 @@ async def list_my_organizations(
     repo = OrganizationRepository(Organization, db)
     orgs = await repo.get_user_organizations(current_user.user_id)
     return [_org_to_response(o) for o in orgs]
+
+
+# --- Public org info by owner user_id (no auth required) ---
+# The public share URL uses /:userId/explore where userId is the owner's user_id.
+
+
+@router.get("/owner/{user_id}", response_model=OrganizationPublicResponse)
+async def get_org_by_owner(
+    user_id: UUID,
+    db: AsyncSession = Depends(get_db),
+):
+    """Return the organization owned by a specific user. No auth required."""
+    repo = OrganizationRepository(Organization, db)
+    orgs = await repo.get_by_owner(user_id)
+    if not orgs:
+        raise HTTPException(status_code=404, detail="Organization not found for this user")
+    org = orgs[0]
+
+    return OrganizationPublicResponse(
+        org_id=org.org_id,
+        name=org.name,
+        description=org.description,
+        logo_url=org.logo_url,
+        website=org.website,
+        address=org.address,
+        phone=org.phone,
+        email=org.email,
+        industry=org.industry,
+        is_verified=org.is_verified,
+        owner_id=org.owner_id,
+        created_at=org.created_at,
+        member_count=len(org.members or []),
+    )
+
+
+# --- Public org info by org_id (no auth required) ---
+
+
+@router.get("/public/{org_id}", response_model=OrganizationPublicResponse)
+async def get_public_organization(
+    org_id: UUID,
+    db: AsyncSession = Depends(get_db),
+):
+    """Return basic organization info by org_id publicly."""
+    repo = OrganizationRepository(Organization, db)
+    org = await repo.get_with_members(org_id)
+    if not org:
+        raise HTTPException(status_code=404, detail="Organization not found")
+
+    return OrganizationPublicResponse(
+        org_id=org.org_id,
+        name=org.name,
+        description=org.description,
+        logo_url=org.logo_url,
+        website=org.website,
+        address=org.address,
+        phone=org.phone,
+        email=org.email,
+        industry=org.industry,
+        is_verified=org.is_verified,
+        owner_id=org.owner_id,
+        created_at=org.created_at,
+        member_count=len(org.members or []),
+    )
 
 
 # --- Get single organization ---

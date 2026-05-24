@@ -37,6 +37,20 @@ def _require_event_ownership(event, current_user: User) -> None:
         raise HTTPException(status_code=403, detail="You do not have access to this event")
 
 
+@router.get("/user/{user_id}", response_model=List[EventResponse])
+async def list_user_public_events(
+    user_id: UUID,
+    db: AsyncSession = Depends(get_db),
+    skip: int = 0,
+    limit: int = 50,
+):
+    """List published events by a specific user. No auth required."""
+    event_repo = EventRepository(Event, db)
+    events = await event_repo.get_events_by_creator(user_id, skip=skip, limit=limit)
+    public = [e for e in events if e.status == "published"]
+    return [EventResponse.model_validate(e) for e in public]
+
+
 @router.post("/", response_model=EventResponse, status_code=201)
 async def create_event(
     data: EventCreate,
