@@ -1,5 +1,37 @@
 services:
-  pollord-backend:
+  db:
+    image: postgres:15-alpine
+    container_name: pollord-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    networks:
+      - pollord-network
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  redis:
+    image: redis:7-alpine
+    container_name: pollord-redis
+    restart: unless-stopped
+    volumes:
+      - redis_data:/data
+    networks:
+      - pollord-network
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  app:
     image: ${REGISTRY}/${IMAGE_NAME}:${IMAGE_TAG:-latest}
     container_name: pollord-backend
     restart: unless-stopped
@@ -7,6 +39,11 @@ services:
       - "8000:8000"
     env_file:
       - .env
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
     networks:
       - pollord-network
     logging:
@@ -14,6 +51,10 @@ services:
       options:
         max-size: "10m"
         max-file: "3"
+
+volumes:
+  postgres_data:
+  redis_data:
 
 networks:
   pollord-network:
