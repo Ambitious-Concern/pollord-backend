@@ -11,7 +11,7 @@ class Settings(BaseSettings):
     APP_NAME: str = "Pollard API"
     APP_VERSION: str = "1.0.0"
     DEBUG: bool = False
-    FRONTEND_URL: str = "http://localhost:3000"
+    FRONTEND_URL: str = "http://localhost:5021"
 
     # Database
     DATABASE_URL: str = "postgresql+asyncpg://pollard:pollard@db:5432/pollard"
@@ -56,7 +56,7 @@ class Settings(BaseSettings):
     UPLOAD_DIR: str = "./uploads"
 
     # CORS
-    CORS_ORIGINS: str = '["http://localhost:3000","http://localhost:3001","http://localhost:8080"]'
+    CORS_ORIGINS: str = '["http://localhost:5021","http://localhost:3001","http://localhost:8080"]'
 
     # WhatsApp (Meta Cloud API)
     WHATSAPP_ACCESS_TOKEN: str = ""
