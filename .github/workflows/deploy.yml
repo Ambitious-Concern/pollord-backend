@@ -17,6 +17,8 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
+        with:
+              token: ${{ secrets.GH_PAT }}
 
       - name: Lowercase image name
         run: echo "IMAGE_NAME=$(echo '${{ env.IMAGE_NAME }}' | tr '[:upper:]' '[:lower:]')" >> $GITHUB_ENV
@@ -50,6 +52,8 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
+        with:
+              token: ${{ secrets.GH_PAT }}
 
       - name: Configure SSH
         run: |
