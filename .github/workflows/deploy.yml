@@ -82,6 +82,8 @@ jobs:
             export IMAGE_NAME=${IMAGE_NAME_LOWER}
             export IMAGE_TAG=latest
             docker compose -f docker-compose.prod.yml pull
-            docker compose -f docker-compose.prod.yml up -d --force-recreate --remove-orphans
+            docker compose -f docker-compose.prod.yml up -d --force-recreate --remove-orphans --pull always
             docker image prune -f
+            echo "Deployed image:"
+            docker inspect pollord-backend --format='{{.Config.Image}} ({{.Id}})'
           "
