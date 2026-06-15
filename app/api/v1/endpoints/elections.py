@@ -196,7 +196,7 @@ async def list_user_public_elections(
 # =========================================================================
 
 
-@router.post("/", response_model=ElectionResponse, status_code=201)
+@router.post("", response_model=ElectionResponse, status_code=201)
 async def create_election(
     data: ElectionCreate,
     current_user: User = Depends(require_roles(*ADMIN_ROLES)),
@@ -230,7 +230,7 @@ async def create_election(
     return ElectionResponse.model_validate(election)
 
 
-@router.get("/", response_model=List[ElectionResponse])
+@router.get("", response_model=List[ElectionResponse])
 async def list_elections(
     db: AsyncSession = Depends(get_db),
     skip: int = 0,

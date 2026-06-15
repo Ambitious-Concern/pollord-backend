@@ -51,7 +51,7 @@ async def list_user_public_events(
     return [EventResponse.model_validate(e) for e in public]
 
 
-@router.post("/", response_model=EventResponse, status_code=201)
+@router.post("", response_model=EventResponse, status_code=201)
 async def create_event(
     data: EventCreate,
     current_user: User = Depends(require_roles(*ORGANIZER_ROLES)),
@@ -74,7 +74,7 @@ async def create_event(
     return EventResponse.model_validate(event)
 
 
-@router.get("/", response_model=List[EventResponse])
+@router.get("", response_model=List[EventResponse])
 async def list_events(
     db: AsyncSession = Depends(get_db),
     skip: int = 0,

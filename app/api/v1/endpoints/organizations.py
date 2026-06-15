@@ -101,7 +101,7 @@ def _org_to_response(org: Organization) -> OrganizationResponse:
 # --- KYC: Create organization ---
 
 
-@router.post("/", response_model=OrganizationResponse, status_code=201)
+@router.post("", response_model=OrganizationResponse, status_code=201)
 async def create_organization(
     data: OrganizationCreate,
     current_user: User = Depends(get_current_active_user),
