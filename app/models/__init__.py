@@ -6,6 +6,7 @@ from app.models.ticket import Ticket, TicketPurchase
 from app.models.audit_log import AuditLog
 from app.models.organization import Organization, OrganizationMember
 from app.models.transaction import Transaction
+from app.models.platform_setting import PlatformSetting
 
 __all__ = [
     "User",
@@ -24,4 +25,5 @@ __all__ = [
     "Organization",
     "OrganizationMember",
     "Transaction",
+    "PlatformSetting",
 ]

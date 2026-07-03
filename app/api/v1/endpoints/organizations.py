@@ -1,5 +1,3 @@
-import os
-import uuid as uuid_lib
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import List, Optional
@@ -27,6 +25,7 @@ from app.schemas.organization import (
     OrganizationUpdate,
 )
 from app.services import email_service
+from app.services.file_storage_service import file_storage_service
 
 # System roles granted to org owners and admins so they can create elections/events
 ORG_ADMIN_SYSTEM_ROLES = ["Election Administrator", "Event Organizer"]
@@ -91,6 +90,8 @@ def _org_to_response(org: Organization) -> OrganizationResponse:
         email=org.email,
         industry=org.industry,
         is_verified=org.is_verified,
+        kyc_document_front=org.kyc_document_front,
+        kyc_document_back=org.kyc_document_back,
         owner_id=org.owner_id,
         created_at=org.created_at,
         updated_at=org.updated_at,
@@ -110,9 +111,15 @@ async def create_organization(
     """Create an organization (KYC step). The user becomes the owner."""
     repo = OrganizationRepository(Organization, db)
 
+    payload = data.model_dump()
+    # If the client sent the logo as a base64 data URI, upload it and store the URL.
+    payload["logo_url"] = await file_storage_service.resolve(
+        payload.get("logo_url"), filename_hint="logo"
+    )
+
     org = await repo.create(
         {
-            **data.model_dump(),
+            **payload,
             "owner_id": current_user.user_id,
         }
     )
@@ -252,9 +259,14 @@ async def update_organization(
     if not member or member.role not in ("owner", "admin"):
         raise HTTPException(status_code=403, detail="Insufficient permissions")
 
-    updated = await repo.update(
-        org_id, data.model_dump(exclude_unset=True), id_field="org_id"
-    )
+    update_data = data.model_dump(exclude_unset=True)
+    # Convert a base64 logo data URI to a stored URL before persisting.
+    if "logo_url" in update_data:
+        update_data["logo_url"] = await file_storage_service.resolve(
+            update_data["logo_url"], filename_hint="logo"
+        )
+
+    updated = await repo.update(org_id, update_data, id_field="org_id")
     org = await repo.get_with_members(org_id)
     return _org_to_response(org)
 
@@ -573,7 +585,46 @@ async def remove_member(
 # --- KYC document upload ---
 
 ALLOWED_EXTENSIONS = {".jpg", ".jpeg", ".png", ".pdf"}
-MAX_FILE_SIZE = 5 * 1024 * 1024  # 5 MB
+MAX_FILE_SIZE = 100 * 1024 * 1024  # 100 MB
+ALLOWED_IMAGE_TYPES = {".jpg", ".jpeg", ".png", ".webp"}
+
+
+@router.post("/{org_id}/logo/upload", response_model=OrganizationResponse)
+async def upload_organization_logo(
+    org_id: UUID,
+    file: UploadFile = File(...),
+    current_user: User = Depends(get_current_active_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Upload an organization logo and persist its download URL."""
+    repo = OrganizationRepository(Organization, db)
+    org = await repo.get_with_members(org_id)
+    if not org:
+        raise HTTPException(status_code=404, detail="Organization not found")
+
+    if org.owner_id != current_user.user_id:
+        raise HTTPException(status_code=403, detail="Only the organization owner can upload a logo")
+
+    ext = Path(file.filename or "").suffix.lower()
+    if ext not in ALLOWED_IMAGE_TYPES:
+        raise HTTPException(
+            status_code=400,
+            detail="Unsupported file type. Allowed: JPG, PNG, WEBP",
+        )
+
+    content = await file.read()
+    if len(content) > MAX_FILE_SIZE:
+        raise HTTPException(status_code=400, detail="Image must be under 100 MB")
+
+    logo_url = await file_storage_service.upload(
+        content=content,
+        filename=file.filename or f"logo{ext}",
+        content_type=file.content_type,
+    )
+
+    await repo.update(org_id, {"logo_url": logo_url}, id_field="org_id")
+    org = await repo.get_with_members(org_id)
+    return _org_to_response(org)
 
 
 @router.post("/{org_id}/upload-documents", response_model=OrganizationResponse)
@@ -593,8 +644,8 @@ async def upload_kyc_documents(
     if org.owner_id != current_user.user_id:
         raise HTTPException(status_code=403, detail="Only the organization owner can upload documents")
 
-    # Validate file types and sizes
-    for upload in (front, back):
+    # Validate file types and sizes, then upload to the file-storage service
+    async def _upload(upload: UploadFile, label: str) -> str:
         ext = Path(upload.filename or "").suffix.lower()
         if ext not in ALLOWED_EXTENSIONS:
             raise HTTPException(
@@ -603,23 +654,15 @@ async def upload_kyc_documents(
             )
         content = await upload.read()
         if len(content) > MAX_FILE_SIZE:
-            raise HTTPException(status_code=400, detail=f"File '{upload.filename}' exceeds 5 MB limit")
-        await upload.seek(0)
+            raise HTTPException(status_code=400, detail=f"File '{upload.filename}' exceeds 100 MB limit")
+        return await file_storage_service.upload(
+            content=content,
+            filename=upload.filename or f"{label}{ext}",
+            content_type=upload.content_type,
+        )
 
-    # Save files to upload directory
-    upload_dir = Path(settings.UPLOAD_DIR) / "kyc" / str(org_id)
-    upload_dir.mkdir(parents=True, exist_ok=True)
-
-    async def _save(upload: UploadFile, label: str) -> str:
-        ext = Path(upload.filename or "file").suffix.lower()
-        filename = f"{label}_{uuid_lib.uuid4().hex}{ext}"
-        dest = upload_dir / filename
-        content = await upload.read()
-        dest.write_bytes(content)
-        return f"/uploads/kyc/{org_id}/{filename}"
-
-    front_path = await _save(front, "front")
-    back_path = await _save(back, "back")
+    front_path = await _upload(front, "front")
+    back_path = await _upload(back, "back")
 
     await repo.update(
         org_id,
