@@ -93,19 +93,21 @@ async def _get_global_vote_price(db: AsyncSession) -> int:
     return settings.VOTE_PRICE
 
 
+MIN_VOTE_PRICE = 50  # pesewas (₵0.50); custom prices must be a multiple of this
+
+
 async def _validate_vote_price(data, db: AsyncSession) -> None:
-    """Raise if a per-election vote_price is set below the global platform price."""
+    """Raise if a per-election vote_price is below the ₵0.50 minimum or not a ₵0.50 multiple."""
     s = getattr(data, "settings", None)
     if not s:
         return
     price = getattr(s, "vote_price", None)
     if price is None:
         return
-    global_price = await _get_global_vote_price(db)
-    if price < global_price:
+    if price < MIN_VOTE_PRICE or price % MIN_VOTE_PRICE != 0:
         raise HTTPException(
             status_code=400,
-            detail=f"Vote price (₵{price / 100:.2f}) cannot be less than the global platform price (₵{global_price / 100:.2f})",
+            detail="Vote price must be at least ₵0.50 and a multiple of ₵0.50",
         )
 
 

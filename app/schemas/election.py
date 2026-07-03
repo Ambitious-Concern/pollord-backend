@@ -60,10 +60,10 @@ class ElectionSettings(BaseModel):
     def validate_vote_price(cls, v: Optional[int]) -> Optional[int]:
         if v is None:
             return v
-        if v < 100:
-            raise ValueError("Vote price must be at least 100 pesewas (₵1)")
-        if v % 100 != 0:
-            raise ValueError("Vote price must be a multiple of 100 pesewas")
+        if v < 50:
+            raise ValueError("Vote price must be at least 50 pesewas (₵0.50)")
+        if v % 50 != 0:
+            raise ValueError("Vote price must be a multiple of 50 pesewas (₵0.50)")
         return v
 
     @field_validator("visibility")
