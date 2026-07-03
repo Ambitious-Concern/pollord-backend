@@ -16,8 +16,8 @@ class InitiateVotePaymentRequest(BaseModel):
     @field_validator("amount_pesewas")
     @classmethod
     def validate_amount(cls, v: Optional[int]) -> Optional[int]:
-        if v is not None and v < 100:
-            raise ValueError("Minimum payment is 100 pesewas (₵1)")
+        if v is not None and v < 50:
+            raise ValueError("Minimum payment is 50 pesewas (₵0.50)")
         return v
 
 
