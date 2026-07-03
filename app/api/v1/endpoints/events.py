@@ -1,7 +1,8 @@
+from pathlib import Path
 from typing import List, Optional
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.dependencies import get_current_active_user, require_roles
@@ -11,6 +12,7 @@ from app.models.event import Event, TicketType
 from app.models.user import User
 from app.repositories.audit_log_repository import AuditLogRepository
 from app.repositories.event_repository import EventRepository, TicketTypeRepository
+from app.services.file_storage_service import file_storage_service
 from app.schemas.event import (
     EventCreate,
     EventResponse,
@@ -25,6 +27,9 @@ router = APIRouter(prefix="/events", tags=["Events"])
 
 ORGANIZER_ROLES = ("System Administrator", "Event Organizer")
 SYSTEM_ADMIN = "System Administrator"
+
+ALLOWED_IMAGE_TYPES = {".jpg", ".jpeg", ".png", ".webp"}
+MAX_IMAGE_SIZE = 100 * 1024 * 1024  # 100 MB
 
 
 def _owns_event(event, current_user: User) -> bool:
@@ -134,6 +139,40 @@ async def update_event(
     update_data = data.model_dump(exclude_unset=True)
     updated = await event_repo.update(event_id, update_data, id_field="event_id")
     return EventResponse.model_validate(updated)
+
+
+@router.post("/{event_id}/banner/upload")
+async def upload_event_banner(
+    event_id: UUID,
+    file: UploadFile = File(...),
+    current_user: User = Depends(require_roles(*ORGANIZER_ROLES)),
+    db: AsyncSession = Depends(get_db),
+):
+    """Upload an event banner. Returns { banner_image_url } for use in create/update."""
+    event_repo = EventRepository(Event, db)
+    event = await event_repo.get_by_id(event_id, id_field="event_id")
+    if not event:
+        raise HTTPException(status_code=404, detail="Event not found")
+    _require_event_ownership(event, current_user)
+
+    ext = Path(file.filename or "").suffix.lower()
+    if ext not in ALLOWED_IMAGE_TYPES:
+        raise HTTPException(
+            status_code=400,
+            detail="Unsupported file type. Allowed: JPG, PNG, WEBP",
+        )
+
+    content = await file.read()
+    if len(content) > MAX_IMAGE_SIZE:
+        raise HTTPException(status_code=400, detail="Image must be under 100 MB")
+
+    banner_image_url = await file_storage_service.upload(
+        content=content,
+        filename=file.filename or f"banner{ext}",
+        content_type=file.content_type,
+    )
+
+    return {"banner_image_url": banner_image_url}
 
 
 @router.post("/{event_id}/publish")

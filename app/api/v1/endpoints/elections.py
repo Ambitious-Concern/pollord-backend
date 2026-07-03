@@ -21,6 +21,7 @@ from app.repositories.audit_log_repository import AuditLogRepository
 from app.repositories.election_repository import CandidateRepository, ElectionRepository
 from app.repositories.organization_repository import OrganizationRepository
 from app.services import email_service
+from app.services.file_storage_service import file_storage_service
 from app.schemas.election import (
     CandidateCreate,
     CandidateResponse,
@@ -500,7 +501,7 @@ async def add_candidate(
 
 
 _ALLOWED_IMAGE_TYPES = {".jpg", ".jpeg", ".png", ".webp"}
-_MAX_IMAGE_SIZE = 5 * 1024 * 1024  # 5 MB
+_MAX_IMAGE_SIZE = 100 * 1024 * 1024  # 100 MB
 
 
 @router.post("/{election_id}/candidates/upload-image")
@@ -526,15 +527,49 @@ async def upload_candidate_image(
 
     content = await file.read()
     if len(content) > _MAX_IMAGE_SIZE:
-        raise HTTPException(status_code=400, detail="Image must be under 5 MB")
+        raise HTTPException(status_code=400, detail="Image must be under 100 MB")
 
-    upload_dir = Path(settings.UPLOAD_DIR) / "candidates" / str(election_id)
-    upload_dir.mkdir(parents=True, exist_ok=True)
+    image_url = await file_storage_service.upload(
+        content=content,
+        filename=file.filename or f"candidate{ext}",
+        content_type=file.content_type,
+    )
 
-    filename = f"{uuid_lib.uuid4().hex}{ext}"
-    (upload_dir / filename).write_bytes(content)
+    return {"image_url": image_url}
 
-    return {"image_url": f"/uploads/candidates/{election_id}/{filename}"}
+
+@router.post("/{election_id}/banner/upload")
+async def upload_election_banner(
+    election_id: UUID,
+    file: UploadFile = File(...),
+    current_user: User = Depends(require_roles(*ADMIN_ROLES)),
+    db: AsyncSession = Depends(get_db),
+):
+    """Upload an election banner. Returns { banner_image_url } for use in create/update."""
+    election_repo = ElectionRepository(Election, db)
+    election = await election_repo.get_by_id(election_id, id_field="election_id")
+    if not election:
+        raise HTTPException(status_code=404, detail="Election not found")
+    _require_ownership(election, current_user)
+
+    ext = Path(file.filename or "").suffix.lower()
+    if ext not in _ALLOWED_IMAGE_TYPES:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Unsupported file type. Allowed: JPG, PNG, WEBP",
+        )
+
+    content = await file.read()
+    if len(content) > _MAX_IMAGE_SIZE:
+        raise HTTPException(status_code=400, detail="Image must be under 100 MB")
+
+    banner_image_url = await file_storage_service.upload(
+        content=content,
+        filename=file.filename or f"banner{ext}",
+        content_type=file.content_type,
+    )
+
+    return {"banner_image_url": banner_image_url}
 
 
 @router.get(

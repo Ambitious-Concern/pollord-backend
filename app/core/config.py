@@ -54,6 +54,8 @@ class Settings(BaseSettings):
 
     # File uploads
     UPLOAD_DIR: str = "./uploads"
+    # External file-storage service (uploads return a public download URL)
+    FILE_STORAGE_URL: str = "http://62.171.191.76:7070/file-storage"
 
     # CORS
     CORS_ORIGINS: str = '["http://localhost:5021","http://localhost:3001","http://localhost:8080"]'
