@@ -56,6 +56,10 @@ class Settings(BaseSettings):
     UPLOAD_DIR: str = "./uploads"
     # External file-storage service (uploads return a public download URL)
     FILE_STORAGE_URL: str = "http://62.171.191.76:7070/file-storage"
+    # Public HTTPS base URL of this API. Storage-service download URLs are
+    # rewritten to point here (GET /api/v1/files/...) because the storage
+    # service is plain HTTP and browsers block mixed content on HTTPS pages.
+    PUBLIC_BASE_URL: str = "https://server.pollord.com"
 
     # CORS
     CORS_ORIGINS: str = '["http://localhost:5021","http://localhost:3001","http://localhost:8080"]'

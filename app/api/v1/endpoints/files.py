@@ -7,7 +7,8 @@ storage service server-to-server, returning the same ``fileId``/``downloadUrl``
 shape the storage service returns.
 """
 
-from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
+from fastapi import APIRouter, Depends, File, HTTPException, Path, UploadFile
+from fastapi.responses import Response
 
 from app.core.dependencies import get_current_active_user
 from app.models.user import User
@@ -42,3 +43,26 @@ async def upload_file(
         content_type=file.content_type,
     )
     return body
+
+
+@router.get("/{ext}/{file_id}")
+async def download_file(
+    ext: str = Path(pattern=r"^[A-Za-z0-9]{1,10}$"),
+    file_id: str = Path(pattern=r"^[A-Za-z0-9-]{1,64}$"),
+):
+    """Stream a stored file from the external storage service.
+
+    Public (no auth): these URLs are used directly in ``<img src>`` tags, which
+    cannot send Authorization headers. The storage service is HTTP-only, so
+    serving files through this HTTPS route avoids mixed-content blocking.
+    """
+    content, content_type = await file_storage_service.download(ext, file_id)
+    return Response(
+        content=content,
+        media_type=content_type,
+        headers={
+            "Content-Disposition": "inline",
+            # File IDs are unique per upload, so contents never change.
+            "Cache-Control": "public, max-age=31536000, immutable",
+        },
+    )

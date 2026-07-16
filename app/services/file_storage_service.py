@@ -89,7 +89,46 @@ class FileStorageService:
                 status_code=502,
                 detail="File storage service did not return a download URL",
             )
+        body["downloadUrl"] = self.to_public_url(body["downloadUrl"])
         return body
+
+    def to_public_url(self, download_url: str) -> str:
+        """Rewrite a storage-service download URL to our HTTPS proxy route.
+
+        The storage service is reachable only over plain HTTP, which browsers
+        block as mixed content on HTTPS pages, so clients must fetch files
+        through GET /api/v1/files/{ext}/{file_id} instead.
+        """
+        if download_url.startswith(f"{self._base_url}/"):
+            path = download_url[len(self._base_url):]
+            return f"{settings.PUBLIC_BASE_URL.rstrip('/')}/api/v1/files{path}"
+        return download_url
+
+    async def download(self, ext: str, file_id: str) -> tuple[bytes, str]:
+        """Fetch a stored file, returning ``(content, content_type)``.
+
+        Raises HTTPException(404) if the file does not exist and
+        HTTPException(502) if the storage service is unreachable.
+        """
+        try:
+            async with httpx.AsyncClient() as client:
+                r = await client.get(
+                    f"{self._base_url}/{ext}/{file_id}",
+                    timeout=60.0,
+                )
+        except httpx.HTTPError as exc:
+            raise HTTPException(
+                status_code=502,
+                detail=f"File storage service unreachable: {exc}",
+            )
+        if r.status_code == 404:
+            raise HTTPException(status_code=404, detail="File not found")
+        if r.status_code != 200:
+            raise HTTPException(
+                status_code=502,
+                detail=f"File storage service error (HTTP {r.status_code})",
+            )
+        return r.content, r.headers.get("content-type", "application/octet-stream")
 
     async def upload(
         self,
