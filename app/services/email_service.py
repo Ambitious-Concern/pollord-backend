@@ -232,6 +232,37 @@ def org_invitation_email(
     return subject, _base_template(content, f"Join {org_name} on Pollord")
 
 
+def waitlist_confirmation_email() -> tuple[str, str]:
+    """Return (subject, html_body) confirming a waitlist signup."""
+    subject = "You're on the list — Pollord launches August 13!"
+    content = """
+    <h2>You're on the list! 🎉</h2>
+    <p>Thanks for joining the <span class="highlight">Pollord</span> waitlist.</p>
+    <div class="otp-box">
+      <div style="color:#fff; font-size:20px; font-weight:800;">Launching August 13, 2026</div>
+      <div class="otp-label">Mark your calendar</div>
+    </div>
+    <p>You'll be the first to know the moment we go live — secure elections, event
+    management, and digital ticketing, all in one platform built on transparency.</p>
+    """
+    return subject, _base_template(content, "You're on the Pollord waitlist!")
+
+
+def launch_announcement_email() -> tuple[str, str]:
+    """Return (subject, html_body) announcing that Pollord is live."""
+    subject = "POLLORD is live! 🎉"
+    content = f"""
+    <h2>We're Live! 🎉</h2>
+    <p>The wait is over — <span class="highlight">Pollord</span> is officially live.</p>
+    <p>Run secure elections, manage events, and sell tickets — all from one
+    platform built on transparency. Your account is one click away.</p>
+    <p style="text-align:center; margin:32px 0;">
+      <a href="{settings.FRONTEND_URL}" class="btn">Explore Pollord</a>
+    </p>
+    """
+    return subject, _base_template(content, "Pollord is officially live!")
+
+
 def send_email(to: str, subject: str, html_body: str) -> bool:
     """Send an email via Zoho SMTP with SSL."""
     if not settings.MAIL_PASSWORD:
