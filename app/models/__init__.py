@@ -7,6 +7,7 @@ from app.models.audit_log import AuditLog
 from app.models.organization import Organization, OrganizationMember
 from app.models.transaction import Transaction
 from app.models.platform_setting import PlatformSetting
+from app.models.waitlist import WaitlistSubscriber
 
 __all__ = [
     "User",
@@ -26,4 +27,5 @@ __all__ = [
     "OrganizationMember",
     "Transaction",
     "PlatformSetting",
+    "WaitlistSubscriber",
 ]
