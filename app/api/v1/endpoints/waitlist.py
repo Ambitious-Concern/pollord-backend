@@ -1,15 +1,19 @@
 import logging
 from datetime import datetime, timezone
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Request
 from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.config import settings
 from app.core.dependencies import require_roles
 from app.db.base import get_db
+from app.middleware.rate_limit import limiter
+from app.models.audit_log import AuditLog
 from app.models.user import User
 from app.models.waitlist import WaitlistSubscriber
+from app.repositories.audit_log_repository import AuditLogRepository
 from app.schemas.waitlist import (
     WaitlistAnnounceResponse,
     WaitlistSubscribeRequest,
@@ -29,8 +33,10 @@ ADMIN_ROLE = "System Administrator"
 
 
 @router.post("/subscribe", response_model=WaitlistSubscribeResponse)
+@limiter.limit(settings.RATE_LIMIT_AUTH)
 async def subscribe(
     data: WaitlistSubscribeRequest,
+    request: Request,
     db: AsyncSession = Depends(get_db),
 ):
     email = data.email.strip().lower()
@@ -63,7 +69,9 @@ async def announce(
 ):
     """Send the launch email to every subscriber not yet notified. Re-runnable."""
     result = await db.execute(
-        select(WaitlistSubscriber).where(WaitlistSubscriber.notified_at.is_(None))
+        select(WaitlistSubscriber)
+        .where(WaitlistSubscriber.notified_at.is_(None))
+        .with_for_update(skip_locked=True)
     )
     pending = list(result.scalars().all())
 
@@ -82,6 +90,14 @@ async def announce(
             sent += 1
         else:
             logger.error(f"Launch email failed for {subscriber.email}; left un-notified")
+
+    await AuditLogRepository(AuditLog, db).log_action(
+        action_type="ANNOUNCE_LAUNCH",
+        entity_type="WaitlistSubscriber",
+        user_id=current_user.user_id,
+        changes={"sent": sent, "skipped": skipped},
+    )
+
     await db.commit()
 
     return WaitlistAnnounceResponse(sent=sent, skipped=skipped)
