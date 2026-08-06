@@ -3,6 +3,7 @@ from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends
 from sqlalchemy import func, select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.dependencies import require_roles
@@ -41,7 +42,11 @@ async def subscribe(
         return WaitlistSubscribeResponse(message="You're already on the list!")
 
     db.add(WaitlistSubscriber(email=email))
-    await db.commit()
+    try:
+        await db.commit()
+    except IntegrityError:
+        await db.rollback()
+        return WaitlistSubscribeResponse(message="You're already on the list!")
 
     subject, html = waitlist_confirmation_email()
     send_email(email, subject, html)
