@@ -376,3 +376,87 @@ class TestVerifyAndPurchase:
         )).scalar_one()
         assert general.quantity_available == 5
         assert general.quantity_sold == 0
+
+
+import hashlib
+import hmac
+import json as _json
+
+from app.core.config import settings as app_settings
+
+
+def _sign(body: bytes) -> str:
+    return hmac.new(app_settings.PAYSTACK_SECRET_KEY.encode(), body, hashlib.sha512).hexdigest()
+
+
+@pytest.mark.asyncio
+class TestTicketWebhook:
+    async def test_webhook_charge_success_fulfills_ticket_reference(
+        self, client: AsyncClient, test_user, paid_event_with_tickets, db_session: AsyncSession
+    ):
+        from unittest.mock import patch as _patch
+
+        evt = paid_event_with_tickets
+        with _patch(PAYSTACK_INIT_PATH, new=_init_mock(100_00)):
+            init_resp = await client.post(
+                "/api/v1/tickets/initiate-payment",
+                json={"event_id": str(evt["event"].event_id), "items": [{"ticket_type_id": str(evt["vip"].ticket_type_id), "quantity": 1}]},
+                headers=test_user["headers"],
+            )
+        reference = init_resp.json()["reference"]
+
+        payload = {
+            "event": "charge.success",
+            "data": {"reference": reference, "amount": 100_00, "currency": "GHS"},
+        }
+        body = _json.dumps(payload).encode()
+        sig = _sign(body)
+
+        # The webhook trusts the signed payload's amount/status directly (same
+        # as the existing vote webhook) — it does not call verify_transaction
+        # itself, so no Paystack mock is needed for this call.
+        resp = await client.post(
+            "/api/v1/payments/webhook",
+            content=body,
+            headers={"x-paystack-signature": sig, "Content-Type": "application/json"},
+        )
+        assert resp.status_code == 200
+
+        from sqlalchemy import select
+        from app.models.ticket import Ticket
+        tickets = (await db_session.execute(
+            select(Ticket).where(Ticket.event_id == evt["event"].event_id)
+        )).scalars().all()
+        assert len(tickets) == 1
+
+    async def test_webhook_charge_failed_marks_ticket_transaction_failed(
+        self, client: AsyncClient, test_user, paid_event_with_tickets
+    ):
+        from unittest.mock import patch as _patch
+
+        evt = paid_event_with_tickets
+        with _patch(PAYSTACK_INIT_PATH, new=_init_mock(100_00)):
+            init_resp = await client.post(
+                "/api/v1/tickets/initiate-payment",
+                json={"event_id": str(evt["event"].event_id), "items": [{"ticket_type_id": str(evt["vip"].ticket_type_id), "quantity": 1}]},
+                headers=test_user["headers"],
+            )
+        reference = init_resp.json()["reference"]
+
+        payload = {"event": "charge.failed", "data": {"reference": reference}}
+        body = _json.dumps(payload).encode()
+        sig = _sign(body)
+
+        resp = await client.post(
+            "/api/v1/payments/webhook",
+            content=body,
+            headers={"x-paystack-signature": sig, "Content-Type": "application/json"},
+        )
+        assert resp.status_code == 200
+
+        # verify-and-purchase must now reject this reference as failed
+        with _patch(PAYSTACK_VERIFY_PATH, new=_verify_mock(100_00)):
+            resp2 = await client.post(
+                "/api/v1/tickets/verify-and-purchase", json={"reference": reference}, headers=test_user["headers"],
+            )
+        assert resp2.status_code == 400

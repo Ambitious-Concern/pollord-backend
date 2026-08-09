@@ -116,11 +116,17 @@ class TicketingService:
                     detail=f"Not enough tickets available for '{ticket_type.type_name}'",
                 )
 
-            total_amount += ticket_type.price * item.quantity
+            total_amount += Decimal(str(ticket_type.price)) * item.quantity
             ticket_items.append((ticket_type, item.quantity))
 
+        if total_amount > 0:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="This purchase requires payment — use POST /tickets/initiate-payment instead",
+            )
+
         # 3. Create purchase record
-        payment_status = "completed" if total_amount == 0 else "completed"
+        payment_status = "completed"
         purchase = await self.purchase_repo.create(
             {
                 "user_id": user_id,
