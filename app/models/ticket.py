@@ -3,7 +3,7 @@ from datetime import datetime
 from decimal import Decimal
 from typing import TYPE_CHECKING, Optional
 
-from sqlalchemy import DateTime, ForeignKey, Numeric, String, Text, func
+from sqlalchemy import CheckConstraint, DateTime, ForeignKey, Numeric, String, Text, func
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -16,6 +16,12 @@ if TYPE_CHECKING:
 
 class Ticket(Base):
     __tablename__ = "tickets"
+    __table_args__ = (
+        CheckConstraint(
+            "user_id IS NOT NULL OR guest_email IS NOT NULL",
+            name="ck_tickets_owner_present",
+        ),
+    )
 
     ticket_id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
@@ -29,9 +35,14 @@ class Ticket(Base):
     ticket_type_id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), ForeignKey("ticket_types.ticket_type_id"), nullable=False
     )
-    user_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("users.user_id"), nullable=False, index=True
+    user_id: Mapped[Optional[uuid.UUID]] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("users.user_id"), nullable=True, index=True
     )
+    # Guest (unauthenticated) purchaser identity — populated instead of user_id
+    # when a ticket is bought without an account.
+    guest_name: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    guest_email: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    guest_phone: Mapped[Optional[str]] = mapped_column(String(50), nullable=True)
     purchase_id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), ForeignKey("ticket_purchases.purchase_id"), nullable=False
     )
@@ -54,7 +65,7 @@ class Ticket(Base):
     ticket_type: Mapped["TicketType"] = relationship(
         back_populates="tickets", lazy="selectin"
     )
-    user: Mapped["User"] = relationship(
+    user: Mapped[Optional["User"]] = relationship(
         back_populates="tickets", foreign_keys=[user_id], lazy="select"
     )
     purchase: Mapped["TicketPurchase"] = relationship(
@@ -64,13 +75,22 @@ class Ticket(Base):
 
 class TicketPurchase(Base):
     __tablename__ = "ticket_purchases"
+    __table_args__ = (
+        CheckConstraint(
+            "user_id IS NOT NULL OR guest_email IS NOT NULL",
+            name="ck_ticket_purchases_owner_present",
+        ),
+    )
 
     purchase_id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
     )
-    user_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("users.user_id"), nullable=False
+    user_id: Mapped[Optional[uuid.UUID]] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("users.user_id"), nullable=True
     )
+    guest_name: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    guest_email: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    guest_phone: Mapped[Optional[str]] = mapped_column(String(50), nullable=True)
     event_id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), ForeignKey("events.event_id"), nullable=False
     )
@@ -85,7 +105,7 @@ class TicketPurchase(Base):
     )
 
     # Relationships
-    user: Mapped["User"] = relationship(
+    user: Mapped[Optional["User"]] = relationship(
         back_populates="purchases", lazy="select"
     )
     event: Mapped["Event"] = relationship(

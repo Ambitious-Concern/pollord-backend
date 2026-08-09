@@ -3,7 +3,7 @@ from decimal import Decimal
 from typing import List, Optional
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, field_validator
+from pydantic import BaseModel, ConfigDict, EmailStr, field_serializer, field_validator
 
 
 class TicketPurchaseItem(BaseModel):
@@ -30,6 +30,40 @@ class TicketPurchaseRequest(BaseModel):
         return v
 
 
+class GuestTicketPurchaseRequest(TicketPurchaseRequest):
+    """Same shape as TicketPurchaseRequest, plus the guest's identity —
+    used by the /tickets/public/* endpoints in place of a Bearer token."""
+
+    guest_name: str
+    guest_email: EmailStr
+    guest_phone: Optional[str] = None
+
+    @field_validator("guest_name")
+    @classmethod
+    def validate_guest_name(cls, v: str) -> str:
+        if not v.strip():
+            raise ValueError("Name is required")
+        return v.strip()
+
+
+class TicketPaymentInitResponse(BaseModel):
+    reference: str
+    access_code: str
+    public_key: str
+    amount: Decimal
+    currency: str
+
+    @field_serializer("amount")
+    def _serialize_amount(self, v: Decimal, _info) -> float:
+        # Pydantic v2 serializes Decimal as a string in JSON mode by default;
+        # the frontend/tests expect a plain JSON number here.
+        return float(v)
+
+
+class VerifyAndPurchaseRequest(BaseModel):
+    reference: str
+
+
 class TicketResponse(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
@@ -40,6 +74,9 @@ class TicketResponse(BaseModel):
     ticket_status: str
     purchase_date: datetime
     used_at: Optional[datetime] = None
+    # Only set for guest (unauthenticated) purchases — lets the frontend build
+    # a no-auth PDF download link right after purchase.
+    download_token: Optional[str] = None
 
 
 class TicketDetailResponse(TicketResponse):

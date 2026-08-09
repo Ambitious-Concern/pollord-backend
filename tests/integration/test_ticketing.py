@@ -112,3 +112,45 @@ class TestTicketPurchase:
         )
         assert response.status_code == 200
         assert len(response.json()) >= 1
+
+    async def test_purchase_sends_confirmation_email(
+        self, client: AsyncClient, test_user, published_event_with_tickets
+    ):
+        from unittest.mock import patch
+
+        evt = published_event_with_tickets
+        with patch("app.services.ticketing_service.send_email", return_value=True) as mock_send:
+            response = await client.post(
+                "/api/v1/tickets/purchase",
+                json={
+                    "event_id": str(evt["event"].event_id),
+                    "items": [
+                        {
+                            "ticket_type_id": str(evt["general"].ticket_type_id),
+                            "quantity": 2,
+                        }
+                    ],
+                },
+                headers=test_user["headers"],
+            )
+        assert response.status_code == 201
+        mock_send.assert_called_once()
+        call_args = mock_send.call_args[0]
+        assert call_args[0] == test_user["user"].email
+        assert "Ticket Test Event" in call_args[1] or "Ticket Test Event" in call_args[2]
+
+    async def test_purchase_rejects_priced_ticket(
+        self, client: AsyncClient, test_user, published_event_with_tickets
+    ):
+        """VIP ticket type (price=100.00) must not be purchasable via the free endpoint."""
+        evt = published_event_with_tickets
+        response = await client.post(
+            "/api/v1/tickets/purchase",
+            json={
+                "event_id": str(evt["event"].event_id),
+                "items": [{"ticket_type_id": str(evt["vip"].ticket_type_id), "quantity": 1}],
+            },
+            headers=test_user["headers"],
+        )
+        assert response.status_code == 400
+        assert "initiate-payment" in response.text.lower() or "payment" in response.text.lower()
