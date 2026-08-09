@@ -40,7 +40,7 @@ async def get_launch_status(db: AsyncSession = Depends(get_db)):
     )
     celebration_window_minutes = (
         int(celebration_window_value)
-        if celebration_window_value is not None
+        if celebration_window_value
         else DEFAULT_CELEBRATION_WINDOW_MINUTES
     )
 

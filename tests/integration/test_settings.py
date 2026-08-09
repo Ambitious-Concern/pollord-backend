@@ -119,6 +119,23 @@ class TestAdminLaunchSettings:
         get_after = await client.get(ADMIN_SETTINGS_URL, headers=admin_user["headers"])
         assert get_after.json()["celebration_window_minutes"] == 10
 
+    async def test_celebration_window_zero_is_valid(self, client: AsyncClient, admin_user):
+        # 0 is explicitly allowed by the validator and means "never celebrate"
+        # in the frontend's shouldCelebrate() — not "celebrate at the exact
+        # launch instant." This test only locks in that 0 is accepted by the
+        # API; the "never celebrates" semantics live in the frontend and
+        # aren't testable from this backend suite.
+        put_response = await client.put(
+            ADMIN_SETTINGS_URL,
+            json={"celebration_window_minutes": 0},
+            headers=admin_user["headers"],
+        )
+        assert put_response.status_code == 200
+        assert put_response.json()["celebration_window_minutes"] == 0
+
+        get_response = await client.get(ADMIN_SETTINGS_URL, headers=admin_user["headers"])
+        assert get_response.json()["celebration_window_minutes"] == 0
+
     async def test_celebration_window_rejects_negative(
         self, client: AsyncClient, admin_user
     ):
