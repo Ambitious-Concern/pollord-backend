@@ -1,4 +1,4 @@
-from datetime import date, datetime
+from datetime import date, datetime, timezone
 from decimal import Decimal
 from typing import List, Optional
 from uuid import UUID
@@ -432,7 +432,10 @@ async def update_platform_settings(
     if data.launch_gate_enabled is not None:
         updates["launch_gate_enabled"] = str(data.launch_gate_enabled).lower()
     if data.launch_at is not None:
-        updates["launch_at"] = data.launch_at.isoformat()
+        dt = data.launch_at
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        updates["launch_at"] = dt.astimezone(timezone.utc).isoformat()
 
     for key, value in updates.items():
         await _set_platform_setting(db, key, value, current_user.user_id)

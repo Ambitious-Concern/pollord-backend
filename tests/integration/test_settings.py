@@ -84,6 +84,23 @@ class TestAdminLaunchSettings:
         assert get_response.json()["launch_gate_enabled"] is False
         assert get_response.json()["launch_at"].startswith("2026-10-15")
 
+    async def test_naive_datetime_is_normalized_to_utc(self, client: AsyncClient, admin_user):
+        # No timezone offset on this input — must be treated as UTC, not
+        # silently stored naive (which would make every client parse it as
+        # their own local time).
+        put_response = await client.put(
+            ADMIN_SETTINGS_URL,
+            json={"launch_at": "2026-11-01T00:00:00"},
+            headers=admin_user["headers"],
+        )
+        assert put_response.status_code == 200
+
+        get_response = await client.get(ADMIN_SETTINGS_URL, headers=admin_user["headers"])
+        assert get_response.status_code == 200
+        launch_at = get_response.json()["launch_at"]
+        assert launch_at.startswith("2026-11-01T00:00:00")
+        assert launch_at.endswith("+00:00") or launch_at.endswith("Z")
+
 
 @pytest.mark.asyncio
 class TestPublicLaunchStatus:
