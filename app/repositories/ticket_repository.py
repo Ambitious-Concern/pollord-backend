@@ -79,6 +79,18 @@ class TicketRepository(BaseRepository[Ticket]):
         )
         return result.scalar_one()
 
+    async def count_guest_tickets_for_type(
+        self, guest_email: str, ticket_type_id: UUID
+    ) -> int:
+        result = await self.session.execute(
+            select(func.count()).select_from(Ticket).where(
+                Ticket.guest_email == guest_email,
+                Ticket.ticket_type_id == ticket_type_id,
+                Ticket.ticket_status != "cancelled",
+            )
+        )
+        return result.scalar_one()
+
 
 class TicketPurchaseRepository(BaseRepository[TicketPurchase]):
     def __init__(self, model, session: AsyncSession):

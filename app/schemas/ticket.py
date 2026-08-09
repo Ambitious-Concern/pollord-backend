@@ -3,7 +3,7 @@ from decimal import Decimal
 from typing import List, Optional
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, field_serializer, field_validator
+from pydantic import BaseModel, ConfigDict, EmailStr, field_serializer, field_validator
 
 
 class TicketPurchaseItem(BaseModel):
@@ -28,6 +28,22 @@ class TicketPurchaseRequest(BaseModel):
         if not v:
             raise ValueError("At least one ticket item is required")
         return v
+
+
+class GuestTicketPurchaseRequest(TicketPurchaseRequest):
+    """Same shape as TicketPurchaseRequest, plus the guest's identity —
+    used by the /tickets/public/* endpoints in place of a Bearer token."""
+
+    guest_name: str
+    guest_email: EmailStr
+    guest_phone: Optional[str] = None
+
+    @field_validator("guest_name")
+    @classmethod
+    def validate_guest_name(cls, v: str) -> str:
+        if not v.strip():
+            raise ValueError("Name is required")
+        return v.strip()
 
 
 class TicketPaymentInitResponse(BaseModel):
@@ -58,6 +74,9 @@ class TicketResponse(BaseModel):
     ticket_status: str
     purchase_date: datetime
     used_at: Optional[datetime] = None
+    # Only set for guest (unauthenticated) purchases — lets the frontend build
+    # a no-auth PDF download link right after purchase.
+    download_token: Optional[str] = None
 
 
 class TicketDetailResponse(TicketResponse):

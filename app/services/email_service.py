@@ -264,6 +264,30 @@ def ticket_confirmation_email(event_title: str, ticket_count: int) -> tuple[str,
     return subject, html
 
 
+def guest_ticket_confirmation_email(
+    event_title: str, ticket_count: int, download_links: list[str]
+) -> tuple[str, str]:
+    """Confirmation for a guest (no account) purchase — links straight to each
+    ticket's PDF instead of a My Tickets page they can't sign in to see."""
+    subject = f"Ticket Confirmation — {event_title}"
+    buttons = "".join(
+        f'<p style="text-align:center; margin:12px 0;">'
+        f'<a href="{link}" class="btn">Download Ticket {i + 1}</a></p>'
+        for i, link in enumerate(download_links)
+    )
+    content = f"""
+    <h2>Ticket Confirmation</h2>
+    <p>You have successfully purchased <strong>{ticket_count} ticket(s)</strong> for:</p>
+    <div class="otp-box">
+      <div style="color:#fff; font-size:20px; font-weight:800;">{event_title}</div>
+    </div>
+    {buttons}
+    <p style="font-size:13px; color:rgba(255,255,255,0.4);">Keep this email — these links are how you'll re-download your ticket(s).</p>
+    """
+    html = _base_template(content, f"{ticket_count} ticket(s) confirmed for {event_title}")
+    return subject, html
+
+
 def launch_announcement_email() -> tuple[str, str]:
     """Return (subject, html_body) announcing that Pollord is live."""
     subject = "POLLORD is live! 🎉"
