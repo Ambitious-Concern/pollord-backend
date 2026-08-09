@@ -1,4 +1,4 @@
-from datetime import date, datetime
+from datetime import date, datetime, timezone
 from decimal import Decimal
 from typing import List, Optional
 from uuid import UUID
@@ -294,6 +294,9 @@ PLATFORM_SETTING_DEFAULTS: dict[str, str] = {
     "maintenance_message": "The platform is currently under maintenance. Please check back later.",
     "email_notifications_enabled": "true",
     "whatsapp_notifications_enabled": "true",
+    "launch_gate_enabled": "true",
+    "launch_at": "2026-08-13T00:00:00+00:00",
+    "celebration_window_minutes": "10080",
 }
 
 
@@ -309,6 +312,9 @@ class PlatformSettingsResponse(BaseModel):
     maintenance_message: str
     email_notifications_enabled: bool
     whatsapp_notifications_enabled: bool
+    launch_gate_enabled: bool
+    launch_at: datetime
+    celebration_window_minutes: int
 
 
 class PlatformSettingsUpdate(BaseModel):
@@ -323,6 +329,9 @@ class PlatformSettingsUpdate(BaseModel):
     maintenance_message: Optional[str] = None
     email_notifications_enabled: Optional[bool] = None
     whatsapp_notifications_enabled: Optional[bool] = None
+    launch_gate_enabled: Optional[bool] = None
+    launch_at: Optional[datetime] = None
+    celebration_window_minutes: Optional[int] = None
 
     @field_validator("vote_price")
     @classmethod
@@ -340,6 +349,13 @@ class PlatformSettingsUpdate(BaseModel):
     def validate_max_candidates(cls, v: Optional[int]) -> Optional[int]:
         if v is not None and v < 0:
             raise ValueError("Max candidates must be 0 (unlimited) or a positive integer")
+        return v
+
+    @field_validator("celebration_window_minutes")
+    @classmethod
+    def validate_celebration_window(cls, v: Optional[int]) -> Optional[int]:
+        if v is not None and v < 0:
+            raise ValueError("Celebration window must be 0 or a positive integer")
         return v
 
 
@@ -381,6 +397,9 @@ async def _fetch_all_settings(db: AsyncSession) -> PlatformSettingsResponse:
         maintenance_message=await _get_platform_setting(db, "maintenance_message"),
         email_notifications_enabled=_to_bool(await _get_platform_setting(db, "email_notifications_enabled")),
         whatsapp_notifications_enabled=_to_bool(await _get_platform_setting(db, "whatsapp_notifications_enabled")),
+        launch_gate_enabled=_to_bool(await _get_platform_setting(db, "launch_gate_enabled")),
+        launch_at=datetime.fromisoformat(await _get_platform_setting(db, "launch_at")),
+        celebration_window_minutes=int(await _get_platform_setting(db, "celebration_window_minutes")),
     )
 
 
@@ -421,6 +440,16 @@ async def update_platform_settings(
         updates["email_notifications_enabled"] = str(data.email_notifications_enabled).lower()
     if data.whatsapp_notifications_enabled is not None:
         updates["whatsapp_notifications_enabled"] = str(data.whatsapp_notifications_enabled).lower()
+    if data.launch_gate_enabled is not None:
+        updates["launch_gate_enabled"] = str(data.launch_gate_enabled).lower()
+    if data.launch_at is not None:
+        dt = data.launch_at
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        updates["launch_at"] = dt.astimezone(timezone.utc).isoformat()
+
+    if data.celebration_window_minutes is not None:
+        updates["celebration_window_minutes"] = str(data.celebration_window_minutes)
 
     for key, value in updates.items():
         await _set_platform_setting(db, key, value, current_user.user_id)
