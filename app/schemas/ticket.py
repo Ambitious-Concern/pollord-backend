@@ -3,7 +3,7 @@ from decimal import Decimal
 from typing import List, Optional
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, field_validator
+from pydantic import BaseModel, ConfigDict, field_serializer, field_validator
 
 
 class TicketPurchaseItem(BaseModel):
@@ -28,6 +28,24 @@ class TicketPurchaseRequest(BaseModel):
         if not v:
             raise ValueError("At least one ticket item is required")
         return v
+
+
+class TicketPaymentInitResponse(BaseModel):
+    reference: str
+    access_code: str
+    public_key: str
+    amount: Decimal
+    currency: str
+
+    @field_serializer("amount")
+    def _serialize_amount(self, v: Decimal, _info) -> float:
+        # Pydantic v2 serializes Decimal as a string in JSON mode by default;
+        # the frontend/tests expect a plain JSON number here.
+        return float(v)
+
+
+class VerifyAndPurchaseRequest(BaseModel):
+    reference: str
 
 
 class TicketResponse(BaseModel):

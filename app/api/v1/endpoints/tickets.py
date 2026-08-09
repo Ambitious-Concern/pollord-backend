@@ -1,3 +1,5 @@
+import secrets
+from decimal import Decimal
 from typing import List
 from uuid import UUID
 
@@ -5,6 +7,7 @@ from fastapi import APIRouter, Depends, Request
 from fastapi.responses import StreamingResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.config import settings
 from app.core.dependencies import get_current_active_user, require_roles
 from app.db.base import get_db
 from app.models.audit_log import AuditLog
@@ -14,14 +17,18 @@ from app.models.user import User
 from app.repositories.audit_log_repository import AuditLogRepository
 from app.repositories.event_repository import EventRepository, TicketTypeRepository
 from app.repositories.ticket_repository import TicketPurchaseRepository, TicketRepository
+from app.repositories.ticket_transaction_repository import TicketTransactionRepository
 from app.repositories.user_repository import UserRepository
 from app.schemas.ticket import (
+    TicketPaymentInitResponse,
     TicketPurchaseRequest,
     TicketPurchaseResponse,
     TicketResponse,
     TicketValidation,
     TicketValidationResponse,
+    VerifyAndPurchaseRequest,
 )
+from app.services.paystack_service import PaystackService
 from app.services.ticketing_service import TicketingService
 from app.utils.pdf_generator import generate_ticket_pdf
 from app.utils.qr_code import generate_qr_code
@@ -53,6 +60,98 @@ async def purchase_tickets(
         data=data,
         ip=request.client.host if request.client else None,
         user_agent=request.headers.get("user-agent"),
+    )
+
+
+@router.post("/initiate-payment", response_model=TicketPaymentInitResponse, status_code=201)
+async def initiate_ticket_payment(
+    data: TicketPurchaseRequest,
+    current_user: User = Depends(get_current_active_user),
+    db: AsyncSession = Depends(get_db),
+):
+    from datetime import datetime, timezone
+    from fastapi import HTTPException, status as http_status
+
+    event_repo = EventRepository(Event, db)
+    event = await event_repo.get_with_ticket_types(data.event_id)
+    if not event:
+        raise HTTPException(status_code=http_status.HTTP_404_NOT_FOUND, detail="Event not found")
+    if event.status != "published":
+        raise HTTPException(
+            status_code=http_status.HTTP_400_BAD_REQUEST,
+            detail="Event is not available for ticket purchase",
+        )
+
+    now = datetime.now(timezone.utc)
+    total_amount = Decimal("0.00")
+    type_map = {tt.ticket_type_id: tt for tt in event.ticket_types}
+
+    for item in data.items:
+        ticket_type = type_map.get(item.ticket_type_id)
+        if not ticket_type:
+            raise HTTPException(
+                status_code=http_status.HTTP_400_BAD_REQUEST,
+                detail=f"Ticket type {item.ticket_type_id} not found for this event",
+            )
+        if ticket_type.status != "active":
+            raise HTTPException(
+                status_code=http_status.HTTP_400_BAD_REQUEST,
+                detail=f"Ticket type '{ticket_type.type_name}' is not available",
+            )
+        if ticket_type.sales_start_datetime and now < ticket_type.sales_start_datetime:
+            raise HTTPException(
+                status_code=http_status.HTTP_400_BAD_REQUEST,
+                detail=f"Sales for '{ticket_type.type_name}' have not started yet",
+            )
+        if ticket_type.sales_end_datetime and now > ticket_type.sales_end_datetime:
+            raise HTTPException(
+                status_code=http_status.HTTP_400_BAD_REQUEST,
+                detail=f"Sales for '{ticket_type.type_name}' have ended",
+            )
+        ticket_repo = TicketRepository(Ticket, db)
+        existing_count = await ticket_repo.count_user_tickets_for_type(
+            current_user.user_id, item.ticket_type_id
+        )
+        if existing_count + item.quantity > ticket_type.max_per_user:
+            raise HTTPException(
+                status_code=http_status.HTTP_400_BAD_REQUEST,
+                detail=f"Maximum {ticket_type.max_per_user} tickets per user for '{ticket_type.type_name}'",
+            )
+        total_amount += Decimal(str(ticket_type.price)) * item.quantity
+
+    if total_amount <= 0:
+        raise HTTPException(
+            status_code=http_status.HTTP_400_BAD_REQUEST,
+            detail="This purchase is free — use POST /tickets/purchase instead",
+        )
+
+    reference = f"ticket_{secrets.token_urlsafe(16)}"
+    txn_repo = TicketTransactionRepository(db)
+    await txn_repo.create({
+        "reference": reference,
+        "user_id": current_user.user_id,
+        "event_id": data.event_id,
+        "items": [{"ticket_type_id": str(i.ticket_type_id), "quantity": i.quantity} for i in data.items],
+        "amount": total_amount,
+        "currency": "GHS",
+        "status": "pending",
+    })
+
+    paystack = PaystackService(settings.PAYSTACK_SECRET_KEY)
+    ps_data = await paystack.initialize_transaction(
+        email=current_user.email,
+        amount=int(total_amount * 100),  # pesewas
+        reference=reference,
+        currency="GHS",
+        metadata={"event_id": str(data.event_id), "event_title": event.title},
+    )
+
+    return TicketPaymentInitResponse(
+        reference=reference,
+        access_code=ps_data["access_code"],
+        public_key=settings.PAYSTACK_PUBLIC_KEY,
+        amount=total_amount,
+        currency="GHS",
     )
 
 
