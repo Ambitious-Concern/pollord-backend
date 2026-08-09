@@ -27,7 +27,7 @@ from app.models.user import User, UserRole
 ADMIN_SETTINGS_URL = "/api/v1/admin/platform-settings"
 PUBLIC_LAUNCH_URL = "/api/v1/settings/launch"
 
-_SETTING_KEYS = ["launch_gate_enabled", "launch_at"]
+_SETTING_KEYS = ["launch_gate_enabled", "launch_at", "celebration_window_minutes"]
 _FIXTURE_EMAILS = ["admin@example.com", "test@example.com"]
 
 
@@ -154,3 +154,21 @@ class TestPublicLaunchStatus:
         data = response.json()
         assert data["gate_enabled"] is False
         assert data["launch_at"].startswith("2026-09-01T12:00:00")
+
+    async def test_celebration_window_defaults_and_reflects_admin_update(
+        self, client: AsyncClient, admin_user
+    ):
+        response = await client.get(PUBLIC_LAUNCH_URL)
+        assert response.status_code == 200
+        assert response.json()["celebration_window_minutes"] == 10080
+
+        put_response = await client.put(
+            ADMIN_SETTINGS_URL,
+            json={"celebration_window_minutes": 5},
+            headers=admin_user["headers"],
+        )
+        assert put_response.status_code == 200
+
+        response = await client.get(PUBLIC_LAUNCH_URL)
+        assert response.status_code == 200
+        assert response.json()["celebration_window_minutes"] == 5
