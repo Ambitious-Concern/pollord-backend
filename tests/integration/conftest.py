@@ -59,14 +59,11 @@ async def db_session() -> AsyncGenerator[AsyncSession, None]:
         await conn.begin()
         await conn.begin_nested()
 
-        session = AsyncSession(bind=conn, expire_on_commit=False)
-
-        @event.listens_for(session.sync_session, "after_transaction_end")
-        def _restart_savepoint(sync_session, transaction):
-            if conn.closed:
-                return
-            if not conn.sync_connection.in_nested_transaction():
-                conn.sync_connection.begin_nested()
+        session = AsyncSession(
+            bind=conn,
+            expire_on_commit=False,
+            join_transaction_mode="create_savepoint",
+        )
 
         try:
             yield session
@@ -80,7 +77,12 @@ async def client(db_session: AsyncSession) -> AsyncGenerator[AsyncClient, None]:
     from app.main import app
 
     async def override_get_db():
-        yield db_session
+        try:
+            yield db_session
+            await db_session.commit()
+        except Exception:
+            await db_session.rollback()
+            raise
 
     app.dependency_overrides[get_db] = override_get_db
 
