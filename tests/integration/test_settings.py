@@ -101,6 +101,34 @@ class TestAdminLaunchSettings:
         assert launch_at.startswith("2026-11-01T00:00:00")
         assert launch_at.endswith("+00:00") or launch_at.endswith("Z")
 
+    async def test_celebration_window_defaults_and_roundtrip(
+        self, client: AsyncClient, admin_user
+    ):
+        get_response = await client.get(ADMIN_SETTINGS_URL, headers=admin_user["headers"])
+        assert get_response.status_code == 200
+        assert get_response.json()["celebration_window_minutes"] == 10080
+
+        put_response = await client.put(
+            ADMIN_SETTINGS_URL,
+            json={"celebration_window_minutes": 10},
+            headers=admin_user["headers"],
+        )
+        assert put_response.status_code == 200
+        assert put_response.json()["celebration_window_minutes"] == 10
+
+        get_after = await client.get(ADMIN_SETTINGS_URL, headers=admin_user["headers"])
+        assert get_after.json()["celebration_window_minutes"] == 10
+
+    async def test_celebration_window_rejects_negative(
+        self, client: AsyncClient, admin_user
+    ):
+        response = await client.put(
+            ADMIN_SETTINGS_URL,
+            json={"celebration_window_minutes": -1},
+            headers=admin_user["headers"],
+        )
+        assert response.status_code == 422
+
 
 @pytest.mark.asyncio
 class TestPublicLaunchStatus:

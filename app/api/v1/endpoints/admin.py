@@ -296,6 +296,7 @@ PLATFORM_SETTING_DEFAULTS: dict[str, str] = {
     "whatsapp_notifications_enabled": "true",
     "launch_gate_enabled": "true",
     "launch_at": "2026-08-13T00:00:00+00:00",
+    "celebration_window_minutes": "10080",
 }
 
 
@@ -313,6 +314,7 @@ class PlatformSettingsResponse(BaseModel):
     whatsapp_notifications_enabled: bool
     launch_gate_enabled: bool
     launch_at: datetime
+    celebration_window_minutes: int
 
 
 class PlatformSettingsUpdate(BaseModel):
@@ -329,6 +331,7 @@ class PlatformSettingsUpdate(BaseModel):
     whatsapp_notifications_enabled: Optional[bool] = None
     launch_gate_enabled: Optional[bool] = None
     launch_at: Optional[datetime] = None
+    celebration_window_minutes: Optional[int] = None
 
     @field_validator("vote_price")
     @classmethod
@@ -346,6 +349,13 @@ class PlatformSettingsUpdate(BaseModel):
     def validate_max_candidates(cls, v: Optional[int]) -> Optional[int]:
         if v is not None and v < 0:
             raise ValueError("Max candidates must be 0 (unlimited) or a positive integer")
+        return v
+
+    @field_validator("celebration_window_minutes")
+    @classmethod
+    def validate_celebration_window(cls, v: Optional[int]) -> Optional[int]:
+        if v is not None and v < 0:
+            raise ValueError("Celebration window must be 0 or a positive integer")
         return v
 
 
@@ -389,6 +399,7 @@ async def _fetch_all_settings(db: AsyncSession) -> PlatformSettingsResponse:
         whatsapp_notifications_enabled=_to_bool(await _get_platform_setting(db, "whatsapp_notifications_enabled")),
         launch_gate_enabled=_to_bool(await _get_platform_setting(db, "launch_gate_enabled")),
         launch_at=datetime.fromisoformat(await _get_platform_setting(db, "launch_at")),
+        celebration_window_minutes=int(await _get_platform_setting(db, "celebration_window_minutes")),
     )
 
 
@@ -436,6 +447,9 @@ async def update_platform_settings(
         if dt.tzinfo is None:
             dt = dt.replace(tzinfo=timezone.utc)
         updates["launch_at"] = dt.astimezone(timezone.utc).isoformat()
+
+    if data.celebration_window_minutes is not None:
+        updates["celebration_window_minutes"] = str(data.celebration_window_minutes)
 
     for key, value in updates.items():
         await _set_platform_setting(db, key, value, current_user.user_id)
