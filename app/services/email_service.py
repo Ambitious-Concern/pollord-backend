@@ -248,6 +248,22 @@ def waitlist_confirmation_email() -> tuple[str, str]:
     return subject, _base_template(content, "You're on the Pollord waitlist!")
 
 
+def ticket_confirmation_email(event_title: str, ticket_count: int) -> tuple[str, str]:
+    subject = f"Ticket Confirmation — {event_title}"
+    content = f"""
+    <h2>Ticket Confirmation</h2>
+    <p>You have successfully purchased <strong>{ticket_count} ticket(s)</strong> for:</p>
+    <div class="otp-box">
+      <div style="color:#fff; font-size:20px; font-weight:800;">{event_title}</div>
+    </div>
+    <p>Your tickets are available in <a href="{{FRONTEND_URL}}/tickets/my-tickets" style="color:#6C63FF;">My Tickets</a>.</p>
+    """
+    from app.core.config import settings
+    content = content.replace("{FRONTEND_URL}", settings.FRONTEND_URL)
+    html = _base_template(content, f"{ticket_count} ticket(s) confirmed for {event_title}")
+    return subject, html
+
+
 def launch_announcement_email() -> tuple[str, str]:
     """Return (subject, html_body) announcing that Pollord is live."""
     subject = "POLLORD is live! 🎉"

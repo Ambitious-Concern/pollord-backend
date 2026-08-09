@@ -14,6 +14,7 @@ from app.models.user import User
 from app.repositories.audit_log_repository import AuditLogRepository
 from app.repositories.event_repository import EventRepository, TicketTypeRepository
 from app.repositories.ticket_repository import TicketPurchaseRepository, TicketRepository
+from app.repositories.user_repository import UserRepository
 from app.schemas.ticket import (
     TicketPurchaseRequest,
     TicketPurchaseResponse,
@@ -35,6 +36,7 @@ def _get_ticketing_service(db: AsyncSession) -> TicketingService:
         ticket_repo=TicketRepository(Ticket, db),
         purchase_repo=TicketPurchaseRepository(TicketPurchase, db),
         audit_repo=AuditLogRepository(AuditLog, db),
+        user_repo=UserRepository(User, db),
     )
 
 

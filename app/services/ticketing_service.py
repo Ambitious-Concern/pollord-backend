@@ -13,12 +13,14 @@ from app.models.ticket import Ticket
 from app.repositories.audit_log_repository import AuditLogRepository
 from app.repositories.event_repository import EventRepository, TicketTypeRepository
 from app.repositories.ticket_repository import TicketPurchaseRepository, TicketRepository
+from app.repositories.user_repository import UserRepository
 from app.schemas.ticket import (
     TicketPurchaseRequest,
     TicketPurchaseResponse,
     TicketResponse,
     TicketValidationResponse,
 )
+from app.services.email_service import send_email, ticket_confirmation_email
 
 logger = logging.getLogger(__name__)
 
@@ -31,12 +33,14 @@ class TicketingService:
         ticket_repo: TicketRepository,
         purchase_repo: TicketPurchaseRepository,
         audit_repo: AuditLogRepository,
+        user_repo: UserRepository,
     ):
         self.event_repo = event_repo
         self.ticket_type_repo = ticket_type_repo
         self.ticket_repo = ticket_repo
         self.purchase_repo = purchase_repo
         self.audit_repo = audit_repo
+        self.user_repo = user_repo
 
     async def purchase_tickets(
         self,
@@ -159,6 +163,12 @@ class TicketingService:
             ip_address=ip,
             user_agent=user_agent,
         )
+
+        # Send confirmation email (best-effort — never blocks the purchase)
+        buyer = await self.user_repo.get_by_id(user_id, id_field="user_id")
+        if buyer and buyer.email:
+            subject, html = ticket_confirmation_email(event.title, len(tickets))
+            send_email(buyer.email, subject, html)
 
         return TicketPurchaseResponse(
             purchase_id=purchase.purchase_id,
