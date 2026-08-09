@@ -155,6 +155,41 @@ async def initiate_ticket_payment(
     )
 
 
+@router.post("/verify-and-purchase", response_model=TicketPurchaseResponse, status_code=201)
+async def verify_and_purchase_tickets(
+    data: VerifyAndPurchaseRequest,
+    current_user: User = Depends(get_current_active_user),
+    db: AsyncSession = Depends(get_db),
+):
+    from fastapi import HTTPException, status as http_status
+
+    txn_repo = TicketTransactionRepository(db)
+    txn = await txn_repo.get_by_reference(data.reference)
+    if not txn:
+        raise HTTPException(status_code=http_status.HTTP_404_NOT_FOUND, detail="Transaction not found")
+    if txn.status == "success":
+        raise HTTPException(status_code=http_status.HTTP_409_CONFLICT, detail="This payment has already been fulfilled")
+    if txn.status in ("failed", "needs_refund"):
+        raise HTTPException(status_code=http_status.HTTP_400_BAD_REQUEST, detail="Payment failed — please try again")
+
+    paystack = PaystackService(settings.PAYSTACK_SECRET_KEY)
+    ps_data = await paystack.verify_transaction(data.reference)
+
+    if ps_data.get("status") != "success":
+        await txn_repo.update_status(data.reference, "failed", ps_data)
+        raise HTTPException(status_code=http_status.HTTP_402_PAYMENT_REQUIRED, detail="Payment was not successful")
+
+    if ps_data.get("amount", 0) < int(txn.amount * 100):
+        await txn_repo.update_status(data.reference, "failed", ps_data)
+        raise HTTPException(
+            status_code=http_status.HTTP_402_PAYMENT_REQUIRED,
+            detail="Payment amount does not match the ticket price",
+        )
+
+    service = _get_ticketing_service(db)
+    return await service.fulfill_paid_purchase(data.reference, ps_data, txn_repo)
+
+
 @router.get("/my-tickets", response_model=List[TicketResponse])
 async def get_my_tickets(
     current_user: User = Depends(get_current_active_user),

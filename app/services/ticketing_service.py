@@ -13,6 +13,7 @@ from app.models.ticket import Ticket
 from app.repositories.audit_log_repository import AuditLogRepository
 from app.repositories.event_repository import EventRepository, TicketTypeRepository
 from app.repositories.ticket_repository import TicketPurchaseRepository, TicketRepository
+from app.repositories.ticket_transaction_repository import TicketTransactionRepository
 from app.repositories.user_repository import UserRepository
 from app.schemas.ticket import (
     TicketPurchaseRequest,
@@ -174,6 +175,123 @@ class TicketingService:
             purchase_id=purchase.purchase_id,
             event_id=data.event_id,
             total_amount=total_amount,
+            payment_status=purchase.payment_status,
+            tickets=[
+                TicketResponse(
+                    ticket_id=t.ticket_id,
+                    ticket_code=t.ticket_code,
+                    event_id=t.event_id,
+                    ticket_type_id=t.ticket_type_id,
+                    ticket_status=t.ticket_status,
+                    purchase_date=t.purchase_date,
+                )
+                for t in tickets
+            ],
+            purchased_at=purchase.purchased_at,
+        )
+
+    async def fulfill_paid_purchase(
+        self, reference: str, paystack_data: dict, txn_repo: "TicketTransactionRepository"
+    ) -> TicketPurchaseResponse:
+        txn = await txn_repo.get_by_reference(reference)
+        if not txn:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Transaction not found")
+        if txn.status == "success":
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="This payment has already been fulfilled")
+
+        event = await self.event_repo.get_with_ticket_types(txn.event_id)
+        if not event or event.status != "published":
+            await txn_repo.update_status(reference, "failed", paystack_data)
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Event is no longer available")
+
+        now = datetime.now(timezone.utc)
+        type_map = {tt.ticket_type_id: tt for tt in event.ticket_types}
+        ticket_items = []
+
+        for item in txn.items:
+            ticket_type_id = UUID(item["ticket_type_id"])
+            quantity = item["quantity"]
+            ticket_type = type_map.get(ticket_type_id)
+            if (
+                not ticket_type
+                or ticket_type.status != "active"
+                or (ticket_type.sales_start_datetime and now < ticket_type.sales_start_datetime)
+                or (ticket_type.sales_end_datetime and now > ticket_type.sales_end_datetime)
+            ):
+                await txn_repo.update_status(reference, "needs_refund", paystack_data)
+                await self.audit_repo.log_action(
+                    action_type="TICKET_PAYMENT_NEEDS_REFUND",
+                    entity_type="TicketTransaction",
+                    entity_id=txn.transaction_id,
+                    user_id=txn.user_id,
+                    changes={"reason": "ticket_type_unavailable", "ticket_type_id": str(ticket_type_id)},
+                )
+                raise HTTPException(
+                    status_code=status.HTTP_409_CONFLICT,
+                    detail="Payment succeeded but a ticket type became unavailable. Your payment will be refunded — contact support if you don't hear back within 24 hours.",
+                )
+
+            success = await self.ticket_type_repo.decrement_available(ticket_type_id, quantity)
+            if not success:
+                await txn_repo.update_status(reference, "needs_refund", paystack_data)
+                await self.audit_repo.log_action(
+                    action_type="TICKET_PAYMENT_NEEDS_REFUND",
+                    entity_type="TicketTransaction",
+                    entity_id=txn.transaction_id,
+                    user_id=txn.user_id,
+                    changes={"reason": "sold_out", "ticket_type_id": str(ticket_type_id)},
+                )
+                raise HTTPException(
+                    status_code=status.HTTP_409_CONFLICT,
+                    detail="Payment succeeded but this ticket type sold out before it could be issued. Your payment will be refunded — contact support if you don't hear back within 24 hours.",
+                )
+            ticket_items.append((ticket_type, quantity))
+
+        purchase = await self.purchase_repo.create({
+            "user_id": txn.user_id,
+            "event_id": txn.event_id,
+            "total_amount": txn.amount,
+            "payment_status": "completed",
+        })
+
+        tickets = []
+        for ticket_type, quantity in ticket_items:
+            for _ in range(quantity):
+                ticket_code = generate_secure_token(16)
+                qr_data = json.dumps({
+                    "ticket_code": ticket_code,
+                    "event_id": str(txn.event_id),
+                    "ticket_type": ticket_type.type_name,
+                })
+                ticket = await self.ticket_repo.create({
+                    "ticket_code": ticket_code,
+                    "event_id": txn.event_id,
+                    "ticket_type_id": ticket_type.ticket_type_id,
+                    "user_id": txn.user_id,
+                    "purchase_id": purchase.purchase_id,
+                    "qr_code_data": qr_data,
+                })
+                tickets.append(ticket)
+
+        await self.audit_repo.log_action(
+            action_type="TICKET_PURCHASE",
+            entity_type="Event",
+            entity_id=txn.event_id,
+            user_id=txn.user_id,
+            changes={"total_amount": str(txn.amount), "ticket_count": len(tickets), "reference": reference},
+        )
+
+        buyer = await self.user_repo.get_by_id(txn.user_id, id_field="user_id")
+        if buyer and buyer.email:
+            subject, html = ticket_confirmation_email(event.title, len(tickets))
+            send_email(buyer.email, subject, html)
+
+        await txn_repo.update_status(reference, "success", paystack_data)
+
+        return TicketPurchaseResponse(
+            purchase_id=purchase.purchase_id,
+            event_id=txn.event_id,
+            total_amount=txn.amount,
             payment_status=purchase.payment_status,
             tickets=[
                 TicketResponse(
