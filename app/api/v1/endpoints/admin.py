@@ -294,6 +294,8 @@ PLATFORM_SETTING_DEFAULTS: dict[str, str] = {
     "maintenance_message": "The platform is currently under maintenance. Please check back later.",
     "email_notifications_enabled": "true",
     "whatsapp_notifications_enabled": "true",
+    "launch_gate_enabled": "true",
+    "launch_at": "2026-08-13T00:00:00+00:00",
 }
 
 
@@ -309,6 +311,8 @@ class PlatformSettingsResponse(BaseModel):
     maintenance_message: str
     email_notifications_enabled: bool
     whatsapp_notifications_enabled: bool
+    launch_gate_enabled: bool
+    launch_at: datetime
 
 
 class PlatformSettingsUpdate(BaseModel):
@@ -323,6 +327,8 @@ class PlatformSettingsUpdate(BaseModel):
     maintenance_message: Optional[str] = None
     email_notifications_enabled: Optional[bool] = None
     whatsapp_notifications_enabled: Optional[bool] = None
+    launch_gate_enabled: Optional[bool] = None
+    launch_at: Optional[datetime] = None
 
     @field_validator("vote_price")
     @classmethod
@@ -381,6 +387,8 @@ async def _fetch_all_settings(db: AsyncSession) -> PlatformSettingsResponse:
         maintenance_message=await _get_platform_setting(db, "maintenance_message"),
         email_notifications_enabled=_to_bool(await _get_platform_setting(db, "email_notifications_enabled")),
         whatsapp_notifications_enabled=_to_bool(await _get_platform_setting(db, "whatsapp_notifications_enabled")),
+        launch_gate_enabled=_to_bool(await _get_platform_setting(db, "launch_gate_enabled")),
+        launch_at=datetime.fromisoformat(await _get_platform_setting(db, "launch_at")),
     )
 
 
@@ -421,6 +429,10 @@ async def update_platform_settings(
         updates["email_notifications_enabled"] = str(data.email_notifications_enabled).lower()
     if data.whatsapp_notifications_enabled is not None:
         updates["whatsapp_notifications_enabled"] = str(data.whatsapp_notifications_enabled).lower()
+    if data.launch_gate_enabled is not None:
+        updates["launch_gate_enabled"] = str(data.launch_gate_enabled).lower()
+    if data.launch_at is not None:
+        updates["launch_at"] = data.launch_at.isoformat()
 
     for key, value in updates.items():
         await _set_platform_setting(db, key, value, current_user.user_id)
