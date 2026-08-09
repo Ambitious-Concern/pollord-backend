@@ -25,6 +25,7 @@ from app.models.platform_setting import PlatformSetting
 from app.models.user import User, UserRole
 
 ADMIN_SETTINGS_URL = "/api/v1/admin/platform-settings"
+PUBLIC_LAUNCH_URL = "/api/v1/settings/launch"
 
 _SETTING_KEYS = ["launch_gate_enabled", "launch_at"]
 _FIXTURE_EMAILS = ["admin@example.com", "test@example.com"]
@@ -82,3 +83,29 @@ class TestAdminLaunchSettings:
         assert get_response.status_code == 200
         assert get_response.json()["launch_gate_enabled"] is False
         assert get_response.json()["launch_at"].startswith("2026-10-15")
+
+
+@pytest.mark.asyncio
+class TestPublicLaunchStatus:
+    async def test_defaults_when_unset(self, client: AsyncClient):
+        response = await client.get(PUBLIC_LAUNCH_URL)
+        assert response.status_code == 200
+        data = response.json()
+        assert data["gate_enabled"] is True
+        assert data["launch_at"].startswith("2026-08-13")
+
+    async def test_reflects_admin_update_with_no_auth_required(
+        self, client: AsyncClient, admin_user
+    ):
+        put_response = await client.put(
+            ADMIN_SETTINGS_URL,
+            json={"launch_gate_enabled": False, "launch_at": "2026-09-01T12:00:00+00:00"},
+            headers=admin_user["headers"],
+        )
+        assert put_response.status_code == 200
+
+        response = await client.get(PUBLIC_LAUNCH_URL)
+        assert response.status_code == 200
+        data = response.json()
+        assert data["gate_enabled"] is False
+        assert data["launch_at"].startswith("2026-09-01T12:00:00")
