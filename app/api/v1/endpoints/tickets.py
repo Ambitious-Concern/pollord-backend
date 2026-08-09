@@ -167,6 +167,12 @@ async def verify_and_purchase_tickets(
     txn = await txn_repo.get_by_reference(data.reference)
     if not txn:
         raise HTTPException(status_code=http_status.HTTP_404_NOT_FOUND, detail="Transaction not found")
+    # NOTE: these two checks are a non-authoritative optimization only — they
+    # exist purely to skip an unnecessary Paystack API call for a
+    # transaction that's already terminal. The authoritative version of this
+    # guard lives in TicketingService.fulfill_paid_purchase, since that
+    # method is also called directly from the webhook branch, which never
+    # goes through this endpoint.
     if txn.status == "success":
         raise HTTPException(status_code=http_status.HTTP_409_CONFLICT, detail="This payment has already been fulfilled")
     if txn.status in ("failed", "needs_refund"):
@@ -177,10 +183,16 @@ async def verify_and_purchase_tickets(
 
     if ps_data.get("status") != "success":
         await txn_repo.update_status(data.reference, "failed", ps_data)
+        # Commit explicitly: get_db's rollback-on-exception would otherwise
+        # discard this status update along with the HTTPException we're
+        # about to raise, leaving the transaction stuck at "pending" and a
+        # retry able to re-run this same path indefinitely.
+        await db.commit()
         raise HTTPException(status_code=http_status.HTTP_402_PAYMENT_REQUIRED, detail="Payment was not successful")
 
     if ps_data.get("amount", 0) < int(txn.amount * 100):
         await txn_repo.update_status(data.reference, "failed", ps_data)
+        await db.commit()
         raise HTTPException(
             status_code=http_status.HTTP_402_PAYMENT_REQUIRED,
             detail="Payment amount does not match the ticket price",

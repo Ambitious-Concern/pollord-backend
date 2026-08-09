@@ -50,6 +50,45 @@ async def paid_event_with_tickets(db_session: AsyncSession, admin_user):
     return {"event": event, "vip": vip}
 
 
+@pytest.fixture
+async def paid_event_with_two_ticket_types(db_session: AsyncSession, admin_user):
+    """Published event with two paid ticket types, for testing that a partial
+    stock decrement across a multi-item purchase is rolled back atomically
+    when a later item in the same purchase can't be fulfilled."""
+    event = Event(
+        title="Two-Tier Ticket Event",
+        description="An event with two paid ticket types",
+        event_date=date(2026, 9, 3),
+        event_time=time(20, 0),
+        location="Test Hall",
+        category="Concert",
+        capacity=50,
+        status="published",
+        created_by=admin_user["user"].user_id,
+    )
+    db_session.add(event)
+    await db_session.flush()
+
+    general = TicketType(
+        event_id=event.event_id,
+        type_name="General",
+        price=50.00,
+        quantity_available=5,
+        max_per_user=5,
+    )
+    vip = TicketType(
+        event_id=event.event_id,
+        type_name="VIP",
+        price=100.00,
+        quantity_available=1,
+        max_per_user=5,
+    )
+    db_session.add_all([general, vip])
+    await db_session.flush()
+
+    return {"event": event, "general": general, "vip": vip}
+
+
 FAKE_ACCESS_CODE = "acc_test_ticket123"
 FAKE_REFERENCE = "ticket_testref123"
 
@@ -258,3 +297,82 @@ class TestVerifyAndPurchase:
             select(Ticket).where(Ticket.event_id == evt["event"].event_id)
         )).scalars().all()
         assert len(tickets) == 0
+
+        # Prove the needs_refund status was actually persisted (committed),
+        # not just returned in the HTTP response. get_db's real
+        # rollback-on-exception behavior would otherwise silently discard
+        # this write along with the HTTPException we just asserted above —
+        # this test can't reproduce that rollback (the test harness's
+        # override_get_db doesn't commit/rollback per-request), but it does
+        # prove the explicit `await txn_repo.session.commit()` in
+        # TicketingService._mark_needs_refund actually executes and its
+        # write survives independently of the request's own commit/rollback.
+        from app.models.ticket_transaction import TicketTransaction
+        persisted_txn = (await db_session.execute(
+            select(TicketTransaction).where(TicketTransaction.reference == ref)
+        )).scalar_one()
+        assert persisted_txn.status == "needs_refund"
+
+    async def test_sold_out_second_item_rolls_back_first_items_decrement(
+        self, client: AsyncClient, test_user, paid_event_with_two_ticket_types, db_session: AsyncSession
+    ):
+        """Purchase spans two ticket types: General (plenty of stock) and VIP
+        (about to sell out to someone else). General's stock decrement must
+        succeed first, then VIP's decrement must fail and trigger
+        needs_refund — and that failure must roll back General's decrement
+        too, so the whole fulfillment is atomic rather than partially
+        applied."""
+        from unittest.mock import patch as _patch
+        from sqlalchemy import update, select
+        from app.models.event import TicketType
+        from app.models.ticket import Ticket
+
+        evt = paid_event_with_two_ticket_types
+        amount_pesewas = 50_00 + 100_00  # 1 General @ 50.00 GHS + 1 VIP @ 100.00 GHS
+
+        with patch(PAYSTACK_INIT_PATH, new=_init_mock(amount_pesewas)):
+            resp = await client.post(
+                "/api/v1/tickets/initiate-payment",
+                json={
+                    "event_id": str(evt["event"].event_id),
+                    "items": [
+                        {"ticket_type_id": str(evt["general"].ticket_type_id), "quantity": 1},
+                        {"ticket_type_id": str(evt["vip"].ticket_type_id), "quantity": 1},
+                    ],
+                },
+                headers=test_user["headers"],
+            )
+        assert resp.status_code == 201, resp.text
+        ref = resp.json()["reference"]
+
+        # Simulate the VIP ticket type (the second item) selling out to
+        # someone else while this payment was in flight. General (the first
+        # item) still has stock.
+        await db_session.execute(
+            update(TicketType)
+            .where(TicketType.ticket_type_id == evt["vip"].ticket_type_id)
+            .values(quantity_available=0, quantity_sold=1)
+        )
+        await db_session.flush()
+
+        with _patch(PAYSTACK_VERIFY_PATH, new=_verify_mock(amount_pesewas)):
+            resp = await client.post(
+                "/api/v1/tickets/verify-and-purchase", json={"reference": ref}, headers=test_user["headers"],
+            )
+        assert resp.status_code == 409
+        assert "refund" in resp.text.lower()
+
+        # (a) No tickets issued for either ticket type — no partial issuance.
+        tickets = (await db_session.execute(
+            select(Ticket).where(Ticket.event_id == evt["event"].event_id)
+        )).scalars().all()
+        assert len(tickets) == 0
+
+        # (b)/(c) The FIRST item's (General's) stock decrement must have been
+        # rolled back too — proving the whole operation is atomic, not just
+        # that no tickets got created despite a leaked partial decrement.
+        general = (await db_session.execute(
+            select(TicketType).where(TicketType.ticket_type_id == evt["general"].ticket_type_id)
+        )).scalar_one()
+        assert general.quantity_available == 5
+        assert general.quantity_sold == 0

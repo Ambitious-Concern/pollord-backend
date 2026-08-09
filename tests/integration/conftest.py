@@ -3,6 +3,7 @@ from typing import AsyncGenerator
 
 import pytest_asyncio
 from httpx import ASGITransport, AsyncClient
+from sqlalchemy import event
 from sqlalchemy.pool import NullPool
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
@@ -36,9 +37,42 @@ async def setup_database():
 
 @pytest_asyncio.fixture
 async def db_session() -> AsyncGenerator[AsyncSession, None]:
-    async with test_session_maker() as session:
-        yield session
-        await session.rollback()
+    """
+    Join the test's session onto an outer DB transaction/SAVEPOINT rather
+    than the session's own commit/rollback calls, using SQLAlchemy's
+    documented "join a session into an external transaction" pattern.
+
+    Application code under test is allowed to call
+    session.commit()/session.rollback() exactly as it does in production
+    (e.g. TicketingService.fulfill_paid_purchase explicitly commits
+    needs_refund/failed status changes before raising, so they survive
+    get_db's rollback-on-exception in real requests). With a plain session,
+    those calls would commit to the real DB, permanently leaking
+    fixture-created rows (users, events, ...) across tests and breaking
+    unrelated tests with unique-constraint collisions. Binding the session to
+    a connection that's already inside an outer transaction + SAVEPOINT
+    means the app's commit() only ends/restarts the SAVEPOINT — the real
+    outer transaction is rolled back unconditionally at teardown, so nothing
+    a test does (directly or via commit()) ever actually lands in the DB.
+    """
+    async with test_engine.connect() as conn:
+        await conn.begin()
+        await conn.begin_nested()
+
+        session = AsyncSession(bind=conn, expire_on_commit=False)
+
+        @event.listens_for(session.sync_session, "after_transaction_end")
+        def _restart_savepoint(sync_session, transaction):
+            if conn.closed:
+                return
+            if not conn.sync_connection.in_nested_transaction():
+                conn.sync_connection.begin_nested()
+
+        try:
+            yield session
+        finally:
+            await session.close()
+            await conn.rollback()
 
 
 @pytest_asyncio.fixture

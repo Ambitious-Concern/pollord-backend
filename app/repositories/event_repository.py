@@ -89,3 +89,20 @@ class TicketTypeRepository(BaseRepository[TicketType]):
         row = result.first()
         await self.session.flush()
         return row is not None
+
+    async def increment_available(
+        self, ticket_type_id: UUID, quantity: int
+    ) -> None:
+        """Compensating write for decrement_available — used to undo an
+        earlier item's successful stock decrement within the same
+        multi-item purchase when a later item can't be fulfilled, so the
+        whole purchase's stock effect is all-or-nothing."""
+        await self.session.execute(
+            update(TicketType)
+            .where(TicketType.ticket_type_id == ticket_type_id)
+            .values(
+                quantity_available=TicketType.quantity_available + quantity,
+                quantity_sold=TicketType.quantity_sold - quantity,
+            )
+        )
+        await self.session.flush()
