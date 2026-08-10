@@ -73,9 +73,7 @@ async def test_user(db_session: AsyncSession) -> dict:
     db_session.add(user)
     await db_session.flush()
 
-    result = await db_session.execute(
-        select(Role).where(Role.role_name == "Voter")
-    )
+    result = await db_session.execute(select(Role).where(Role.role_name == "Voter"))
     role = result.scalar_one_or_none()
     if not role:
         role = Role(role_name="Voter", permissions={"voting": ["cast", "read"]})

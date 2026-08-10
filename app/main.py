@@ -11,6 +11,7 @@ from slowapi import _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
+from app.api.sitemap import router as sitemap_router
 from app.api.v1.router import api_router
 from app.api.websocket import router as ws_router
 from app.core.config import settings
@@ -67,6 +68,7 @@ app.add_middleware(RequestLoggingMiddleware)
 # Routers
 app.include_router(api_router)
 app.include_router(ws_router)
+app.include_router(sitemap_router)
 
 # Static files (KYC uploads, etc.)
 upload_dir = Path(settings.UPLOAD_DIR)
