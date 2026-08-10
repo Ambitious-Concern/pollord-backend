@@ -84,6 +84,13 @@ def create_candidate_result_token(
     return jwt.encode(to_encode, settings.JWT_SECRET_KEY, algorithm=settings.JWT_ALGORITHM)
 
 
+def create_ticket_download_token(ticket_id: str) -> str:
+    """Long-lived token letting a guest (no account) re-download their ticket PDF."""
+    expire = datetime.now(timezone.utc) + timedelta(days=365)
+    to_encode = {"sub": ticket_id, "type": "ticket_download", "exp": expire}
+    return jwt.encode(to_encode, settings.JWT_SECRET_KEY, algorithm=settings.JWT_ALGORITHM)
+
+
 # Vote encryption (AES-256-GCM)
 def _get_aes_key() -> bytes:
     key = settings.AES_ENCRYPTION_KEY

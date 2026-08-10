@@ -24,7 +24,9 @@ from app.models.election import Election
 from app.models.platform_setting import PlatformSetting
 from app.models.transaction import Transaction
 from app.models.vote import Vote
+from app.api.v1.endpoints.tickets import _get_ticketing_service
 from app.repositories.election_repository import ElectionRepository
+from app.repositories.ticket_transaction_repository import TicketTransactionRepository
 from app.repositories.transaction_repository import TransactionRepository
 from app.repositories.vote_repository import VoteRepository
 from app.services.cryptography_service import CryptographyService
@@ -75,6 +77,13 @@ async def paystack_webhook(
 
     reference = data.get("reference", "")
     if not reference:
+        return {"status": "ignored"}
+
+    if reference.startswith("ticket_"):
+        if event == "charge.success":
+            return await _handle_ticket_charge_success(reference, data, db)
+        if event in ("charge.failed", "charge.abandoned"):
+            return await _handle_ticket_charge_failed(reference, data, db)
         return {"status": "ignored"}
 
     # Route to the correct handler
@@ -204,4 +213,34 @@ async def _handle_charge_failed(reference: str, data: dict, db: AsyncSession) ->
         "Your vote was not cast. Send *VOTE <election-id>* to try again.",
     )
     logger.info("Paystack charge failed/abandoned for ref=%s", reference)
+    return {"status": "ok"}
+
+
+async def _handle_ticket_charge_success(reference: str, data: dict, db: AsyncSession) -> dict:
+    txn_repo = TicketTransactionRepository(db)
+    txn = await txn_repo.get_by_reference(reference)
+    if not txn:
+        logger.warning("Paystack webhook: unknown ticket reference %s", reference)
+        return {"status": "ignored"}
+    if txn.status == "success":
+        return {"status": "already_processed"}
+
+    service = _get_ticketing_service(db)
+    try:
+        await service.fulfill_paid_purchase(reference, data, txn_repo)
+    except HTTPException as exc:
+        logger.warning("Ticket webhook fulfillment failed for ref=%s: %s", reference, exc.detail)
+        return {"status": "fulfillment_failed", "detail": exc.detail}
+    return {"status": "ok"}
+
+
+async def _handle_ticket_charge_failed(reference: str, data: dict, db: AsyncSession) -> dict:
+    txn_repo = TicketTransactionRepository(db)
+    txn = await txn_repo.get_by_reference(reference)
+    if not txn:
+        return {"status": "ignored"}
+    if txn.status != "pending":
+        return {"status": "ignored"}
+    await txn_repo.update_status(reference, "failed", data)
+    logger.info("Paystack ticket charge failed/abandoned for ref=%s", reference)
     return {"status": "ok"}

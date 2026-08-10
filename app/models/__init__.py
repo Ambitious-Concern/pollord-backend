@@ -3,6 +3,7 @@ from app.models.election import Election, Candidate, EligibleVoter
 from app.models.vote import Vote, VoteReceipt
 from app.models.event import Event, TicketType
 from app.models.ticket import Ticket, TicketPurchase
+from app.models.ticket_transaction import TicketTransaction
 from app.models.audit_log import AuditLog
 from app.models.organization import Organization, OrganizationMember
 from app.models.transaction import Transaction
@@ -22,6 +23,7 @@ __all__ = [
     "TicketType",
     "Ticket",
     "TicketPurchase",
+    "TicketTransaction",
     "AuditLog",
     "Organization",
     "OrganizationMember",
