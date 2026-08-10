@@ -95,6 +95,24 @@ async def list_events(
     return [EventResponse.model_validate(e) for e in events]
 
 
+@router.get("/public", response_model=List[EventResponse])
+async def list_public_events(
+    db: AsyncSession = Depends(get_db),
+    skip: int = 0,
+    limit: int = 20,
+    category: Optional[str] = None,
+):
+    """List all published events. No authentication required.
+
+    Must stay registered before GET /{event_id} — otherwise FastAPI matches
+    this path against that route first and tries (and fails) to parse
+    "public" as a UUID.
+    """
+    event_repo = EventRepository(Event, db)
+    events = await event_repo.get_published_events(skip=skip, limit=limit, category=category)
+    return [EventResponse.model_validate(e) for e in events]
+
+
 @router.get("/{event_id}", response_model=EventWithTicketTypes)
 async def get_event(
     event_id: UUID,
