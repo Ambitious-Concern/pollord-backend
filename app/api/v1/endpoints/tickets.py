@@ -1,8 +1,10 @@
 import secrets
+from datetime import date, time
 from decimal import Decimal
-from typing import List
+from typing import List, Optional
 from uuid import UUID
 
+import httpx
 from fastapi import APIRouter, Depends, Request
 from fastapi.responses import StreamingResponse
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -13,19 +15,25 @@ from app.core.security import decode_token
 from app.db.base import get_db
 from app.models.audit_log import AuditLog
 from app.models.event import Event, TicketType
-from app.models.ticket import Ticket, TicketPurchase
+from app.models.organization import Organization
+from app.models.ticket import Ticket, TicketPurchase, is_owned_by
 from app.models.user import User
 from app.repositories.audit_log_repository import AuditLogRepository
 from app.repositories.event_repository import EventRepository, TicketTypeRepository
+from app.repositories.organization_repository import OrganizationRepository
 from app.repositories.ticket_repository import TicketPurchaseRepository, TicketRepository
 from app.repositories.ticket_transaction_repository import TicketTransactionRepository
 from app.repositories.user_repository import UserRepository
 from app.schemas.ticket import (
     GuestTicketPurchaseRequest,
+    PublicTicketValidation,
+    ScanInfoResponse,
+    TicketDetailResponse,
     TicketPaymentInitResponse,
     TicketPurchaseRequest,
     TicketPurchaseResponse,
     TicketResponse,
+    TicketSaleResponse,
     TicketValidation,
     TicketValidationResponse,
     VerifyAndPurchaseRequest,
@@ -36,6 +44,32 @@ from app.utils.pdf_generator import generate_ticket_pdf
 from app.utils.qr_code import generate_qr_code
 
 router = APIRouter(prefix="/tickets", tags=["Tickets"])
+
+
+async def _fetch_image_bytes(url: Optional[str]) -> Optional[bytes]:
+    """Best-effort fetch of an event banner / org logo for embedding in the ticket PDF.
+    Never raises — a missing/slow image just falls back to the placeholder box."""
+    if not url:
+        return None
+    try:
+        async with httpx.AsyncClient(timeout=5.0) as client:
+            res = await client.get(url)
+            res.raise_for_status()
+            return res.content
+    except Exception:
+        return None
+
+
+async def _fetch_organizer_logo_bytes(db: AsyncSession, organizer_id: Optional[UUID]) -> Optional[bytes]:
+    """The ticket PDF footer shows the organizing event's own org logo alongside
+    Pollord's. An organizer owns at most one org in this app, so we just take
+    the first one they own — there's no direct event->org link to follow."""
+    if not organizer_id:
+        return None
+    orgs = await OrganizationRepository(Organization, db).get_by_owner(organizer_id)
+    if not orgs:
+        return None
+    return await _fetch_image_bytes(orgs[0].logo_url)
 
 
 def _get_ticketing_service(db: AsyncSession) -> TicketingService:
@@ -388,16 +422,21 @@ async def download_ticket_guest(
     qr_bytes = generate_qr_code(ticket.qr_code_data)
     event_repo = EventRepository(Event, db)
     event = await event_repo.get_by_id(ticket.event_id, id_field="event_id")
+    banner_bytes = await _fetch_image_bytes(event.banner_image_url if event else None)
+    org_logo_bytes = await _fetch_organizer_logo_bytes(db, event.created_by if event else None)
 
     pdf_bytes = generate_ticket_pdf(
         event_title=event.title if event else "Event",
-        event_date=str(event.event_date) if event else "",
-        event_time=str(event.event_time) if event else "",
+        event_date=event.event_date if event else date.today(),
+        event_time=event.event_time if event else time(0, 0),
         location=event.location if event else "",
         ticket_type=ticket.ticket_type.type_name if ticket.ticket_type else "",
         ticket_code=ticket.ticket_code,
         attendee_name=ticket.guest_name or "Guest",
+        purchase_date=ticket.purchase_date,
         qr_bytes=qr_bytes,
+        banner_image_bytes=banner_bytes,
+        org_logo_bytes=org_logo_bytes,
     )
 
     return StreamingResponse(
@@ -409,7 +448,58 @@ async def download_ticket_guest(
     )
 
 
-@router.get("/my-tickets", response_model=List[TicketResponse])
+@router.get("/public/scan-info/{token}", response_model=ScanInfoResponse)
+async def get_scan_info(
+    token: str,
+    db: AsyncSession = Depends(get_db),
+):
+    """Lets the standalone scanner page show event context and detect an
+    expired/invalid link before the visitor even opens their camera."""
+    from datetime import datetime, timezone
+    from fastapi import HTTPException
+
+    payload = decode_token(token)
+    if not payload or payload.get("type") != "ticket_scan":
+        raise HTTPException(status_code=404, detail="Invalid or expired check-in link")
+
+    event_id = UUID(payload["sub"])
+    event_repo = EventRepository(Event, db)
+    event = await event_repo.get_by_id(event_id, id_field="event_id")
+    if not event:
+        raise HTTPException(status_code=404, detail="Event not found")
+
+    return ScanInfoResponse(
+        event_id=event.event_id,
+        event_title=event.title,
+        expires_at=datetime.fromtimestamp(payload["exp"], tz=timezone.utc),
+    )
+
+
+@router.post("/public/validate", response_model=TicketValidationResponse)
+async def validate_ticket_guest(
+    data: PublicTicketValidation,
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+):
+    """No-auth ticket check-in, gated by an event-scoped scan_token instead
+    of a Bearer token — hard-enforces the ticket belongs to that event."""
+    from fastapi import HTTPException
+
+    payload = decode_token(data.scan_token)
+    if not payload or payload.get("type") != "ticket_scan":
+        raise HTTPException(status_code=404, detail="Invalid or expired check-in link")
+
+    service = _get_ticketing_service(db)
+    return await service.validate_ticket(
+        ticket_code=data.ticket_code,
+        scanned_by=None,
+        ip=request.client.host if request.client else None,
+        user_agent=request.headers.get("user-agent"),
+        expected_event_id=UUID(payload["sub"]),
+    )
+
+
+@router.get("/my-tickets", response_model=List[TicketDetailResponse])
 async def get_my_tickets(
     current_user: User = Depends(get_current_active_user),
     db: AsyncSession = Depends(get_db),
@@ -417,7 +507,25 @@ async def get_my_tickets(
     limit: int = 20,
 ):
     service = _get_ticketing_service(db)
-    return await service.get_user_tickets(current_user.user_id, skip, limit)
+    return await service.get_user_tickets(
+        current_user.user_id, current_user.email, skip, limit
+    )
+
+
+@router.get("/sales", response_model=List[TicketSaleResponse])
+async def get_ticket_sales(
+    event_id: Optional[UUID] = None,
+    current_user: User = Depends(get_current_active_user),
+    db: AsyncSession = Depends(get_db),
+    skip: int = 0,
+    limit: int = 50,
+):
+    """Tickets sold across every event the caller organizes, optionally
+    narrowed to a single event."""
+    service = _get_ticketing_service(db)
+    return await service.get_organizer_ticket_sales(
+        current_user.user_id, event_id=event_id, skip=skip, limit=limit
+    )
 
 
 @router.get("/{ticket_id}/download")
@@ -431,7 +539,7 @@ async def download_ticket(
 
     ticket_repo = TicketRepository(Ticket, db)
     ticket = await ticket_repo.get_by_id(ticket_id, id_field="ticket_id")
-    if not ticket or ticket.user_id != current_user.user_id:
+    if not ticket or not is_owned_by(ticket, current_user):
         raise HTTPException(status_code=404, detail="Ticket not found")
 
     # Generate QR code
@@ -440,16 +548,21 @@ async def download_ticket(
     # Get event and ticket type info
     event_repo = EventRepository(Event, db)
     event = await event_repo.get_by_id(ticket.event_id, id_field="event_id")
+    banner_bytes = await _fetch_image_bytes(event.banner_image_url if event else None)
+    org_logo_bytes = await _fetch_organizer_logo_bytes(db, event.created_by if event else None)
 
     pdf_bytes = generate_ticket_pdf(
         event_title=event.title if event else "Event",
-        event_date=str(event.event_date) if event else "",
-        event_time=str(event.event_time) if event else "",
+        event_date=event.event_date if event else date.today(),
+        event_time=event.event_time if event else time(0, 0),
         location=event.location if event else "",
         ticket_type=ticket.ticket_type.type_name if ticket.ticket_type else "",
         ticket_code=ticket.ticket_code,
         attendee_name=current_user.full_name,
+        purchase_date=ticket.purchase_date,
         qr_bytes=qr_bytes,
+        banner_image_bytes=banner_bytes,
+        org_logo_bytes=org_logo_bytes,
     )
 
     return StreamingResponse(
@@ -486,4 +599,4 @@ async def cancel_ticket(
     db: AsyncSession = Depends(get_db),
 ):
     service = _get_ticketing_service(db)
-    return await service.cancel_ticket(ticket_id, current_user.user_id)
+    return await service.cancel_ticket(ticket_id, current_user)
