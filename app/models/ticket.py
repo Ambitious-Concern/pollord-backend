@@ -3,7 +3,17 @@ from datetime import datetime
 from decimal import Decimal
 from typing import TYPE_CHECKING, Optional
 
-from sqlalchemy import CheckConstraint, DateTime, ForeignKey, Numeric, String, Text, func
+from sqlalchemy import (
+    CheckConstraint,
+    DateTime,
+    ForeignKey,
+    Numeric,
+    String,
+    Text,
+    and_,
+    func,
+    or_,
+)
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -113,4 +123,32 @@ class TicketPurchase(Base):
     )
     tickets: Mapped[list["Ticket"]] = relationship(
         back_populates="purchase", lazy="selectin"
+    )
+
+
+# A ticket belongs to a user either directly (user_id, bought while signed in)
+# or indirectly — guest checkout records only guest_email, so a ticket bought
+# with the address on someone's account is still theirs.
+def owned_by(user_id: uuid.UUID, email: Optional[str] = None):
+    """SQL predicate for the tickets a user owns."""
+    owned = Ticket.user_id == user_id
+    if email:
+        owned = or_(
+            owned,
+            and_(
+                Ticket.user_id.is_(None),
+                func.lower(Ticket.guest_email) == email.lower(),
+            ),
+        )
+    return owned
+
+
+def is_owned_by(ticket: "Ticket", user: "User") -> bool:
+    """Object-level counterpart of owned_by(), for authorizing a loaded ticket."""
+    if ticket.user_id is not None:
+        return ticket.user_id == user.user_id
+    return bool(
+        ticket.guest_email
+        and user.email
+        and ticket.guest_email.lower() == user.email.lower()
     )

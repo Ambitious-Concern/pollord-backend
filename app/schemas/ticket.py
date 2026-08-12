@@ -85,6 +85,13 @@ class TicketDetailResponse(TicketResponse):
     attendee_name: str = ""
 
 
+class TicketSaleResponse(TicketDetailResponse):
+    """One issued ticket, as seen by the organizer of the event it belongs to."""
+
+    attendee_email: str = ""
+    amount: Decimal = Decimal("0")
+
+
 class TicketPurchaseResponse(BaseModel):
     purchase_id: UUID
     event_id: UUID
@@ -105,3 +112,19 @@ class TicketValidationResponse(BaseModel):
     attendee_name: Optional[str] = None
     event_title: Optional[str] = None
     ticket_type: Optional[str] = None
+
+
+class TicketScanTokenResponse(BaseModel):
+    scan_token: str
+    expires_at: datetime
+
+
+class ScanInfoResponse(BaseModel):
+    event_id: UUID
+    event_title: str
+    expires_at: datetime
+
+
+class PublicTicketValidation(BaseModel):
+    scan_token: str
+    ticket_code: str

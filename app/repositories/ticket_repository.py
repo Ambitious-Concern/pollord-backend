@@ -4,8 +4,10 @@ from uuid import UUID
 
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import selectinload
 
-from app.models.ticket import Ticket, TicketPurchase
+from app.models.event import Event
+from app.models.ticket import Ticket, TicketPurchase, owned_by
 from app.repositories.base import BaseRepository
 
 
@@ -15,16 +17,54 @@ class TicketRepository(BaseRepository[Ticket]):
 
     async def get_by_ticket_code(self, code: str) -> Optional[Ticket]:
         result = await self.session.execute(
-            select(Ticket).where(Ticket.ticket_code == code)
+            select(Ticket)
+            .where(Ticket.ticket_code == code)
+            .options(selectinload(Ticket.event), selectinload(Ticket.user))
         )
         return result.scalar_one_or_none()
 
     async def get_user_tickets(
-        self, user_id: UUID, skip: int = 0, limit: int = 20
+        self,
+        user_id: UUID,
+        email: Optional[str] = None,
+        skip: int = 0,
+        limit: int = 20,
     ) -> List[Ticket]:
         result = await self.session.execute(
             select(Ticket)
-            .where(Ticket.user_id == user_id)
+            .where(owned_by(user_id, email))
+            .options(
+                selectinload(Ticket.event),
+                selectinload(Ticket.ticket_type),
+                selectinload(Ticket.user),
+            )
+            .order_by(Ticket.purchase_date.desc())
+            .offset(skip)
+            .limit(limit)
+        )
+        return list(result.scalars().all())
+
+    async def get_organizer_tickets(
+        self,
+        organizer_id: UUID,
+        event_id: Optional[UUID] = None,
+        skip: int = 0,
+        limit: int = 50,
+    ) -> List[Ticket]:
+        """Every ticket issued for an event the given user created, optionally
+        narrowed to a single event."""
+        conditions = [Event.created_by == organizer_id]
+        if event_id:
+            conditions.append(Event.event_id == event_id)
+        result = await self.session.execute(
+            select(Ticket)
+            .join(Event, Event.event_id == Ticket.event_id)
+            .where(*conditions)
+            .options(
+                selectinload(Ticket.event),
+                selectinload(Ticket.ticket_type),
+                selectinload(Ticket.user),
+            )
             .order_by(Ticket.purchase_date.desc())
             .offset(skip)
             .limit(limit)
@@ -38,9 +78,14 @@ class TicketRepository(BaseRepository[Ticket]):
         return list(result.scalars().all())
 
     async def mark_as_used(
-        self, ticket_id: UUID, scanned_by: UUID
+        self, ticket_id: UUID, scanned_by: Optional[UUID]
     ) -> Optional[Ticket]:
-        ticket = await self.get_by_id(ticket_id, id_field="ticket_id")
+        result = await self.session.execute(
+            select(Ticket)
+            .where(Ticket.ticket_id == ticket_id)
+            .options(selectinload(Ticket.event), selectinload(Ticket.user))
+        )
+        ticket = result.scalar_one_or_none()
         if ticket and ticket.ticket_status == "valid":
             ticket.ticket_status = "used"
             ticket.used_at = datetime.now(timezone.utc)

@@ -9,16 +9,19 @@ from fastapi import HTTPException, status
 
 from app.core.security import create_ticket_download_token, generate_secure_token
 from app.models.event import Event
-from app.models.ticket import Ticket
+from app.models.ticket import Ticket, is_owned_by
+from app.models.user import User
 from app.repositories.audit_log_repository import AuditLogRepository
 from app.repositories.event_repository import EventRepository, TicketTypeRepository
 from app.repositories.ticket_repository import TicketPurchaseRepository, TicketRepository
 from app.repositories.ticket_transaction_repository import TicketTransactionRepository
 from app.repositories.user_repository import UserRepository
 from app.schemas.ticket import (
+    TicketDetailResponse,
     TicketPurchaseRequest,
     TicketPurchaseResponse,
     TicketResponse,
+    TicketSaleResponse,
     TicketValidationResponse,
 )
 from app.services.email_service import (
@@ -398,15 +401,25 @@ class TicketingService:
     async def validate_ticket(
         self,
         ticket_code: str,
-        scanned_by: UUID,
+        scanned_by: Optional[UUID],
         ip: Optional[str] = None,
         user_agent: Optional[str] = None,
+        expected_event_id: Optional[UUID] = None,
     ) -> TicketValidationResponse:
         ticket = await self.ticket_repo.get_by_ticket_code(ticket_code)
         if not ticket:
             return TicketValidationResponse(
                 valid=False,
                 message="Ticket not found",
+            )
+
+        if expected_event_id and ticket.event_id != expected_event_id:
+            # Deliberately vague — a scan link scoped to one event shouldn't
+            # confirm that a mismatched code is even a *valid* ticket for
+            # some other event.
+            return TicketValidationResponse(
+                valid=False,
+                message="This ticket is not valid for this event",
             )
 
         if ticket.ticket_status == "used":
@@ -463,11 +476,15 @@ class TicketingService:
         )
 
     async def get_user_tickets(
-        self, user_id: UUID, skip: int = 0, limit: int = 20
-    ) -> List[TicketResponse]:
-        tickets = await self.ticket_repo.get_user_tickets(user_id, skip, limit)
+        self,
+        user_id: UUID,
+        email: Optional[str] = None,
+        skip: int = 0,
+        limit: int = 20,
+    ) -> List[TicketDetailResponse]:
+        tickets = await self.ticket_repo.get_user_tickets(user_id, email, skip, limit)
         return [
-            TicketResponse(
+            TicketDetailResponse(
                 ticket_id=t.ticket_id,
                 ticket_code=t.ticket_code,
                 event_id=t.event_id,
@@ -475,12 +492,41 @@ class TicketingService:
                 ticket_status=t.ticket_status,
                 purchase_date=t.purchase_date,
                 used_at=t.used_at,
+                event_title=t.event.title if t.event else "",
+                ticket_type_name=t.ticket_type.type_name if t.ticket_type else "",
+                attendee_name=(t.user.full_name if t.user else t.guest_name) or "",
+            )
+            for t in tickets
+        ]
+
+    async def get_organizer_ticket_sales(
+        self,
+        organizer_id: UUID,
+        event_id: Optional[UUID] = None,
+        skip: int = 0,
+        limit: int = 50,
+    ) -> List[TicketSaleResponse]:
+        tickets = await self.ticket_repo.get_organizer_tickets(organizer_id, event_id, skip, limit)
+        return [
+            TicketSaleResponse(
+                ticket_id=t.ticket_id,
+                ticket_code=t.ticket_code,
+                event_id=t.event_id,
+                ticket_type_id=t.ticket_type_id,
+                ticket_status=t.ticket_status,
+                purchase_date=t.purchase_date,
+                used_at=t.used_at,
+                event_title=t.event.title if t.event else "",
+                ticket_type_name=t.ticket_type.type_name if t.ticket_type else "",
+                attendee_name=(t.user.full_name if t.user else t.guest_name) or "",
+                attendee_email=(t.user.email if t.user else t.guest_email) or "",
+                amount=t.ticket_type.price if t.ticket_type else Decimal("0"),
             )
             for t in tickets
         ]
 
     async def cancel_ticket(
-        self, ticket_id: UUID, user_id: UUID
+        self, ticket_id: UUID, user: User
     ) -> TicketResponse:
         ticket = await self.ticket_repo.get_by_id(ticket_id, id_field="ticket_id")
         if not ticket:
@@ -488,7 +534,7 @@ class TicketingService:
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail="Ticket not found",
             )
-        if ticket.user_id != user_id:
+        if not is_owned_by(ticket, user):
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail="You can only cancel your own tickets",

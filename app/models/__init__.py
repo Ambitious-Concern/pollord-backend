@@ -9,6 +9,7 @@ from app.models.organization import Organization, OrganizationMember
 from app.models.transaction import Transaction
 from app.models.platform_setting import PlatformSetting
 from app.models.waitlist import WaitlistSubscriber
+from app.models.payout_request import PayoutRequest
 
 __all__ = [
     "User",
@@ -30,4 +31,5 @@ __all__ = [
     "Transaction",
     "PlatformSetting",
     "WaitlistSubscriber",
+    "PayoutRequest",
 ]
