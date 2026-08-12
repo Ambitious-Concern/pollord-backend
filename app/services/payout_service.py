@@ -1,3 +1,4 @@
+import secrets
 from decimal import Decimal
 from typing import List, Optional
 from uuid import UUID
@@ -11,7 +12,13 @@ from app.repositories.event_repository import EventRepository
 from app.repositories.payout_request_repository import PayoutRequestRepository
 from app.repositories.ticket_repository import TicketPurchaseRepository
 from app.repositories.user_repository import UserRepository
-from app.schemas.payout import PayoutAvailableResponse, PayoutRequestResponse
+from app.schemas.payout import (
+    MobileMoneyNetwork,
+    PayoutAvailableResponse,
+    PayoutRequestCreate,
+    PayoutRequestResponse,
+)
+from app.services.paystack_service import PaystackService
 
 
 class PayoutService:
@@ -21,11 +28,13 @@ class PayoutService:
         event_repo: EventRepository,
         purchase_repo: TicketPurchaseRepository,
         user_repo: UserRepository,
+        paystack: Optional[PaystackService] = None,
     ):
         self.payout_repo = payout_repo
         self.event_repo = event_repo
         self.purchase_repo = purchase_repo
         self.user_repo = user_repo
+        self.paystack = paystack
 
     @staticmethod
     def _to_response(
@@ -41,6 +50,12 @@ class PayoutService:
             amount=req.amount,
             status=req.status,
             admin_notes=req.admin_notes,
+            payout_method=req.payout_method,
+            recipient_name=req.recipient_name,
+            mobile_network=req.mobile_network,
+            mobile_number=req.mobile_number,
+            transfer_reference=req.transfer_reference,
+            transfer_status=req.transfer_status,
             requested_at=req.requested_at,
             reviewed_at=req.reviewed_at,
         )
@@ -68,7 +83,9 @@ class PayoutService:
             has_pending_request=await self.payout_repo.has_pending(event_id),
         )
 
-    async def request_payout(self, event_id: UUID, user: User) -> PayoutRequestResponse:
+    async def request_payout(
+        self, event_id: UUID, user: User, data: PayoutRequestCreate
+    ) -> PayoutRequestResponse:
         event = await self._require_event_and_ownership(event_id, user)
 
         if await self.payout_repo.has_pending(event_id):
@@ -94,6 +111,10 @@ class PayoutService:
                 "organizer_id": user.user_id,
                 "amount": available,
                 "status": "pending",
+                "payout_method": data.payout_method,
+                "recipient_name": data.recipient_name,
+                "mobile_network": data.mobile_network,
+                "mobile_number": data.mobile_number,
             }
         )
         return self._to_response(req, event, user)
@@ -127,3 +148,83 @@ class PayoutService:
         event = await self.event_repo.get_by_id(req.event_id, id_field="event_id")
         organizer = await self.user_repo.get_by_id(req.organizer_id, id_field="user_id")
         return self._to_response(req, event, organizer)
+
+    async def list_mobile_money_networks(self) -> List[MobileMoneyNetwork]:
+        """Fetched live from Paystack rather than hardcoded — a wrong network
+        code here means a transfer could go to the wrong destination."""
+        assert self.paystack is not None
+        banks = await self.paystack.list_banks(currency="GHS", transfer_type="mobile_money")
+        return [MobileMoneyNetwork(name=b["name"], code=b["code"]) for b in banks]
+
+    async def initiate_transfer(
+        self, payout_request_id: UUID, admin: User
+    ) -> PayoutRequestResponse:
+        """Pays a pending request out via Paystack Transfer, called from the
+        admin console. Only flips status to "paid" if Paystack confirms the
+        transfer actually succeeded — see record_transfer_result."""
+        assert self.paystack is not None
+        req = await self.payout_repo.get_by_id(payout_request_id, id_field="payout_request_id")
+        if not req:
+            raise HTTPException(status_code=404, detail="Payout request not found")
+        if req.status != "pending":
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=f"This request is already {req.status} — nothing to pay",
+            )
+        if not (req.mobile_network and req.mobile_number and req.recipient_name):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=(
+                    "This request has no payout destination on file (it may predate "
+                    "this feature) — pay the organizer manually and mark it paid instead."
+                ),
+            )
+
+        # Confirm the number actually resolves to a real account before we
+        # ever create a recipient or move money against it.
+        resolved = await self.paystack.resolve_account(req.mobile_number, req.mobile_network)
+
+        recipient_code = req.paystack_recipient_code
+        if not recipient_code:
+            recipient = await self.paystack.create_transfer_recipient(
+                name=resolved.get("account_name") or req.recipient_name,
+                account_number=req.mobile_number,
+                bank_code=req.mobile_network,
+                currency="GHS",
+                recipient_type="mobile_money",
+            )
+            recipient_code = recipient["recipient_code"]
+            await self.payout_repo.set_recipient_code(payout_request_id, recipient_code)
+
+        event = await self.event_repo.get_by_id(req.event_id, id_field="event_id")
+        reference = f"payout_{secrets.token_urlsafe(16)}"
+        transfer = await self.paystack.initiate_transfer(
+            amount=int(req.amount * 100),  # pesewas
+            recipient_code=recipient_code,
+            reason=f"Pollord payout — {event.title if event else req.event_id}",
+            reference=reference,
+        )
+
+        # From here on, Paystack has already accepted (or queued, or
+        # rejected) the transfer — a real-world action has happened. This
+        # DB write recording that outcome must land no matter what, so we
+        # deliberately never raise past this point: get_db() rolls back the
+        # session on any exception, and rolling back here would make the
+        # request look untouched — retrying would call Paystack a second
+        # time for money that may already be moving. Callers read
+        # `transfer_status` in the response body instead of an HTTP error.
+        transfer_status = transfer.get("status", "unknown")
+        updated = await self.payout_repo.record_transfer_result(
+            payout_request_id,
+            transfer_reference=reference,
+            transfer_status=transfer_status,
+            mark_paid=(transfer_status == "success"),
+            reviewed_by=admin.user_id,
+        )
+        if not updated:
+            # Should be unreachable (we already loaded `req` above), but
+            # fall back to the pre-update object rather than raise.
+            updated = req
+
+        organizer = await self.user_repo.get_by_id(req.organizer_id, id_field="user_id")
+        return self._to_response(updated, event, organizer)

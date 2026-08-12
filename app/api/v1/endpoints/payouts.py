@@ -4,6 +4,7 @@ from uuid import UUID
 from fastapi import APIRouter, Depends
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.config import settings
 from app.core.dependencies import get_current_active_user, require_roles
 from app.db.base import get_db
 from app.models.event import Event
@@ -14,8 +15,15 @@ from app.repositories.event_repository import EventRepository
 from app.repositories.payout_request_repository import PayoutRequestRepository
 from app.repositories.ticket_repository import TicketPurchaseRepository
 from app.repositories.user_repository import UserRepository
-from app.schemas.payout import PayoutAvailableResponse, PayoutRequestResponse, PayoutReviewRequest
+from app.schemas.payout import (
+    MobileMoneyNetwork,
+    PayoutAvailableResponse,
+    PayoutRequestCreate,
+    PayoutRequestResponse,
+    PayoutReviewRequest,
+)
 from app.services.payout_service import PayoutService
+from app.services.paystack_service import PaystackService
 
 router = APIRouter(prefix="/payouts", tags=["Payouts"])
 
@@ -29,6 +37,7 @@ def _get_service(db: AsyncSession) -> PayoutService:
         event_repo=EventRepository(Event, db),
         purchase_repo=TicketPurchaseRepository(TicketPurchase, db),
         user_repo=UserRepository(User, db),
+        paystack=PaystackService(settings.PAYSTACK_SECRET_KEY),
     )
 
 
@@ -42,16 +51,27 @@ async def get_available_payout(
     return await _get_service(db).get_available(event_id, current_user)
 
 
-@router.post("/events/{event_id}", response_model=PayoutRequestResponse, status_code=201)
-async def request_payout(
-    event_id: UUID,
+@router.get("/mobile-money-networks", response_model=List[MobileMoneyNetwork])
+async def list_mobile_money_networks(
     current_user: User = Depends(require_roles(*ORGANIZER_ROLES)),
     db: AsyncSession = Depends(get_db),
 ):
-    """Request payout of an event's outstanding revenue. This does not move
-    money — it creates a request for a platform admin to review and pay out
-    manually, then mark as paid."""
-    return await _get_service(db).request_payout(event_id, current_user)
+    """Paystack's own list of supported GHS mobile money networks + their
+    codes, for the payout-destination dropdown."""
+    return await _get_service(db).list_mobile_money_networks()
+
+
+@router.post("/events/{event_id}", response_model=PayoutRequestResponse, status_code=201)
+async def request_payout(
+    event_id: UUID,
+    data: PayoutRequestCreate,
+    current_user: User = Depends(require_roles(*ORGANIZER_ROLES)),
+    db: AsyncSession = Depends(get_db),
+):
+    """Request payout of an event's outstanding revenue, to the given mobile
+    money destination. An admin can then pay this out via Paystack Transfer
+    from the admin console, or pay outside the app and mark it paid."""
+    return await _get_service(db).request_payout(event_id, current_user, data)
 
 
 @router.get("/events/{event_id}", response_model=List[PayoutRequestResponse])
@@ -93,3 +113,19 @@ async def review_payout_request(
     return await _get_service(db).review(
         payout_request_id, data.status, data.admin_notes, current_user
     )
+
+
+@router.post("/admin/{payout_request_id}/pay", response_model=PayoutRequestResponse)
+async def pay_via_paystack(
+    payout_request_id: UUID,
+    current_user: User = Depends(require_roles(ADMIN_ROLE)),
+    db: AsyncSession = Depends(get_db),
+):
+    """Pays a pending request out via Paystack Transfer, to the mobile money
+    destination the organizer provided when requesting it. Moves real money —
+    check `transfer_status` in the response: "success" means it's done and
+    `status` is now "paid"; "pending"/"otp" means Paystack queued it or needs
+    OTP finalization on Paystack's own dashboard and the request stays
+    pending; anything else means it failed and can be retried or paid
+    manually instead."""
+    return await _get_service(db).initiate_transfer(payout_request_id, current_user)
