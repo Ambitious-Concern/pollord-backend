@@ -41,7 +41,11 @@ def _wrap_text(c: canvas.Canvas, text: str, font: str, size: int, max_width: flo
     return lines or [""]
 
 
-def _draw_field(c: canvas.Canvas, x: float, y: float, label: str, value: str, max_width: float) -> None:
+def _draw_field(c: canvas.Canvas, x: float, y: float, label: str, value: str, max_width: float) -> float:
+    """Draws label+value with (x, y) as the label's baseline. Returns the y
+    of the last value line's baseline, so callers can stack the next field
+    below whatever this one actually rendered (including wrapped values)
+    instead of guessing a fixed offset."""
     c.setFillColorRGB(*LABEL_COLOR)
     c.setFont("Helvetica", 9)
     c.drawString(x, y, label)
@@ -50,6 +54,7 @@ def _draw_field(c: canvas.Canvas, x: float, y: float, label: str, value: str, ma
     lines = _wrap_text(c, value, "Helvetica-Bold", 12, max_width)
     for i, line in enumerate(lines):
         c.drawString(x, y - 16 - (i * 14), line)
+    return y - 16 - ((len(lines) - 1) * 14)
 
 
 def _draw_image_box(
@@ -170,24 +175,25 @@ def generate_ticket_pdf(
     title_max_w = card_x + card_w - pad - title_x
     c.setFillColorRGB(*TEXT_COLOR)
     title_lines = _wrap_text(c, event_title or "Event", "Helvetica-Bold", 20, title_max_w)[:2]
+    title_top_y = top_card_y + top_card_h - pad - 20
     for i, line in enumerate(title_lines):
         c.setFont("Helvetica-Bold", 20)
-        c.drawString(title_x, top_card_y + top_card_h - pad - 20 - (i * 24), line)
+        c.drawString(title_x, title_top_y - (i * 24), line)
 
     event_dt_label = f"{event_date.strftime('%a')}, {event_time.strftime('%I:%M%p').lower()}"
-    _draw_field(
-        c, title_x, top_card_y + top_card_h - pad - 20 - (len(title_lines) * 24) - 24,
-        "Attendee:", attendee_name or "Guest", title_max_w,
-    )
-    _draw_field(
-        c, title_x, top_card_y + top_card_h - pad - 20 - (len(title_lines) * 24) - 24 - 44,
-        "Event Time:", event_dt_label, title_max_w,
-    )
+    text_y = title_top_y - ((len(title_lines) - 1) * 24) - 24
+    text_y = _draw_field(c, title_x, text_y, "Attendee:", attendee_name or "Guest", title_max_w) - 28
+    text_y = _draw_field(c, title_x, text_y, "Event Time:", event_dt_label, title_max_w)
 
     col_w = (card_w - 2 * pad) / 2
     col1_x = card_x + pad
     col2_x = card_x + pad + col_w
-    row1_y = image_y - 36
+    # Whichever is taller — the image or the (variable-height, depending on
+    # how much the title/attendee/event-time text wrapped) text stack next
+    # to it — the info grid below must clear both, or long titles overlap
+    # "Event Time" with "Date of Booking"/"Event Venue".
+    header_bottom_y = min(image_y, text_y)
+    row1_y = header_bottom_y - 30
     row2_y = row1_y - 60
 
     booking_date = purchase_date.strftime("%b %d, %Y")
