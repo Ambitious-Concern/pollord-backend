@@ -80,3 +80,34 @@ class PayoutRequestRepository(BaseRepository[PayoutRequest]):
         await self.session.flush()
         await self.session.refresh(req)
         return req
+
+    async def set_recipient_code(self, payout_request_id: UUID, recipient_code: str) -> None:
+        req = await self.get_by_id(payout_request_id, id_field="payout_request_id")
+        if req:
+            req.paystack_recipient_code = recipient_code
+            await self.session.flush()
+
+    async def record_transfer_result(
+        self,
+        payout_request_id: UUID,
+        transfer_reference: str,
+        transfer_status: str,
+        mark_paid: bool,
+        reviewed_by: UUID,
+    ) -> Optional[PayoutRequest]:
+        """Persists the outcome of a Paystack transfer attempt. Only flips
+        `status` to "paid" when the transfer actually succeeded — a pending
+        or failed transfer leaves `status` as "pending" so it can be retried
+        or paid out manually instead."""
+        req = await self.get_by_id(payout_request_id, id_field="payout_request_id")
+        if not req:
+            return None
+        req.transfer_reference = transfer_reference
+        req.transfer_status = transfer_status
+        if mark_paid:
+            req.status = "paid"
+            req.reviewed_at = datetime.now(timezone.utc)
+            req.reviewed_by = reviewed_by
+        await self.session.flush()
+        await self.session.refresh(req)
+        return req
