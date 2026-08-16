@@ -15,6 +15,7 @@ router = APIRouter(tags=["Sitemap"])
 STATIC_ROUTES = [
     ("/", "weekly", "1.0"),
     ("/explore", "daily", "0.9"),
+    ("/pricing", "monthly", "0.8"),
     ("/contact", "monthly", "0.5"),
     ("/vote", "monthly", "0.5"),
 ]
