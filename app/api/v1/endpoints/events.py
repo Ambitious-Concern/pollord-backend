@@ -1,3 +1,4 @@
+from datetime import datetime, time, timedelta, timezone
 from pathlib import Path
 from typing import List, Optional
 from uuid import UUID
@@ -6,6 +7,7 @@ from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.dependencies import get_current_active_user, require_roles
+from app.core.security import create_ticket_scan_token
 from app.db.base import get_db
 from app.models.audit_log import AuditLog
 from app.models.event import Event, TicketType
@@ -22,6 +24,7 @@ from app.schemas.event import (
     TicketTypeResponse,
     TicketTypeUpdate,
 )
+from app.schemas.ticket import TicketScanTokenResponse
 
 router = APIRouter(prefix="/events", tags=["Events"])
 
@@ -233,6 +236,28 @@ async def cancel_event(
     )
 
     return {"message": "Event cancelled"}
+
+
+@router.get("/{event_id}/scan-token", response_model=TicketScanTokenResponse)
+async def get_event_scan_token(
+    event_id: UUID,
+    current_user: User = Depends(require_roles(*ORGANIZER_ROLES)),
+    db: AsyncSession = Depends(get_db),
+):
+    """Mint (or re-mint — it's deterministic per event/day) a no-auth
+    check-in link the organizer can hand to volunteers who have no
+    account. Valid until the end of the event's calendar day."""
+    event_repo = EventRepository(Event, db)
+    event = await event_repo.get_by_id(event_id, id_field="event_id")
+    if not event:
+        raise HTTPException(status_code=404, detail="Event not found")
+    _require_event_ownership(event, current_user)
+
+    expires_at = datetime.combine(
+        event.event_date + timedelta(days=1), time.min
+    ).replace(tzinfo=timezone.utc)
+    scan_token = create_ticket_scan_token(str(event.event_id), expires_at)
+    return TicketScanTokenResponse(scan_token=scan_token, expires_at=expires_at)
 
 
 # --- Ticket Types ---

@@ -66,3 +66,106 @@ class PaystackService:
                 detail=f"Paystack error: {body.get('message', 'Unknown error')}",
             )
         return body["data"]
+
+    # --- Transfers (paying money out — collecting payments above never touches this) ---
+
+    async def list_banks(self, currency: str = "GHS", transfer_type: str = "mobile_money") -> list[dict]:
+        """List Paystack's own bank/mobile-money-provider codes for a currency —
+        fetched live rather than hardcoded, since a wrong code here means money
+        could be sent to the wrong destination."""
+        async with httpx.AsyncClient() as client:
+            r = await client.get(
+                f"{self.BASE_URL}/bank",
+                headers=self._headers,
+                params={"currency": currency, "type": transfer_type},
+                timeout=30.0,
+            )
+
+        body = r.json()
+        if not body.get("status"):
+            raise HTTPException(
+                status_code=502,
+                detail=f"Paystack error: {body.get('message', 'Unknown error')}",
+            )
+        return body["data"]
+
+    async def resolve_account(self, account_number: str, bank_code: str) -> dict:
+        """Confirms an account/mobile-money number resolves to a real account
+        before we ever create a transfer recipient for it. Returns
+        {account_number, account_name, bank_id}."""
+        async with httpx.AsyncClient() as client:
+            r = await client.get(
+                f"{self.BASE_URL}/bank/resolve",
+                headers=self._headers,
+                params={"account_number": account_number, "bank_code": bank_code},
+                timeout=30.0,
+            )
+
+        body = r.json()
+        if not body.get("status"):
+            raise HTTPException(
+                status_code=400,
+                detail=f"Could not verify that account: {body.get('message', 'Unknown error')}",
+            )
+        return body["data"]
+
+    async def create_transfer_recipient(
+        self,
+        name: str,
+        account_number: str,
+        bank_code: str,
+        currency: str = "GHS",
+        recipient_type: str = "mobile_money",
+    ) -> dict:
+        """Returns the created recipient, notably `recipient_code`."""
+        async with httpx.AsyncClient() as client:
+            r = await client.post(
+                f"{self.BASE_URL}/transferrecipient",
+                headers=self._headers,
+                json={
+                    "type": recipient_type,
+                    "name": name,
+                    "account_number": account_number,
+                    "bank_code": bank_code,
+                    "currency": currency,
+                },
+                timeout=30.0,
+            )
+
+        body = r.json()
+        if not body.get("status"):
+            raise HTTPException(
+                status_code=502,
+                detail=f"Paystack error creating transfer recipient: {body.get('message', 'Unknown error')}",
+            )
+        return body["data"]
+
+    async def initiate_transfer(
+        self, amount: int, recipient_code: str, reason: str, reference: str
+    ) -> dict:
+        """Moves real money out of the Paystack balance. `amount` is in the
+        smallest currency unit (pesewas for GHS). Returns the transfer object;
+        `data["status"]` may be "success", "pending", or "otp" (Paystack's
+        account-level settings require a one-time code sent to the business's
+        phone to finalize — that can't be completed from this API alone)."""
+        async with httpx.AsyncClient() as client:
+            r = await client.post(
+                f"{self.BASE_URL}/transfer",
+                headers=self._headers,
+                json={
+                    "source": "balance",
+                    "amount": amount,
+                    "recipient": recipient_code,
+                    "reason": reason,
+                    "reference": reference,
+                },
+                timeout=30.0,
+            )
+
+        body = r.json()
+        if not body.get("status"):
+            raise HTTPException(
+                status_code=502,
+                detail=f"Paystack error initiating transfer: {body.get('message', 'Unknown error')}",
+            )
+        return body["data"]

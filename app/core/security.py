@@ -91,6 +91,16 @@ def create_ticket_download_token(ticket_id: str) -> str:
     return jwt.encode(to_encode, settings.JWT_SECRET_KEY, algorithm=settings.JWT_ALGORITHM)
 
 
+def create_ticket_scan_token(event_id: str, expire: datetime) -> str:
+    """Token letting anyone with the link check tickets in for exactly one
+    event with no account, until `expire` (the caller decides the policy —
+    e.g. end of the event's calendar day)."""
+    if expire.tzinfo is None:
+        expire = expire.replace(tzinfo=timezone.utc)
+    to_encode = {"sub": event_id, "type": "ticket_scan", "exp": expire}
+    return jwt.encode(to_encode, settings.JWT_SECRET_KEY, algorithm=settings.JWT_ALGORITHM)
+
+
 # Vote encryption (AES-256-GCM)
 def _get_aes_key() -> bytes:
     key = settings.AES_ENCRYPTION_KEY
