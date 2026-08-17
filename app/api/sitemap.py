@@ -18,6 +18,7 @@ STATIC_ROUTES = [
     ("/pricing", "monthly", "0.8"),
     ("/contact", "monthly", "0.5"),
     ("/privacy", "yearly", "0.3"),
+    ("/terms", "yearly", "0.3"),
     ("/vote", "monthly", "0.5"),
 ]
 
