@@ -145,6 +145,63 @@ class ResendTicketEmailResponse(BaseModel):
     message: str
 
 
+class ManualPaymentLookupRequest(BaseModel):
+    reference: str
+
+
+class ManualPaymentLookupResponse(BaseModel):
+    """Read-only Paystack lookup backing the Verify step of the manual-add
+    form, so an admin sees the real payment before issuing anything."""
+
+    reference: str
+    paystack_status: str
+    amount: Decimal
+    currency: str
+    paid_at: Optional[str] = None
+    customer_email: Optional[str] = None
+    # True when this reference already produced tickets — issuing again would
+    # double-issue for a single payment.
+    already_fulfilled: bool = False
+    existing_purchase_id: Optional[UUID] = None
+
+
+class ManualAttendeeRequest(BaseModel):
+    """Issue tickets for a payment Paystack took but our checkout never
+    recorded."""
+
+    reference: str
+    name: str
+    email: EmailStr
+    phone: Optional[str] = None
+    ticket_type_id: UUID
+    quantity: int = 1
+
+    @field_validator("name")
+    @classmethod
+    def validate_name(cls, v: str) -> str:
+        if not v.strip():
+            raise ValueError("Name is required")
+        return v.strip()
+
+    @field_validator("quantity")
+    @classmethod
+    def validate_quantity(cls, v: int) -> int:
+        if v < 1:
+            raise ValueError("Quantity must be at least 1")
+        return v
+
+
+class ManualAttendeeResponse(BaseModel):
+    purchase_id: UUID
+    event_id: UUID
+    ticket_count: int
+    amount: Decimal
+    email: str
+    # False means the tickets exist but the email did not go out.
+    email_sent: bool
+    message: str
+
+
 class TicketValidation(BaseModel):
     ticket_code: str
 

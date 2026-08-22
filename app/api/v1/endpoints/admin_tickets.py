@@ -11,6 +11,7 @@ from uuid import UUID
 from fastapi import APIRouter, Depends, Request
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.config import settings
 from app.core.dependencies import require_roles
 from app.db.base import get_db
 from app.models.audit_log import AuditLog
@@ -20,12 +21,18 @@ from app.models.user import User
 from app.repositories.audit_log_repository import AuditLogRepository
 from app.repositories.event_repository import EventRepository, TicketTypeRepository
 from app.repositories.ticket_repository import TicketPurchaseRepository, TicketRepository
+from app.repositories.ticket_transaction_repository import TicketTransactionRepository
 from app.repositories.user_repository import UserRepository
 from app.schemas.ticket import (
     AdminTicketPurchaseListResponse,
+    ManualAttendeeRequest,
+    ManualAttendeeResponse,
+    ManualPaymentLookupRequest,
+    ManualPaymentLookupResponse,
     ResendTicketEmailRequest,
     ResendTicketEmailResponse,
 )
+from app.services.paystack_service import PaystackService
 from app.services.ticketing_service import TicketingService
 
 router = APIRouter(prefix="/admin", tags=["Admin"])
@@ -41,6 +48,55 @@ def _ticketing_service(db: AsyncSession) -> TicketingService:
         purchase_repo=TicketPurchaseRepository(TicketPurchase, db),
         audit_repo=AuditLogRepository(AuditLog, db),
         user_repo=UserRepository(User, db),
+    )
+
+
+@router.post(
+    "/events/{event_id}/verify-payment", response_model=ManualPaymentLookupResponse
+)
+async def verify_untracked_payment(
+    event_id: UUID,
+    data: ManualPaymentLookupRequest,
+    current_user: User = Depends(require_roles(ADMIN_ROLE)),
+    db: AsyncSession = Depends(get_db),
+):
+    """Look up a Paystack reference without issuing anything.
+
+    Lets an admin confirm the real amount and payer, and be warned if this
+    payment already produced tickets, before committing to issue.
+    """
+    return await _ticketing_service(db).inspect_payment_reference(
+        reference=data.reference,
+        paystack=PaystackService(settings.PAYSTACK_SECRET_KEY),
+        txn_repo=TicketTransactionRepository(db),
+    )
+
+
+@router.post(
+    "/events/{event_id}/attendees",
+    response_model=ManualAttendeeResponse,
+    status_code=201,
+)
+async def add_attendee_for_untracked_payment(
+    event_id: UUID,
+    data: ManualAttendeeRequest,
+    request: Request,
+    current_user: User = Depends(require_roles(ADMIN_ROLE)),
+    db: AsyncSession = Depends(get_db),
+):
+    """Issue tickets for a Paystack payment our checkout never captured.
+
+    The reference is re-verified server-side, so this cannot be used to
+    conjure tickets for a payment that didn't happen.
+    """
+    return await _ticketing_service(db).issue_ticket_for_untracked_payment(
+        event_id=event_id,
+        data=data,
+        actor_user_id=current_user.user_id,
+        paystack=PaystackService(settings.PAYSTACK_SECRET_KEY),
+        txn_repo=TicketTransactionRepository(db),
+        ip=request.client.host if request.client else None,
+        user_agent=request.headers.get("user-agent"),
     )
 
 

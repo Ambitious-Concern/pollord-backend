@@ -19,6 +19,9 @@ from app.repositories.user_repository import UserRepository
 from app.schemas.ticket import (
     AdminTicketPurchaseListResponse,
     AdminTicketPurchaseResponse,
+    ManualAttendeeRequest,
+    ManualAttendeeResponse,
+    ManualPaymentLookupResponse,
     ResendTicketEmailResponse,
     TicketDetailResponse,
     TicketPurchaseRequest,
@@ -288,6 +291,222 @@ class TicketingService:
         sent = send_email(recipient, subject, html)
         self._record_email_attempt(purchase, recipient, sent)
         return sent
+
+    async def _find_existing_purchase_for_reference(
+        self, reference: str
+    ) -> Optional[TicketPurchase]:
+        from sqlalchemy import select
+
+        result = await self.purchase_repo.session.execute(
+            select(TicketPurchase).where(TicketPurchase.payment_reference == reference)
+        )
+        return result.scalars().first()
+
+    async def inspect_payment_reference(
+        self, reference: str, paystack, txn_repo: "TicketTransactionRepository"
+    ) -> "ManualPaymentLookupResponse":
+        """Look up a Paystack reference without changing anything.
+
+        Backs the form's Verify step, so an admin sees the real amount and
+        payer before issuing anything, and is told up front if this payment
+        has already produced tickets.
+        """
+        ps_data = await paystack.verify_transaction(reference)
+
+        existing = await self._find_existing_purchase_for_reference(reference)
+        txn = await txn_repo.get_by_reference(reference)
+        already_fulfilled = existing is not None or (
+            txn is not None and txn.status == "success"
+        )
+
+        customer = ps_data.get("customer") or {}
+        return ManualPaymentLookupResponse(
+            reference=reference,
+            paystack_status=ps_data.get("status", "unknown"),
+            amount=Decimal(str(ps_data.get("amount", 0))) / 100,
+            currency=ps_data.get("currency", "GHS"),
+            paid_at=ps_data.get("paid_at"),
+            customer_email=customer.get("email"),
+            already_fulfilled=already_fulfilled,
+            existing_purchase_id=existing.purchase_id if existing else None,
+        )
+
+    async def issue_ticket_for_untracked_payment(
+        self,
+        event_id: UUID,
+        data: "ManualAttendeeRequest",
+        actor_user_id: UUID,
+        paystack,
+        txn_repo: "TicketTransactionRepository",
+        ip: Optional[str] = None,
+        user_agent: Optional[str] = None,
+    ) -> "ManualAttendeeResponse":
+        """Issue tickets for a Paystack payment the system never captured.
+
+        For buyers who really did pay but whose checkout never completed on
+        our side — so the amount is recorded as genuine revenue, not a comp.
+        The reference is re-verified against Paystack here rather than trusted
+        from the request: the client already saw a verify result, but nothing
+        stops a caller posting straight to this endpoint.
+        """
+        event = await self.event_repo.get_with_ticket_types(event_id)
+        if not event:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND, detail="Event not found"
+            )
+
+        ticket_type = next(
+            (
+                tt
+                for tt in event.ticket_types
+                if tt.ticket_type_id == data.ticket_type_id
+            ),
+            None,
+        )
+        if not ticket_type:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="That ticket type does not belong to this event",
+            )
+
+        existing = await self._find_existing_purchase_for_reference(data.reference)
+        if existing:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=(
+                    "This Paystack reference has already been used to issue "
+                    "tickets. Find the purchase in Ticket Purchases and resend "
+                    "its email instead of issuing again."
+                ),
+            )
+
+        ps_data = await paystack.verify_transaction(data.reference)
+        if ps_data.get("status") != "success":
+            raise HTTPException(
+                status_code=status.HTTP_402_PAYMENT_REQUIRED,
+                detail=(
+                    f"Paystack reports this payment as "
+                    f"'{ps_data.get('status', 'unknown')}', not success. No "
+                    "tickets were issued."
+                ),
+            )
+
+        txn = await txn_repo.get_by_reference(data.reference)
+        if txn is not None and txn.status == "success":
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="This payment has already been fulfilled",
+            )
+
+        # Real money changed hands, so record Paystack's figure rather than
+        # the ticket price — they may have been charged something else.
+        amount_paid = Decimal(str(ps_data.get("amount", 0))) / 100
+
+        if not await self.ticket_type_repo.decrement_available(
+            data.ticket_type_id, data.quantity
+        ):
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=(
+                    f"'{ticket_type.type_name}' has no stock left. Increase its "
+                    "quantity before issuing, so capacity stays truthful."
+                ),
+            )
+
+        # Attach to their account when one exists, so the tickets show up in
+        # My Tickets rather than only as a guest download link.
+        buyer = await self.user_repo.get_by_email(data.email)
+        buyer_id = buyer.user_id if buyer else None
+
+        purchase = await self.purchase_repo.create(
+            {
+                "user_id": buyer_id,
+                "guest_name": None if buyer_id else data.name,
+                "guest_email": None if buyer_id else data.email,
+                "guest_phone": None if buyer_id else data.phone,
+                "event_id": event_id,
+                "total_amount": amount_paid,
+                "payment_status": "completed",
+                "payment_method": "paystack",
+                "payment_reference": data.reference,
+            }
+        )
+
+        tickets = []
+        for _ in range(data.quantity):
+            ticket_code = generate_secure_token(16)
+            qr_data = json.dumps(
+                {
+                    "ticket_code": ticket_code,
+                    "event_id": str(event_id),
+                    "ticket_type": ticket_type.type_name,
+                }
+            )
+            tickets.append(
+                await self.ticket_repo.create(
+                    {
+                        "ticket_code": ticket_code,
+                        "event_id": event_id,
+                        "ticket_type_id": ticket_type.ticket_type_id,
+                        "user_id": buyer_id,
+                        "guest_name": None if buyer_id else data.name,
+                        "guest_email": None if buyer_id else data.email,
+                        "guest_phone": None if buyer_id else data.phone,
+                        "purchase_id": purchase.purchase_id,
+                        "qr_code_data": qr_data,
+                    }
+                )
+            )
+
+        # Close the door on the original webhook: if Paystack ever retries it,
+        # fulfill_paid_purchase now sees "success" and refuses, instead of
+        # issuing a duplicate set of tickets for the same payment.
+        if txn is not None:
+            await txn_repo.update_status(data.reference, "success", ps_data)
+
+        await self.audit_repo.log_action(
+            action_type="TICKET_ISSUED_MANUALLY",
+            entity_type="TicketPurchase",
+            entity_id=purchase.purchase_id,
+            user_id=actor_user_id,
+            changes={
+                "reference": data.reference,
+                "event_id": str(event_id),
+                "ticket_type": ticket_type.type_name,
+                "quantity": data.quantity,
+                "amount": str(amount_paid),
+                "email": data.email,
+                "linked_existing_transaction": txn is not None,
+            },
+            ip_address=ip,
+            user_agent=user_agent,
+        )
+
+        email_sent = await self._send_purchase_confirmation(
+            event.title,
+            tickets,
+            buyer_id,
+            data.email if not buyer_id else None,
+            purchase=purchase,
+        )
+
+        return ManualAttendeeResponse(
+            purchase_id=purchase.purchase_id,
+            event_id=event_id,
+            ticket_count=len(tickets),
+            amount=amount_paid,
+            email=data.email,
+            email_sent=email_sent,
+            message=(
+                f"Issued {len(tickets)} ticket(s) to {data.email}."
+                + (
+                    ""
+                    if email_sent
+                    else " The ticket email could not be sent — resend it from "
+                    "Ticket Purchases once mail is working."
+                )
+            ),
+        )
 
     async def resend_ticket_email_for_sale(
         self,
