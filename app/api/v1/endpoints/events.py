@@ -137,6 +137,7 @@ async def get_event(
         capacity=event.capacity,
         banner_image_url=event.banner_image_url,
         status=event.status,
+        show_ticket_counts=event.show_ticket_counts,
         created_by=event.created_by,
         created_at=event.created_at,
         updated_at=event.updated_at,
