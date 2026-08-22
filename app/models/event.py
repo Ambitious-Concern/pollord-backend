@@ -4,7 +4,7 @@ from decimal import Decimal
 from typing import TYPE_CHECKING, List, Optional
 
 from sqlalchemy import (
-    Date, DateTime, Integer, Numeric, String, Text, Time, func,
+    Boolean, Date, DateTime, Integer, Numeric, String, Text, Time, func,
 )
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
@@ -32,6 +32,12 @@ class Event(TimestampMixin, Base):
     capacity: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
     banner_image_url: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     status: Mapped[str] = mapped_column(String(20), default="draft", index=True)
+    # Whether buyers see how many tickets are left. Sold-out state is always
+    # shown regardless — that's something a buyer needs, not a sales figure.
+    # Defaults true so existing events keep behaving as they do today.
+    show_ticket_counts: Mapped[bool] = mapped_column(
+        Boolean, default=True, server_default="true", nullable=False
+    )
     created_by: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), ForeignKey("users.user_id"), nullable=False
     )
