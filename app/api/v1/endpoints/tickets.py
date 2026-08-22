@@ -27,6 +27,8 @@ from app.repositories.user_repository import UserRepository
 from app.schemas.ticket import (
     GuestTicketPurchaseRequest,
     PublicTicketValidation,
+    ResendTicketEmailRequest,
+    ResendTicketEmailResponse,
     ScanInfoResponse,
     TicketDetailResponse,
     TicketPaymentInitResponse,
@@ -525,6 +527,29 @@ async def get_ticket_sales(
     service = _get_ticketing_service(db)
     return await service.get_organizer_ticket_sales(
         current_user.user_id, event_id=event_id, skip=skip, limit=limit
+    )
+
+
+@router.post("/sales/{ticket_id}/resend-email", response_model=ResendTicketEmailResponse)
+async def resend_ticket_sale_email(
+    ticket_id: UUID,
+    data: ResendTicketEmailRequest,
+    request: Request,
+    current_user: User = Depends(get_current_active_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Re-send the ticket email for one of the caller's sales.
+
+    Scoped to the event's organizer (or a System Administrator). The email
+    covers the buyer's whole order, not just this one ticket.
+    """
+    service = _get_ticketing_service(db)
+    return await service.resend_ticket_email_for_sale(
+        ticket_id=ticket_id,
+        actor=current_user,
+        override_email=data.email,
+        ip=request.client.host if request.client else None,
+        user_agent=request.headers.get("user-agent"),
     )
 
 

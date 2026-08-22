@@ -9,7 +9,7 @@ from fastapi import HTTPException, status
 
 from app.core.security import create_ticket_download_token, generate_secure_token
 from app.models.event import Event
-from app.models.ticket import Ticket, is_owned_by
+from app.models.ticket import Ticket, TicketPurchase, is_owned_by
 from app.models.user import User
 from app.repositories.audit_log_repository import AuditLogRepository
 from app.repositories.event_repository import EventRepository, TicketTypeRepository
@@ -17,6 +17,9 @@ from app.repositories.ticket_repository import TicketPurchaseRepository, TicketR
 from app.repositories.ticket_transaction_repository import TicketTransactionRepository
 from app.repositories.user_repository import UserRepository
 from app.schemas.ticket import (
+    AdminTicketPurchaseListResponse,
+    AdminTicketPurchaseResponse,
+    ResendTicketEmailResponse,
     TicketDetailResponse,
     TicketPurchaseRequest,
     TicketPurchaseResponse,
@@ -192,7 +195,9 @@ class TicketingService:
             user_agent=user_agent,
         )
 
-        await self._send_purchase_confirmation(event.title, tickets, user_id, guest_email)
+        await self._send_purchase_confirmation(
+            event.title, tickets, user_id, guest_email, purchase=purchase
+        )
 
         return TicketPurchaseResponse(
             purchase_id=purchase.purchase_id,
@@ -215,20 +220,28 @@ class TicketingService:
             download_token=create_ticket_download_token(str(t.ticket_id)) if t.user_id is None else None,
         )
 
-    async def _send_purchase_confirmation(
+    async def _build_confirmation_email(
         self,
         event_title: str,
         tickets: List[Ticket],
         user_id: Optional[UUID],
         guest_email: Optional[str],
-    ) -> None:
-        """Best-effort — never blocks the purchase."""
+    ) -> Optional[tuple[str, str, str]]:
+        """Build (recipient, subject, html) for a purchase's ticket email.
+
+        Registered buyers get a My-Tickets link; guests get one download link
+        per ticket, since they have no account to sign in to. Returns None
+        when there is no address to send to. Shared by the purchase flow and
+        the admin resend so a resent email is byte-for-byte the original.
+        """
         if user_id is not None:
             buyer = await self.user_repo.get_by_id(user_id, id_field="user_id")
-            if buyer and buyer.email:
-                subject, html = ticket_confirmation_email(event_title, len(tickets))
-                send_email(buyer.email, subject, html)
-        elif guest_email:
+            if not buyer or not buyer.email:
+                return None
+            subject, html = ticket_confirmation_email(event_title, len(tickets))
+            return buyer.email, subject, html
+
+        if guest_email:
             from app.core.config import settings
 
             links = [
@@ -236,7 +249,237 @@ class TicketingService:
                 for t in tickets
             ]
             subject, html = guest_ticket_confirmation_email(event_title, len(tickets), links)
-            send_email(guest_email, subject, html)
+            return guest_email, subject, html
+
+        return None
+
+    @staticmethod
+    def _record_email_attempt(
+        purchase: Optional[TicketPurchase], recipient: Optional[str], sent: bool
+    ) -> None:
+        """Stamp the delivery outcome onto the purchase.
+
+        send_email swallows its own failures, so without this a bounced or
+        refused ticket email leaves no trace an admin could search for.
+        """
+        if purchase is None:
+            return
+        purchase.confirmation_email_status = "sent" if sent else "failed"
+        purchase.confirmation_email_attempted_at = datetime.now(timezone.utc)
+        purchase.confirmation_email_to = recipient
+
+    async def _send_purchase_confirmation(
+        self,
+        event_title: str,
+        tickets: List[Ticket],
+        user_id: Optional[UUID],
+        guest_email: Optional[str],
+        purchase: Optional[TicketPurchase] = None,
+    ) -> bool:
+        """Best-effort — never blocks the purchase."""
+        message = await self._build_confirmation_email(
+            event_title, tickets, user_id, guest_email
+        )
+        if message is None:
+            self._record_email_attempt(purchase, None, False)
+            return False
+
+        recipient, subject, html = message
+        sent = send_email(recipient, subject, html)
+        self._record_email_attempt(purchase, recipient, sent)
+        return sent
+
+    async def resend_ticket_email_for_sale(
+        self,
+        ticket_id: UUID,
+        actor: User,
+        override_email: Optional[str] = None,
+        ip: Optional[str] = None,
+        user_agent: Optional[str] = None,
+    ) -> ResendTicketEmailResponse:
+        """Organizer-facing resend, addressed by ticket rather than purchase.
+
+        The Tickets Sold table is one row per issued ticket, so that's the id
+        the caller has. The confirmation email covers the whole order, so we
+        resolve up to the purchase and send that — clicking any row of a
+        3-ticket order sends the same email.
+        """
+        ticket = await self.ticket_repo.get_by_id(ticket_id, id_field="ticket_id")
+        if not ticket:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Ticket not found",
+            )
+
+        event = await self.event_repo.get_by_id(ticket.event_id, id_field="event_id")
+        # Same rule as the rest of the event routes: the creator, or any
+        # System Administrator.
+        actor_roles = [ur.role.role_name for ur in actor.user_roles]
+        if not event or (
+            event.created_by != actor.user_id
+            and "System Administrator" not in actor_roles
+        ):
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="You do not have access to this event",
+            )
+
+        return await self.resend_purchase_confirmation(
+            purchase_id=ticket.purchase_id,
+            actor_user_id=actor.user_id,
+            override_email=override_email,
+            ip=ip,
+            user_agent=user_agent,
+        )
+
+    async def resend_purchase_confirmation(
+        self,
+        purchase_id: UUID,
+        actor_user_id: UUID,
+        override_email: Optional[str] = None,
+        ip: Optional[str] = None,
+        user_agent: Optional[str] = None,
+    ) -> ResendTicketEmailResponse:
+        """Re-send a purchase's ticket email, optionally to a corrected address.
+
+        Callers must authorize first — this does no access checking of its own.
+
+        Synchronous on purpose: whoever triggers this is watching a customer
+        wait, and needs to know whether the send actually succeeded rather
+        than that it was queued.
+        """
+        purchase = await self.purchase_repo.get_with_details(purchase_id)
+        if not purchase:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Purchase not found",
+            )
+
+        if not purchase.tickets:
+            # Almost always a payment whose Paystack webhook never landed, so
+            # fulfilment never ran. Resending can't help — there is nothing to
+            # send — and saying so points support at the real problem.
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=(
+                    "This purchase has no issued tickets, so there is nothing to "
+                    "resend. The payment was most likely never fulfilled — check "
+                    "the ticket transaction for this reference."
+                ),
+            )
+
+        message = await self._build_confirmation_email(
+            purchase.event.title if purchase.event else "",
+            purchase.tickets,
+            purchase.user_id,
+            purchase.guest_email,
+        )
+        if message is None and not override_email:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=(
+                    "This purchase has no email address on record. Supply one to "
+                    "send the tickets."
+                ),
+            )
+
+        if message is None:
+            # No address on the purchase, but the admin supplied one. Guests
+            # and account holders differ only in which links the body carries;
+            # with no user_id we fall back to the guest (download-link) body,
+            # which is the one that works without signing in.
+            from app.core.config import settings
+
+            links = [
+                f"{settings.PUBLIC_BASE_URL}/api/v1/tickets/public/download/{create_ticket_download_token(str(t.ticket_id))}"
+                for t in purchase.tickets
+            ]
+            subject, html = guest_ticket_confirmation_email(
+                purchase.event.title if purchase.event else "",
+                len(purchase.tickets),
+                links,
+            )
+        else:
+            _, subject, html = message
+
+        original_email = message[0] if message else None
+        recipient = override_email or original_email
+
+        sent = send_email(recipient, subject, html)
+        self._record_email_attempt(purchase, recipient, sent)
+        await self.purchase_repo.session.flush()
+
+        await self.audit_repo.log_action(
+            action_type="TICKET_EMAIL_RESENT",
+            entity_type="TicketPurchase",
+            entity_id=purchase_id,
+            user_id=actor_user_id,
+            changes={
+                "email": recipient,
+                "overridden": bool(override_email and override_email != original_email),
+                "original_email": original_email,
+                "ticket_count": len(purchase.tickets),
+                "sent": sent,
+            },
+            ip_address=ip,
+            user_agent=user_agent,
+        )
+
+        return ResendTicketEmailResponse(
+            purchase_id=purchase_id,
+            sent=sent,
+            email=recipient,
+            ticket_count=len(purchase.tickets),
+            message=(
+                f"Ticket email sent to {recipient}."
+                if sent
+                else (
+                    f"Could not send to {recipient} — the mail server rejected the "
+                    "message or is unreachable. Check the server logs."
+                )
+            ),
+        )
+
+    async def list_purchases_for_admin(
+        self,
+        search: Optional[str] = None,
+        event_id: Optional[UUID] = None,
+        payment_status: Optional[str] = None,
+        email_status: Optional[str] = None,
+        skip: int = 0,
+        limit: int = 50,
+    ) -> AdminTicketPurchaseListResponse:
+        purchases, total = await self.purchase_repo.search_for_admin(
+            search=search,
+            event_id=event_id,
+            payment_status=payment_status,
+            email_status=email_status,
+            skip=skip,
+            limit=limit,
+        )
+
+        return AdminTicketPurchaseListResponse(
+            items=[
+                AdminTicketPurchaseResponse(
+                    purchase_id=p.purchase_id,
+                    event_id=p.event_id,
+                    event_title=p.event.title if p.event else "",
+                    buyer_name=(p.user.full_name if p.user else p.guest_name) or "",
+                    buyer_email=(p.user.email if p.user else p.guest_email) or "",
+                    is_guest=p.user_id is None,
+                    ticket_count=len(p.tickets),
+                    total_amount=p.total_amount,
+                    payment_status=p.payment_status,
+                    payment_reference=p.payment_reference,
+                    purchased_at=p.purchased_at,
+                    confirmation_email_status=p.confirmation_email_status or "unknown",
+                    confirmation_email_attempted_at=p.confirmation_email_attempted_at,
+                    confirmation_email_to=p.confirmation_email_to,
+                )
+                for p in purchases
+            ],
+            total=total,
+        )
 
     async def _mark_needs_refund(
         self,
@@ -385,7 +628,9 @@ class TicketingService:
             changes={"total_amount": str(txn_amount), "ticket_count": len(tickets), "reference": reference},
         )
 
-        await self._send_purchase_confirmation(event.title, tickets, txn_user_id, txn_guest_email)
+        await self._send_purchase_confirmation(
+            event.title, tickets, txn_user_id, txn_guest_email, purchase=purchase
+        )
 
         await txn_repo.update_status(reference, "success", paystack_data)
 

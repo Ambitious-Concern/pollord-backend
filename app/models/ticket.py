@@ -113,6 +113,22 @@ class TicketPurchase(Base):
     purchased_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now()
     )
+    # Outcome of the last ticket-confirmation email attempt: "sent" or
+    # "failed". NULL means unknown — either the purchase predates this
+    # tracking or no attempt was ever made (e.g. no address to send to).
+    # Without this an admin has no way to find the buyers whose ticket
+    # email silently failed, since send_email only logs its failures.
+    confirmation_email_status: Mapped[Optional[str]] = mapped_column(
+        String(20), nullable=True
+    )
+    confirmation_email_attempted_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    # The address the last attempt went to — may differ from the buyer's
+    # own address when an admin resends to a corrected one.
+    confirmation_email_to: Mapped[Optional[str]] = mapped_column(
+        String(255), nullable=True
+    )
 
     # Relationships
     user: Mapped[Optional["User"]] = relationship(

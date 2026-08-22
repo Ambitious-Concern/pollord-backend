@@ -101,6 +101,50 @@ class TicketPurchaseResponse(BaseModel):
     purchased_at: datetime
 
 
+class AdminTicketPurchaseResponse(BaseModel):
+    """One ticket purchase (an order, not a single ticket), as seen by a
+    platform admin doing support work across every event."""
+
+    purchase_id: UUID
+    event_id: UUID
+    event_title: str = ""
+    buyer_name: str = ""
+    buyer_email: str = ""
+    is_guest: bool = False
+    ticket_count: int = 0
+    total_amount: Decimal = Decimal("0")
+    payment_status: str
+    payment_reference: Optional[str] = None
+    purchased_at: datetime
+    # "sent" | "failed" | "unknown" — unknown covers purchases made before
+    # delivery tracking existed, which is most of them at launch.
+    confirmation_email_status: str = "unknown"
+    confirmation_email_attempted_at: Optional[datetime] = None
+    confirmation_email_to: Optional[str] = None
+
+
+class AdminTicketPurchaseListResponse(BaseModel):
+    """Envelope rather than a bare list — the admin console pages through
+    these and needs the unfiltered total to render page counts."""
+
+    items: List[AdminTicketPurchaseResponse]
+    total: int
+
+
+class ResendTicketEmailRequest(BaseModel):
+    # Optional override for when the buyer mistyped their address; omitted
+    # means "send to whatever is on the purchase".
+    email: Optional[EmailStr] = None
+
+
+class ResendTicketEmailResponse(BaseModel):
+    purchase_id: UUID
+    sent: bool
+    email: str
+    ticket_count: int
+    message: str
+
+
 class TicketValidation(BaseModel):
     ticket_code: str
 

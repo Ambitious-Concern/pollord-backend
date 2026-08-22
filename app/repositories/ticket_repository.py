@@ -1,13 +1,14 @@
 from datetime import datetime, timezone
-from typing import List, Optional
+from typing import List, Optional, Tuple
 from uuid import UUID
 
-from sqlalchemy import func, select
+from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from app.models.event import Event
 from app.models.ticket import Ticket, TicketPurchase, owned_by
+from app.models.user import User
 from app.repositories.base import BaseRepository
 
 
@@ -160,6 +161,94 @@ class TicketPurchaseRepository(BaseRepository[TicketPurchase]):
             .order_by(TicketPurchase.purchased_at.desc())
         )
         return list(result.scalars().all())
+
+    async def get_with_details(self, purchase_id: UUID) -> Optional[TicketPurchase]:
+        """A purchase with everything needed to rebuild its confirmation
+        email: the buyer, the event title, and the issued tickets."""
+        result = await self.session.execute(
+            select(TicketPurchase)
+            .where(TicketPurchase.purchase_id == purchase_id)
+            .options(
+                selectinload(TicketPurchase.user),
+                selectinload(TicketPurchase.event),
+                selectinload(TicketPurchase.tickets),
+            )
+        )
+        return result.scalar_one_or_none()
+
+    @staticmethod
+    def _admin_search_conditions(
+        search: Optional[str],
+        event_id: Optional[UUID],
+        payment_status: Optional[str],
+        email_status: Optional[str],
+    ) -> list:
+        conditions = []
+        if event_id:
+            conditions.append(TicketPurchase.event_id == event_id)
+        if payment_status:
+            conditions.append(TicketPurchase.payment_status == payment_status)
+        if email_status == "unknown":
+            conditions.append(TicketPurchase.confirmation_email_status.is_(None))
+        elif email_status:
+            conditions.append(
+                TicketPurchase.confirmation_email_status == email_status
+            )
+        if search:
+            term = f"%{search.lower()}%"
+            # Buyers arrive at support with any one of these — a guest email,
+            # an account email, a name, or a Paystack reference off a receipt.
+            conditions.append(
+                or_(
+                    func.lower(TicketPurchase.guest_email).like(term),
+                    func.lower(TicketPurchase.guest_name).like(term),
+                    func.lower(TicketPurchase.payment_reference).like(term),
+                    func.lower(User.email).like(term),
+                    func.lower(User.full_name).like(term),
+                )
+            )
+        return conditions
+
+    async def search_for_admin(
+        self,
+        search: Optional[str] = None,
+        event_id: Optional[UUID] = None,
+        payment_status: Optional[str] = None,
+        email_status: Optional[str] = None,
+        skip: int = 0,
+        limit: int = 50,
+    ) -> Tuple[List[TicketPurchase], int]:
+        """Purchases across every event, for platform-admin support work.
+
+        Unlike the organizer-facing queries this is deliberately unscoped by
+        owner. Returns (page, total_matching) so the caller can paginate.
+        """
+        conditions = self._admin_search_conditions(
+            search, event_id, payment_status, email_status
+        )
+
+        # outerjoin, not join — guest purchases have no user row and must
+        # still appear.
+        rows = await self.session.execute(
+            select(TicketPurchase)
+            .outerjoin(User, User.user_id == TicketPurchase.user_id)
+            .where(*conditions)
+            .options(
+                selectinload(TicketPurchase.user),
+                selectinload(TicketPurchase.event),
+                selectinload(TicketPurchase.tickets),
+            )
+            .order_by(TicketPurchase.purchased_at.desc())
+            .offset(skip)
+            .limit(limit)
+        )
+        total = await self.session.execute(
+            select(func.count())
+            .select_from(TicketPurchase)
+            .outerjoin(User, User.user_id == TicketPurchase.user_id)
+            .where(*conditions)
+        )
+        return list(rows.scalars().all()), total.scalar_one()
 
     async def get_revenue_by_event(self, event_id: UUID) -> float:
         result = await self.session.execute(
