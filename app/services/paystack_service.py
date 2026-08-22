@@ -1,6 +1,16 @@
 import httpx
 from fastapi import HTTPException
 
+# Paystack replying HTTP 200 with `status: false` is a *successful* call that
+# carries a business rejection — "You cannot initiate third party payouts as a
+# starter business", "Your balance is not enough to fulfil this request". That
+# is not a gateway failure, and it must not be reported as 5xx: production sits
+# behind Cloudflare, which replaces any origin 5xx body with its own generic
+# "Error 502: Bad gateway" page. Doing so hid the only useful part of the
+# response, so an admin paying an organizer saw "retry in 60 seconds" and never
+# the reason Paystack refused. 4xx passes through the edge intact.
+PAYSTACK_REJECTED = 400
+
 
 class PaystackService:
     BASE_URL = "https://api.paystack.co"
@@ -41,7 +51,7 @@ class PaystackService:
         body = r.json()
         if not body.get("status"):
             raise HTTPException(
-                status_code=502,
+                status_code=PAYSTACK_REJECTED,
                 detail=f"Paystack error: {body.get('message', 'Unknown error')}",
             )
         return body["data"]
@@ -62,7 +72,7 @@ class PaystackService:
         body = r.json()
         if not body.get("status"):
             raise HTTPException(
-                status_code=502,
+                status_code=PAYSTACK_REJECTED,
                 detail=f"Paystack error: {body.get('message', 'Unknown error')}",
             )
         return body["data"]
@@ -84,7 +94,7 @@ class PaystackService:
         body = r.json()
         if not body.get("status"):
             raise HTTPException(
-                status_code=502,
+                status_code=PAYSTACK_REJECTED,
                 detail=f"Paystack error: {body.get('message', 'Unknown error')}",
             )
         return body["data"]
@@ -104,7 +114,7 @@ class PaystackService:
         body = r.json()
         if not body.get("status"):
             raise HTTPException(
-                status_code=400,
+                status_code=PAYSTACK_REJECTED,
                 detail=f"Could not verify that account: {body.get('message', 'Unknown error')}",
             )
         return body["data"]
@@ -135,7 +145,7 @@ class PaystackService:
         body = r.json()
         if not body.get("status"):
             raise HTTPException(
-                status_code=502,
+                status_code=PAYSTACK_REJECTED,
                 detail=f"Paystack error creating transfer recipient: {body.get('message', 'Unknown error')}",
             )
         return body["data"]
@@ -165,7 +175,7 @@ class PaystackService:
         body = r.json()
         if not body.get("status"):
             raise HTTPException(
-                status_code=502,
+                status_code=PAYSTACK_REJECTED,
                 detail=f"Paystack error initiating transfer: {body.get('message', 'Unknown error')}",
             )
         return body["data"]
