@@ -49,6 +49,26 @@ class EventRepository(BaseRepository[Event]):
         )
         return list(result.scalars().all())
 
+    async def get_events_by_creators(
+        self,
+        user_ids: List[UUID],
+        skip: int = 0,
+        limit: int = 20,
+    ) -> List[Event]:
+        """Events created by any of the given users — i.e. by anyone on the
+        caller's team. Separate from get_events_by_creator, which the public
+        per-user listing still needs."""
+        if not user_ids:
+            return []
+        result = await self.session.execute(
+            select(Event)
+            .where(Event.created_by.in_(user_ids))
+            .order_by(Event.created_at.desc())
+            .offset(skip)
+            .limit(limit)
+        )
+        return list(result.scalars().all())
+
     async def update_status(self, event_id: UUID, status: str) -> Optional[Event]:
         event = await self.get_by_id(event_id, id_field="event_id")
         if event:

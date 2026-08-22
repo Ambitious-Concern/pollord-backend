@@ -965,12 +965,14 @@ class TicketingService:
 
     async def get_organizer_ticket_sales(
         self,
-        organizer_id: UUID,
+        organizer_ids: List[UUID],
         event_id: Optional[UUID] = None,
         skip: int = 0,
         limit: int = 50,
     ) -> List[TicketSaleResponse]:
-        tickets = await self.ticket_repo.get_organizer_tickets(organizer_id, event_id, skip, limit)
+        """`organizer_ids` is the caller plus their organization teammates —
+        sales belong to the organization, not just whoever created the event."""
+        tickets = await self.ticket_repo.get_organizer_tickets(organizer_ids, event_id, skip, limit)
         return [
             TicketSaleResponse(
                 ticket_id=t.ticket_id,

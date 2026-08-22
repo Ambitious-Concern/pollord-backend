@@ -47,14 +47,17 @@ class TicketRepository(BaseRepository[Ticket]):
 
     async def get_organizer_tickets(
         self,
-        organizer_id: UUID,
+        organizer_ids: List[UUID],
         event_id: Optional[UUID] = None,
         skip: int = 0,
         limit: int = 50,
     ) -> List[Ticket]:
-        """Every ticket issued for an event the given user created, optionally
-        narrowed to a single event."""
-        conditions = [Event.created_by == organizer_id]
+        """Every ticket issued for an event created by any of the given users —
+        the caller and their organization teammates — optionally narrowed to a
+        single event."""
+        if not organizer_ids:
+            return []
+        conditions = [Event.created_by.in_(organizer_ids)]
         if event_id:
             conditions.append(Event.event_id == event_id)
         result = await self.session.execute(

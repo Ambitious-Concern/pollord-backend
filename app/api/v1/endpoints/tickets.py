@@ -522,11 +522,18 @@ async def get_ticket_sales(
     skip: int = 0,
     limit: int = 50,
 ):
-    """Tickets sold across every event the caller organizes, optionally
-    narrowed to a single event."""
+    """Tickets sold across every event the caller's organization runs,
+    optionally narrowed to a single event.
+
+    Scoped to the caller plus their teammates: sales belong to the
+    organization, not only to whoever happened to create the event.
+    """
     service = _get_ticketing_service(db)
+    teammate_ids = await OrganizationRepository(Organization, db).get_teammate_ids(
+        current_user.user_id
+    )
     return await service.get_organizer_ticket_sales(
-        current_user.user_id, event_id=event_id, skip=skip, limit=limit
+        teammate_ids, event_id=event_id, skip=skip, limit=limit
     )
 
 

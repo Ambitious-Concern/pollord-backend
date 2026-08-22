@@ -41,14 +41,20 @@ ADMIN_ROLES = ("System Administrator", "Election Administrator")
 SYSTEM_ADMIN = "System Administrator"
 
 
-def _owns_election(election, current_user: User) -> bool:
-    """True if the user created the election OR is a System Administrator."""
+async def _owns_election(election, current_user: User, db: AsyncSession) -> bool:
+    """The creator, a System Administrator, or an organization teammate
+    holding a managing role. Elections carry no org_id, so organization
+    access is resolved through shared membership with the creator."""
     user_roles = [ur.role.role_name for ur in current_user.user_roles]
-    return election.created_by == current_user.user_id or SYSTEM_ADMIN in user_roles
+    if election.created_by == current_user.user_id or SYSTEM_ADMIN in user_roles:
+        return True
+    return await OrganizationRepository(Organization, db).can_manage_with(
+        current_user.user_id, election.created_by
+    )
 
 
-def _require_ownership(election, current_user: User) -> None:
-    if not _owns_election(election, current_user):
+async def _require_ownership(election, current_user: User, db: AsyncSession) -> None:
+    if not await _owns_election(election, current_user, db):
         raise HTTPException(status_code=403, detail="You do not have access to this election")
 
 SETTINGS_FIELDS = (
@@ -241,10 +247,16 @@ async def list_elections(
     status_filter: Optional[str] = None,
     current_user: User = Depends(require_roles(*ADMIN_ROLES)),
 ):
-    """Return only the elections created by the current user."""
+    """Elections belonging to the caller's organization.
+
+    Scoped to the caller plus their teammates — see list_events for why.
+    """
     election_repo = ElectionRepository(Election, db)
-    elections = await election_repo.get_elections_by_creator(
-        current_user.user_id,
+    teammate_ids = await OrganizationRepository(Organization, db).get_teammate_ids(
+        current_user.user_id
+    )
+    elections = await election_repo.get_elections_by_creators(
+        teammate_ids,
         skip=skip,
         limit=limit,
         status=status_filter,
@@ -262,7 +274,7 @@ async def get_election(
     election = await election_repo.get_with_candidates(election_id)
     if not election:
         raise HTTPException(status_code=404, detail="Election not found")
-    _require_ownership(election, current_user)
+    await _require_ownership(election, current_user, db)
 
     return ElectionWithCandidates(
         election_id=election.election_id,
@@ -301,7 +313,7 @@ async def update_election(
     election = await election_repo.get_by_id(election_id, id_field="election_id")
     if not election:
         raise HTTPException(status_code=404, detail="Election not found")
-    _require_ownership(election, current_user)
+    await _require_ownership(election, current_user, db)
 
     if election.status not in ("draft", "scheduled"):
         raise HTTPException(
@@ -330,7 +342,7 @@ async def delete_election(
     election = await election_repo.get_by_id(election_id, id_field="election_id")
     if not election:
         raise HTTPException(status_code=404, detail="Election not found")
-    _require_ownership(election, current_user)
+    await _require_ownership(election, current_user, db)
 
     if election.status != "draft":
         raise HTTPException(
@@ -363,7 +375,7 @@ async def publish_election(
     election = await election_repo.get_by_id(election_id, id_field="election_id")
     if not election:
         raise HTTPException(status_code=404, detail="Election not found")
-    _require_ownership(election, current_user)
+    await _require_ownership(election, current_user, db)
 
     if "active" not in VALID_TRANSITIONS.get(election.status, []):
         raise HTTPException(
@@ -394,7 +406,7 @@ async def schedule_election(
     election = await election_repo.get_by_id(election_id, id_field="election_id")
     if not election:
         raise HTTPException(status_code=404, detail="Election not found")
-    _require_ownership(election, current_user)
+    await _require_ownership(election, current_user, db)
 
     if "scheduled" not in VALID_TRANSITIONS.get(election.status, []):
         raise HTTPException(
@@ -418,7 +430,7 @@ async def close_election(
     election = await election_repo.get_by_id(election_id, id_field="election_id")
     if not election:
         raise HTTPException(status_code=404, detail="Election not found")
-    _require_ownership(election, current_user)
+    await _require_ownership(election, current_user, db)
 
     if "completed" not in VALID_TRANSITIONS.get(election.status, []):
         raise HTTPException(
@@ -458,7 +470,7 @@ async def add_candidate(
     election = await election_repo.get_by_id(election_id, id_field="election_id")
     if not election:
         raise HTTPException(status_code=404, detail="Election not found")
-    _require_ownership(election, current_user)
+    await _require_ownership(election, current_user, db)
 
     if election.status not in ("draft", "scheduled"):
         raise HTTPException(
@@ -518,7 +530,7 @@ async def upload_candidate_image(
     election = await election_repo.get_by_id(election_id, id_field="election_id")
     if not election:
         raise HTTPException(status_code=404, detail="Election not found")
-    _require_ownership(election, current_user)
+    await _require_ownership(election, current_user, db)
 
     ext = Path(file.filename or "").suffix.lower()
     if ext not in _ALLOWED_IMAGE_TYPES:
@@ -552,7 +564,7 @@ async def upload_election_banner(
     election = await election_repo.get_by_id(election_id, id_field="election_id")
     if not election:
         raise HTTPException(status_code=404, detail="Election not found")
-    _require_ownership(election, current_user)
+    await _require_ownership(election, current_user, db)
 
     ext = Path(file.filename or "").suffix.lower()
     if ext not in _ALLOWED_IMAGE_TYPES:
@@ -598,7 +610,7 @@ async def remove_candidate(
     election = await election_repo.get_by_id(election_id, id_field="election_id")
     if not election:
         raise HTTPException(status_code=404, detail="Election not found")
-    _require_ownership(election, current_user)
+    await _require_ownership(election, current_user, db)
 
     candidate_repo = CandidateRepository(Candidate, db)
     candidate = await candidate_repo.get_by_id(candidate_id, id_field="candidate_id")
@@ -623,7 +635,7 @@ async def update_candidate(
     election = await election_repo.get_by_id(election_id, id_field="election_id")
     if not election:
         raise HTTPException(status_code=404, detail="Election not found")
-    _require_ownership(election, current_user)
+    await _require_ownership(election, current_user, db)
 
     if election.status not in ("draft", "scheduled"):
         raise HTTPException(
@@ -657,7 +669,7 @@ async def add_eligible_voters(
     election = await election_repo.get_by_id(election_id, id_field="election_id")
     if not election:
         raise HTTPException(status_code=404, detail="Election not found")
-    _require_ownership(election, current_user)
+    await _require_ownership(election, current_user, db)
 
     voters = await election_repo.add_eligible_voters(election_id, data.user_ids)
     return {"message": f"Added {len(voters)} eligible voter(s)"}
@@ -676,7 +688,7 @@ async def list_eligible_voters(
     election = await election_repo.get_by_id(election_id, id_field="election_id")
     if not election:
         raise HTTPException(status_code=404, detail="Election not found")
-    _require_ownership(election, current_user)
+    await _require_ownership(election, current_user, db)
     voters = await election_repo.get_eligible_voters(election_id)
     return [EligibleVoterResponse.model_validate(v) for v in voters]
 

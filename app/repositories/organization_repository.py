@@ -36,6 +36,56 @@ class OrganizationRepository(BaseRepository[Organization]):
         )
         return list(result.scalars().all())
 
+    # Roles that imply write access to the organization's events/elections.
+    # A plain "member" can see the org's work but not change it.
+    MANAGING_ROLES = ("owner", "admin", "editor")
+
+    async def get_teammate_ids(self, user_id: UUID) -> List[UUID]:
+        """Every user who shares an organization with this one, plus themselves.
+
+        Events and elections carry no org_id — they're owned by the user who
+        created them — so "the organization's data" can only be expressed as
+        "anything created by someone on my team". Without this, a newly added
+        member sees an empty dashboard and appears to be in an org of one.
+
+        Always includes `user_id`, so a user with no organization still sees
+        their own work rather than nothing.
+        """
+        result = await self.session.execute(
+            select(OrganizationMember.user_id).where(
+                OrganizationMember.org_id.in_(
+                    select(OrganizationMember.org_id).where(
+                        OrganizationMember.user_id == user_id
+                    )
+                )
+            )
+        )
+        return list({row[0] for row in result.all()} | {user_id})
+
+    async def can_manage_with(self, user_id: UUID, creator_id: UUID) -> bool:
+        """Whether `user_id` may manage something created by `creator_id`.
+
+        True when they're the same person, or when they share an organization
+        in which `user_id` holds a managing role.
+        """
+        if user_id == creator_id:
+            return True
+
+        result = await self.session.execute(
+            select(OrganizationMember.member_id)
+            .where(
+                OrganizationMember.user_id == user_id,
+                OrganizationMember.role.in_(self.MANAGING_ROLES),
+                OrganizationMember.org_id.in_(
+                    select(OrganizationMember.org_id).where(
+                        OrganizationMember.user_id == creator_id
+                    )
+                ),
+            )
+            .limit(1)
+        )
+        return result.first() is not None
+
     async def get_user_organizations(self, user_id: UUID) -> List[Organization]:
         """Get all organizations a user belongs to (as owner or member)."""
         result = await self.session.execute(

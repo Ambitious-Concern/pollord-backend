@@ -11,9 +11,11 @@ from app.core.security import create_ticket_scan_token
 from app.db.base import get_db
 from app.models.audit_log import AuditLog
 from app.models.event import Event, TicketType
+from app.models.organization import Organization
 from app.models.user import User
 from app.repositories.audit_log_repository import AuditLogRepository
 from app.repositories.event_repository import EventRepository, TicketTypeRepository
+from app.repositories.organization_repository import OrganizationRepository
 from app.services.file_storage_service import file_storage_service
 from app.schemas.event import (
     EventCreate,
@@ -35,13 +37,20 @@ ALLOWED_IMAGE_TYPES = {".jpg", ".jpeg", ".png", ".webp"}
 MAX_IMAGE_SIZE = 100 * 1024 * 1024  # 100 MB
 
 
-def _owns_event(event, current_user: User) -> bool:
+async def _owns_event(event, current_user: User, db: AsyncSession) -> bool:
+    """The creator, a System Administrator, or an organization teammate
+    holding a managing role. Events carry no org_id, so organization access
+    is resolved through shared membership with the creator."""
     user_roles = [ur.role.role_name for ur in current_user.user_roles]
-    return event.created_by == current_user.user_id or SYSTEM_ADMIN in user_roles
+    if event.created_by == current_user.user_id or SYSTEM_ADMIN in user_roles:
+        return True
+    return await OrganizationRepository(Organization, db).can_manage_with(
+        current_user.user_id, event.created_by
+    )
 
 
-def _require_event_ownership(event, current_user: User) -> None:
-    if not _owns_event(event, current_user):
+async def _require_event_ownership(event, current_user: User, db: AsyncSession) -> None:
+    if not await _owns_event(event, current_user, db):
         raise HTTPException(status_code=403, detail="You do not have access to this event")
 
 
@@ -90,10 +99,18 @@ async def list_events(
     category: Optional[str] = None,
     current_user: User = Depends(require_roles(*ORGANIZER_ROLES)),
 ):
-    """Return only the events created by the current user."""
+    """Events belonging to the caller's organization.
+
+    Scoped to the caller plus their teammates, not the caller alone — an
+    added member created nothing, and scoping to the individual made them
+    look like they were in an organization of one.
+    """
     event_repo = EventRepository(Event, db)
-    events = await event_repo.get_events_by_creator(
-        current_user.user_id, skip=skip, limit=limit
+    teammate_ids = await OrganizationRepository(Organization, db).get_teammate_ids(
+        current_user.user_id
+    )
+    events = await event_repo.get_events_by_creators(
+        teammate_ids, skip=skip, limit=limit
     )
     return [EventResponse.model_validate(e) for e in events]
 
@@ -156,7 +173,7 @@ async def update_event(
     event = await event_repo.get_by_id(event_id, id_field="event_id")
     if not event:
         raise HTTPException(status_code=404, detail="Event not found")
-    _require_event_ownership(event, current_user)
+    await _require_event_ownership(event, current_user, db)
 
     update_data = data.model_dump(exclude_unset=True)
     updated = await event_repo.update(event_id, update_data, id_field="event_id")
@@ -175,7 +192,7 @@ async def upload_event_banner(
     event = await event_repo.get_by_id(event_id, id_field="event_id")
     if not event:
         raise HTTPException(status_code=404, detail="Event not found")
-    _require_event_ownership(event, current_user)
+    await _require_event_ownership(event, current_user, db)
 
     ext = Path(file.filename or "").suffix.lower()
     if ext not in ALLOWED_IMAGE_TYPES:
@@ -207,7 +224,7 @@ async def publish_event(
     event = await event_repo.get_by_id(event_id, id_field="event_id")
     if not event:
         raise HTTPException(status_code=404, detail="Event not found")
-    _require_event_ownership(event, current_user)
+    await _require_event_ownership(event, current_user, db)
     if event.status != "draft":
         raise HTTPException(status_code=400, detail="Only draft events can be published")
 
@@ -225,7 +242,7 @@ async def cancel_event(
     event = await event_repo.get_by_id(event_id, id_field="event_id")
     if not event:
         raise HTTPException(status_code=404, detail="Event not found")
-    _require_event_ownership(event, current_user)
+    await _require_event_ownership(event, current_user, db)
 
     await event_repo.update_status(event_id, "cancelled")
 
@@ -252,7 +269,7 @@ async def get_event_scan_token(
     event = await event_repo.get_by_id(event_id, id_field="event_id")
     if not event:
         raise HTTPException(status_code=404, detail="Event not found")
-    _require_event_ownership(event, current_user)
+    await _require_event_ownership(event, current_user, db)
 
     expires_at = datetime.combine(
         event.event_date + timedelta(days=1), time.min
@@ -279,7 +296,7 @@ async def create_ticket_type(
     event = await event_repo.get_by_id(event_id, id_field="event_id")
     if not event:
         raise HTTPException(status_code=404, detail="Event not found")
-    _require_event_ownership(event, current_user)
+    await _require_event_ownership(event, current_user, db)
 
     tt_repo = TicketTypeRepository(TicketType, db)
     ticket_type = await tt_repo.create(
@@ -315,7 +332,7 @@ async def update_ticket_type(
     event = await event_repo.get_by_id(event_id, id_field="event_id")
     if not event:
         raise HTTPException(status_code=404, detail="Event not found")
-    _require_event_ownership(event, current_user)
+    await _require_event_ownership(event, current_user, db)
 
     tt_repo = TicketTypeRepository(TicketType, db)
     tt = await tt_repo.get_by_id(type_id, id_field="ticket_type_id")
