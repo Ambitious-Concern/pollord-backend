@@ -17,8 +17,6 @@ class EventCreate(BaseModel):
     banner_image_url: Optional[str] = None
     # Whether buyers see remaining-ticket counts. Sold-out is always shown.
     show_ticket_counts: bool = True
-    # Whether ticket check-in is open.
-    scan_enabled: bool = True
 
 
 class EventUpdate(BaseModel):
@@ -31,7 +29,6 @@ class EventUpdate(BaseModel):
     capacity: Optional[int] = None
     banner_image_url: Optional[str] = None
     show_ticket_counts: Optional[bool] = None
-    scan_enabled: Optional[bool] = None
 
 
 class EventResponse(BaseModel):
@@ -48,7 +45,6 @@ class EventResponse(BaseModel):
     banner_image_url: Optional[str] = None
     status: str
     show_ticket_counts: bool = True
-    scan_enabled: bool = True
     created_by: UUID
     created_at: datetime
     updated_at: datetime

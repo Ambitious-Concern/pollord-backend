@@ -38,13 +38,6 @@ class Event(TimestampMixin, Base):
     show_ticket_counts: Mapped[bool] = mapped_column(
         Boolean, default=True, server_default="true", nullable=False
     )
-    # Whether ticket check-in is open. Switching this off kills every
-    # outstanding check-in link immediately — that's the point, so a leaked
-    # link can be revoked mid-event. Defaults true so existing events keep
-    # scanning as they do today.
-    scan_enabled: Mapped[bool] = mapped_column(
-        Boolean, default=True, server_default="true", nullable=False
-    )
     created_by: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), ForeignKey("users.user_id"), nullable=False
     )

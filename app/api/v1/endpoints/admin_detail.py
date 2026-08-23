@@ -11,7 +11,7 @@ from decimal import Decimal
 from typing import List, Optional
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 from sqlalchemy import func as sqlfunc
 from sqlalchemy import select
@@ -67,8 +67,6 @@ class AdminEventDetailResponse(BaseModel):
     capacity: Optional[int] = None
     banner_image_url: Optional[str] = None
     status: str
-    show_ticket_counts: bool = True
-    scan_enabled: bool = True
     created_at: datetime
     updated_at: Optional[datetime] = None
 
@@ -174,8 +172,6 @@ async def get_event_detail(
         capacity=event.capacity,
         banner_image_url=event.banner_image_url,
         status=event.status,
-        show_ticket_counts=event.show_ticket_counts,
-        scan_enabled=event.scan_enabled,
         created_at=event.created_at,
         updated_at=event.updated_at,
         organizer_id=event.created_by,
@@ -263,52 +259,6 @@ class AdminElectionDetailResponse(BaseModel):
 
     candidates: List[AdminCandidateResult]
     transactions: List[AdminVoteTransaction]
-
-
-class AdminEventSettingsUpdate(BaseModel):
-    """Only the switches — a platform admin overriding an organizer's event
-    settings shouldn't be able to rewrite its title or date by accident."""
-
-    show_ticket_counts: Optional[bool] = None
-    scan_enabled: Optional[bool] = None
-
-
-@router.patch("/events/{event_id}/settings", response_model=AdminEventDetailResponse)
-async def update_event_settings(
-    event_id: UUID,
-    data: AdminEventSettingsUpdate,
-    request: Request,
-    current_user: User = Depends(require_roles(ADMIN_ROLE)),
-    db: AsyncSession = Depends(get_db),
-):
-    """Override an event's ticket-count and check-in switches.
-
-    Turning check-in off takes effect immediately for links already shared,
-    so it doubles as the way to shut down a leaked check-in link when the
-    organizer can't be reached.
-    """
-    result = await db.execute(select(Event).where(Event.event_id == event_id))
-    event = result.scalar_one_or_none()
-    if not event:
-        raise HTTPException(status_code=404, detail="Event not found")
-
-    changes = data.model_dump(exclude_unset=True)
-    for field, value in changes.items():
-        setattr(event, field, value)
-    await db.flush()
-
-    if changes:
-        await AuditLogRepository(AuditLog, db).log_action(
-            action_type="UPDATE_EVENT_SETTINGS",
-            entity_type="Event",
-            entity_id=event_id,
-            user_id=current_user.user_id,
-            changes=changes,
-            ip_address=request.client.host if request.client else None,
-            user_agent=request.headers.get("user-agent"),
-        )
-
-    return await get_event_detail(event_id, current_user=current_user, db=db)
 
 
 @router.get("/elections/{election_id}", response_model=AdminElectionDetailResponse)

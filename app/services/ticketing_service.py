@@ -886,18 +886,6 @@ class TicketingService:
                 message="This ticket is not valid for this event",
             )
 
-        # Checked here rather than in the endpoints because both the public
-        # link scanner and the signed-in organizer scanner come through this
-        # method — putting it in one route would leave the other open.
-        if ticket.event is not None and not ticket.event.scan_enabled:
-            return TicketValidationResponse(
-                valid=False,
-                message=(
-                    "Check-in is turned off for this event. The organizer can "
-                    "re-enable it from the event page."
-                ),
-            )
-
         if ticket.ticket_status == "used":
             return TicketValidationResponse(
                 valid=False,

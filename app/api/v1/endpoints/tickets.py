@@ -470,15 +470,6 @@ async def get_scan_info(
     if not event:
         raise HTTPException(status_code=404, detail="Event not found")
 
-    if not event.scan_enabled:
-        # A distinct message from "invalid or expired": the organizer turned
-        # this off deliberately, and saying so saves them debugging a link
-        # that is working exactly as configured.
-        raise HTTPException(
-            status_code=403,
-            detail="Check-in is turned off for this event",
-        )
-
     return ScanInfoResponse(
         event_id=event.event_id,
         event_title=event.title,
