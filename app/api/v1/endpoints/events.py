@@ -1,4 +1,4 @@
-from datetime import datetime, time, timedelta, timezone
+from datetime import date, datetime, time, timedelta, timezone
 from pathlib import Path
 from typing import List, Optional
 from uuid import UUID
@@ -35,6 +35,20 @@ SYSTEM_ADMIN = "System Administrator"
 
 ALLOWED_IMAGE_TYPES = {".jpg", ".jpeg", ".png", ".webp"}
 MAX_IMAGE_SIZE = 100 * 1024 * 1024  # 100 MB
+
+# The check-in link used to die at midnight UTC on the event's own date, which
+# broke it in two ways: an event running past midnight lost its scanner
+# mid-event (Ghana is UTC+0, so local midnight is the cutoff), and the link for
+# any past event was permanently dead — no late check-ins, no fixing the
+# register the morning after. The grace window covers both.
+SCAN_LINK_GRACE_DAYS = 7
+
+
+def scan_link_expiry(event_date: date) -> datetime:
+    """End of the day `SCAN_LINK_GRACE_DAYS` after the event."""
+    return datetime.combine(
+        event_date + timedelta(days=SCAN_LINK_GRACE_DAYS + 1), time.min
+    ).replace(tzinfo=timezone.utc)
 
 
 async def _owns_event(event, current_user: User, db: AsyncSession) -> bool:
@@ -271,9 +285,7 @@ async def get_event_scan_token(
         raise HTTPException(status_code=404, detail="Event not found")
     await _require_event_ownership(event, current_user, db)
 
-    expires_at = datetime.combine(
-        event.event_date + timedelta(days=1), time.min
-    ).replace(tzinfo=timezone.utc)
+    expires_at = scan_link_expiry(event.event_date)
     scan_token = create_ticket_scan_token(str(event.event_id), expires_at)
     return TicketScanTokenResponse(scan_token=scan_token, expires_at=expires_at)
 
