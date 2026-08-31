@@ -1,5 +1,10 @@
+from datetime import datetime, timedelta, timezone
+
 import pytest
 from httpx import AsyncClient
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.models.election import Election
 
 
 @pytest.mark.asyncio
@@ -179,3 +184,33 @@ class TestElectionCRUD:
         categories = response.json()
         assert len(categories) == 1
         assert len(categories[0]["candidates"]) == 1
+
+    async def test_update_active_election_partial_settings(
+        self, client: AsyncClient, admin_user, db_session: AsyncSession,
+    ):
+        """A partial settings patch (just enable_notifications, as the edit
+        page sends while an election is active) must not be read as trying to
+        change every other setting — those all carry non-None schema
+        defaults, so a naive "is not None" extraction saw the whole
+        ElectionSettings object as dirty and rejected the request outright."""
+        now = datetime.now(timezone.utc)
+        election = Election(
+            title="Active Election",
+            start_datetime=now - timedelta(hours=1),
+            end_datetime=now + timedelta(hours=23),
+            status="active",
+            created_by=admin_user["user"].user_id,
+        )
+        db_session.add(election)
+        await db_session.flush()
+
+        response = await client.put(
+            f"/api/v1/elections/{election.election_id}",
+            json={
+                "title": "Active Election (typo fixed)",
+                "settings": {"enable_notifications": False},
+            },
+            headers=admin_user["headers"],
+        )
+        assert response.status_code == 200
+        assert response.json()["title"] == "Active Election (typo fixed)"

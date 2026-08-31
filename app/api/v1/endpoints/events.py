@@ -284,6 +284,40 @@ async def upload_event_banner(
     return {"banner_image_url": banner_image_url}
 
 
+@router.post("/{event_id}/candidates/upload-image")
+async def upload_event_candidate_image(
+    event_id: UUID,
+    file: UploadFile = File(...),
+    current_user: User = Depends(require_roles(*ORGANIZER_ROLES)),
+    db: AsyncSession = Depends(get_db),
+):
+    """Upload a nominee photo. Returns { image_url } for use in add_candidate."""
+    event_repo = EventRepository(Event, db)
+    event = await event_repo.get_by_id(event_id, id_field="event_id")
+    if not event:
+        raise HTTPException(status_code=404, detail="Event not found")
+    await _require_event_ownership(event, current_user, db)
+
+    ext = Path(file.filename or "").suffix.lower()
+    if ext not in ALLOWED_IMAGE_TYPES:
+        raise HTTPException(
+            status_code=400,
+            detail="Unsupported file type. Allowed: JPG, PNG, WEBP",
+        )
+
+    content = await file.read()
+    if len(content) > MAX_IMAGE_SIZE:
+        raise HTTPException(status_code=400, detail="Image must be under 100 MB")
+
+    image_url = await file_storage_service.upload(
+        content=content,
+        filename=file.filename or f"candidate{ext}",
+        content_type=file.content_type,
+    )
+
+    return {"image_url": image_url}
+
+
 @router.post("/{event_id}/publish")
 async def publish_event(
     event_id: UUID,
@@ -295,8 +329,11 @@ async def publish_event(
     if not event:
         raise HTTPException(status_code=404, detail="Event not found")
     await _require_event_ownership(event, current_user, db)
-    if event.status != "draft":
-        raise HTTPException(status_code=400, detail="Only draft events can be published")
+    if event.status not in ("draft", "cancelled"):
+        raise HTTPException(
+            status_code=400,
+            detail="Only draft or cancelled events can be published",
+        )
 
     # Unlike elections, categories are optional for events (many events are
     # pure ticketing, no voting at all) — but any category that does exist
@@ -311,6 +348,27 @@ async def publish_event(
 
     await event_repo.update_status(event_id, "published")
     return {"message": "Event published successfully"}
+
+
+@router.post("/{event_id}/unpublish")
+async def unpublish_event(
+    event_id: UUID,
+    current_user: User = Depends(require_roles(*ORGANIZER_ROLES)),
+    db: AsyncSession = Depends(get_db),
+):
+    """Revert a published event back to draft. Any tickets already sold stay
+    valid — this only hides the event from public listings and re-locks it
+    for editing; it isn't a cancellation."""
+    event_repo = EventRepository(Event, db)
+    event = await event_repo.get_by_id(event_id, id_field="event_id")
+    if not event:
+        raise HTTPException(status_code=404, detail="Event not found")
+    await _require_event_ownership(event, current_user, db)
+    if event.status != "published":
+        raise HTTPException(status_code=400, detail="Only published events can be reverted to draft")
+
+    await event_repo.update_status(event_id, "draft")
+    return {"message": "Event reverted to draft"}
 
 
 @router.post("/{event_id}/cancel")

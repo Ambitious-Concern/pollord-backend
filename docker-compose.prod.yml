@@ -52,6 +52,50 @@ services:
         max-size: "10m"
         max-file: "3"
 
+  # Runs the scheduled jobs in app/tasks/celery_app.py's beat_schedule —
+  # notably check_election_status, which auto-closes an election once its
+  # end_datetime passes. Without these two, elections/tickets never expire
+  # on their own; someone has to notice and fix status by hand.
+  celery_worker:
+    image: ${REGISTRY}/${IMAGE_NAME}:${IMAGE_TAG:-latest}
+    container_name: pollord-celery-worker
+    restart: unless-stopped
+    env_file:
+      - .env
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    command: celery -A app.tasks.celery_app worker --loglevel=info
+    networks:
+      - pollord-network
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  celery_beat:
+    image: ${REGISTRY}/${IMAGE_NAME}:${IMAGE_TAG:-latest}
+    container_name: pollord-celery-beat
+    restart: unless-stopped
+    env_file:
+      - .env
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    command: celery -A app.tasks.celery_app beat --loglevel=info
+    networks:
+      - pollord-network
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
 volumes:
   postgres_data:
   redis_data:

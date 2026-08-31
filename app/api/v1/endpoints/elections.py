@@ -84,14 +84,19 @@ SAFE_SETTINGS_WHILE_ACTIVE = {"enable_notifications"}
 
 
 def _extract_settings(data) -> dict:
-    """Extract settings fields from an ElectionCreate/Update payload."""
+    """Extract settings fields the caller actually set on an ElectionCreate/
+    Update payload — not ones ElectionSettings filled in from its own
+    defaults. Most of those defaults are non-None (e.g. anonymous_results
+    defaults to True), so a plain "is not None" check treated a partial
+    update like {enable_notifications: true} as trying to change every
+    other setting too, which update_election then rejected outright while
+    the election was active."""
     result = {}
     s = getattr(data, "settings", None)
     if s:
-        for field in SETTINGS_FIELDS:
-            val = getattr(s, field, None)
-            if val is not None:
-                result[field] = val
+        for field in s.model_fields_set:
+            if field in SETTINGS_FIELDS:
+                result[field] = getattr(s, field)
     return result
 
 
@@ -406,6 +411,12 @@ async def publish_election(
         raise HTTPException(
             status_code=400,
             detail=f"Cannot activate election with status '{election.status}'",
+        )
+
+    if election.end_datetime < datetime.now(timezone.utc):
+        raise HTTPException(
+            status_code=400,
+            detail="Cannot activate an election whose end date has already passed",
         )
 
     election_with_categories = await election_repo.get_with_categories(election_id)
