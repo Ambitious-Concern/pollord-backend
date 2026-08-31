@@ -126,6 +126,7 @@ class TicketTypeResponse(BaseModel):
 
 class EventWithTicketTypes(EventResponse):
     ticket_types: List[TicketTypeResponse] = []
+    effective_vote_price: int = 100  # resolved price (global or per-event), always set
 
 
 class EventWithCategories(EventResponse):

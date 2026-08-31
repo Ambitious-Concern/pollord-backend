@@ -4,8 +4,10 @@ from typing import List, Optional
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.config import settings
 from app.core.dependencies import get_current_active_user, require_roles
 from app.core.security import create_ticket_scan_token
 from app.core.slug import generate_slug
@@ -14,6 +16,7 @@ from app.models.audit_log import AuditLog
 from app.models.election import Candidate, Category
 from app.models.event import Event, TicketType
 from app.models.organization import Organization
+from app.models.platform_setting import PlatformSetting
 from app.models.user import User
 from app.repositories.audit_log_repository import AuditLogRepository
 from app.repositories.election_repository import CandidateRepository, CategoryRepository
@@ -161,7 +164,22 @@ async def list_public_events(
     return [EventResponse.model_validate(e) for e in events]
 
 
-def _build_event_with_ticket_types(event) -> EventWithTicketTypes:
+async def _get_global_vote_price(db: AsyncSession) -> int:
+    """Read the global vote price from platform_settings, falling back to the env-var constant."""
+    result = await db.execute(
+        select(PlatformSetting).where(PlatformSetting.key == "vote_price")
+    )
+    row = result.scalar_one_or_none()
+    if row:
+        try:
+            return int(row.value)
+        except (ValueError, TypeError):
+            pass
+    return settings.VOTE_PRICE
+
+
+async def _build_event_with_ticket_types(event, db: AsyncSession) -> EventWithTicketTypes:
+    global_vote_price = await _get_global_vote_price(db)
     return EventWithTicketTypes(
         event_id=event.event_id,
         title=event.title,
@@ -184,6 +202,7 @@ def _build_event_with_ticket_types(event) -> EventWithTicketTypes:
         created_at=event.created_at,
         updated_at=event.updated_at,
         ticket_types=[TicketTypeResponse.model_validate(tt) for tt in event.ticket_types],
+        effective_vote_price=event.vote_price if event.vote_price is not None else global_vote_price,
     )
 
 
@@ -196,7 +215,7 @@ async def get_event(
     event = await event_repo.get_with_ticket_types(event_id)
     if not event:
         raise HTTPException(status_code=404, detail="Event not found")
-    return _build_event_with_ticket_types(event)
+    return await _build_event_with_ticket_types(event, db)
 
 
 @router.get("/public/by-slug/{slug}", response_model=EventWithTicketTypes)
@@ -209,7 +228,7 @@ async def get_public_event_by_slug(
     event = await event_repo.get_by_slug(slug)
     if not event:
         raise HTTPException(status_code=404, detail="Event not found")
-    return _build_event_with_ticket_types(event)
+    return await _build_event_with_ticket_types(event, db)
 
 
 @router.put("/{event_id}", response_model=EventResponse)

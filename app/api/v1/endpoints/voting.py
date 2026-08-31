@@ -1,7 +1,7 @@
 import hashlib
 import secrets
 import uuid as _uuid
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, time, timedelta, timezone
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Request
@@ -119,9 +119,15 @@ def _assert_open_for_voting(parent, parent_kind: str) -> None:
         if now < parent.start_datetime or now > parent.end_datetime:
             raise HTTPException(status_code=400, detail="Election is not within voting period")
     else:
-        # Events have no eligibility/visibility gating — always open while published.
+        # Events have no eligibility/visibility gating, and no separate end_datetime
+        # like elections — voting runs from the event's own start time through the
+        # end of that same calendar day.
         if parent.status != "published":
             raise HTTPException(status_code=400, detail="Event is not open for voting")
+        starts_at = datetime.combine(parent.event_date, parent.event_time, tzinfo=timezone.utc)
+        ends_at = datetime.combine(parent.event_date, time.max, tzinfo=timezone.utc)
+        if now < starts_at or now > ends_at:
+            raise HTTPException(status_code=400, detail="Event is not within its voting period")
 
 
 @router.post("/cast", response_model=VoteReceiptResponse, status_code=201)

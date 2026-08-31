@@ -76,12 +76,16 @@ class TestEventPublicVoting:
     async def _create_published_event_with_category(
         self, client: AsyncClient, admin_user
     ) -> dict:
+        # Voting on an event is only open from its own start time through the
+        # end of that same calendar day, so it has to be "today" for these
+        # tests to actually be able to cast a vote — a fixed future date
+        # would make _assert_open_for_voting reject every cast below.
         resp = await client.post(
             "/api/v1/events/",
             json={
                 "title": "Awards Night",
-                "event_date": str(date(2026, 12, 1)),
-                "event_time": str(time(18, 0)),
+                "event_date": str(date.today()),
+                "event_time": str(time(0, 0)),
                 "location": "Accra",
             },
             headers=admin_user["headers"],
