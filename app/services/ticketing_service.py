@@ -886,6 +886,18 @@ class TicketingService:
                 message="This ticket is not valid for this event",
             )
 
+        # Checked here rather than in the endpoints because both the public
+        # link scanner and the signed-in organizer scanner come through this
+        # method — putting it in one route would leave the other open.
+        if ticket.event is not None and not ticket.event.scan_enabled:
+            return TicketValidationResponse(
+                valid=False,
+                message=(
+                    "Check-in is turned off for this event. The organizer can "
+                    "re-enable it from the event page."
+                ),
+            )
+
         if ticket.ticket_status == "used":
             return TicketValidationResponse(
                 valid=False,
@@ -965,12 +977,14 @@ class TicketingService:
 
     async def get_organizer_ticket_sales(
         self,
-        organizer_id: UUID,
+        organizer_ids: List[UUID],
         event_id: Optional[UUID] = None,
         skip: int = 0,
         limit: int = 50,
     ) -> List[TicketSaleResponse]:
-        tickets = await self.ticket_repo.get_organizer_tickets(organizer_id, event_id, skip, limit)
+        """`organizer_ids` is the caller plus their organization teammates —
+        sales belong to the organization, not just whoever created the event."""
+        tickets = await self.ticket_repo.get_organizer_tickets(organizer_ids, event_id, skip, limit)
         return [
             TicketSaleResponse(
                 ticket_id=t.ticket_id,

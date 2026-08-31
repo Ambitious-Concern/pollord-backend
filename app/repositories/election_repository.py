@@ -57,6 +57,24 @@ class ElectionRepository(BaseRepository[Election]):
         result = await self.session.execute(query)
         return list(result.scalars().all())
 
+    async def get_elections_by_creators(
+        self,
+        user_ids: List[UUID],
+        skip: int = 0,
+        limit: int = 20,
+        status: Optional[str] = None,
+    ) -> List[Election]:
+        """Elections created by any of the given users — i.e. by anyone on the
+        caller's team."""
+        if not user_ids:
+            return []
+        query = select(Election).where(Election.created_by.in_(user_ids))
+        if status:
+            query = query.where(Election.status == status)
+        query = query.order_by(Election.created_at.desc()).offset(skip).limit(limit)
+        result = await self.session.execute(query)
+        return list(result.scalars().all())
+
     async def get_elections_by_status(
         self, status: str, skip: int = 0, limit: int = 20
     ) -> List[Election]:

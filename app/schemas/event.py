@@ -26,6 +26,8 @@ class EventCreate(BaseModel):
     # pesewas, None = inherit the global platform price (mirrors Election).
     vote_price: Optional[int] = None
     allow_revoting: bool = False
+    # Whether ticket check-in is open.
+    scan_enabled: bool = True
 
 
 class EventUpdate(BaseModel):
@@ -43,6 +45,7 @@ class EventUpdate(BaseModel):
     show_ticket_counts: Optional[bool] = None
     vote_price: Optional[int] = None
     allow_revoting: Optional[bool] = None
+    scan_enabled: Optional[bool] = None
 
 
 class EventResponse(BaseModel):
@@ -64,6 +67,7 @@ class EventResponse(BaseModel):
     show_ticket_counts: bool = True
     vote_price: Optional[int] = None
     allow_revoting: bool = False
+    scan_enabled: bool = True
     created_by: UUID
     created_at: datetime
     updated_at: datetime
