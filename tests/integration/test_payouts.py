@@ -1,12 +1,15 @@
-from datetime import date, time
+import uuid
+from datetime import date, datetime, time, timedelta, timezone
 from unittest.mock import AsyncMock, patch
 
 import pytest
 from httpx import AsyncClient
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.models.election import Election
 from app.models.event import Event
 from app.models.ticket import TicketPurchase
+from app.models.transaction import Transaction
 
 RESOLVE_PATH = "app.api.v1.endpoints.payouts.PaystackService.resolve_account"
 CREATE_RECIPIENT_PATH = "app.api.v1.endpoints.payouts.PaystackService.create_transfer_recipient"
@@ -46,9 +49,44 @@ async def event_with_revenue(db_session: AsyncSession, admin_user):
     return event
 
 
+@pytest.fixture
+async def election_with_revenue(db_session: AsyncSession, admin_user):
+    election = Election(
+        title="Payout Test Election",
+        start_datetime=datetime.now(timezone.utc) - timedelta(hours=1),
+        end_datetime=datetime.now(timezone.utc) + timedelta(hours=1),
+        status="active",
+        created_by=admin_user["user"].user_id,
+    )
+    db_session.add(election)
+    await db_session.flush()
+
+    txn = Transaction(
+        reference=f"vote_test_{uuid.uuid4().hex}",
+        election_id=election.election_id,
+        category_id=uuid.uuid4(),
+        voter_hash="testhash",
+        candidate_ids=[str(uuid.uuid4())],
+        amount=50000,  # 500.00 cedis, in pesewas
+        currency="GHS",
+        status="success",
+    )
+    db_session.add(txn)
+    await db_session.flush()
+
+    return election
+
+
 async def _request_payout(client: AsyncClient, event_id, headers, **overrides):
     payload = {**VALID_DESTINATION, **overrides}
     return await client.post(f"/api/v1/payouts/events/{event_id}", json=payload, headers=headers)
+
+
+async def _request_election_payout(client: AsyncClient, election_id, headers, **overrides):
+    payload = {**VALID_DESTINATION, **overrides}
+    return await client.post(
+        f"/api/v1/payouts/elections/{election_id}", json=payload, headers=headers
+    )
 
 
 @pytest.mark.asyncio
@@ -198,3 +236,85 @@ class TestPayViaPaystack:
             f"/api/v1/payouts/admin/{payout_id}/pay", headers=test_user["headers"],
         )
         assert response.status_code == 403
+
+
+@pytest.mark.asyncio
+class TestElectionPayouts:
+    """Elections mirror the event payout flow, sourced from paid-vote
+    Transaction rows instead of TicketPurchase."""
+
+    async def test_available_reflects_paid_vote_revenue(
+        self, client: AsyncClient, admin_user, election_with_revenue
+    ):
+        response = await client.get(
+            f"/api/v1/payouts/elections/{election_with_revenue.election_id}/available",
+            headers=admin_user["headers"],
+        )
+        assert response.status_code == 200
+        data = response.json()
+        assert data["gross_revenue"] == "500.00"
+        assert data["available"] == "500.00"
+        assert data["election_id"] == str(election_with_revenue.election_id)
+        assert data["event_id"] is None
+
+    async def test_succeeds_with_valid_destination(
+        self, client: AsyncClient, admin_user, election_with_revenue
+    ):
+        response = await _request_election_payout(
+            client, election_with_revenue.election_id, admin_user["headers"]
+        )
+        assert response.status_code == 201
+        data = response.json()
+        assert data["status"] == "pending"
+        assert data["amount"] == "500.00"
+        assert data["election_id"] == str(election_with_revenue.election_id)
+        assert data["election_title"] == "Payout Test Election"
+        assert data["event_id"] is None
+
+    async def test_duplicate_pending_request_rejected(
+        self, client: AsyncClient, admin_user, election_with_revenue
+    ):
+        first = await _request_election_payout(
+            client, election_with_revenue.election_id, admin_user["headers"]
+        )
+        assert first.status_code == 201
+        second = await _request_election_payout(
+            client, election_with_revenue.election_id, admin_user["headers"]
+        )
+        assert second.status_code == 409
+
+    async def test_no_revenue_rejected(self, client: AsyncClient, admin_user, db_session: AsyncSession):
+        election = Election(
+            title="Empty Election",
+            start_datetime=datetime.now(timezone.utc) - timedelta(hours=1),
+            end_datetime=datetime.now(timezone.utc) + timedelta(hours=1),
+            status="active",
+            created_by=admin_user["user"].user_id,
+        )
+        db_session.add(election)
+        await db_session.flush()
+
+        response = await _request_election_payout(client, election.election_id, admin_user["headers"])
+        assert response.status_code == 400
+
+    async def test_non_owner_forbidden(
+        self, client: AsyncClient, test_user, election_with_revenue
+    ):
+        response = await client.get(
+            f"/api/v1/payouts/elections/{election_with_revenue.election_id}/available",
+            headers=test_user["headers"],
+        )
+        assert response.status_code == 403
+
+    async def test_list_for_election(
+        self, client: AsyncClient, admin_user, election_with_revenue
+    ):
+        await _request_election_payout(client, election_with_revenue.election_id, admin_user["headers"])
+        response = await client.get(
+            f"/api/v1/payouts/elections/{election_with_revenue.election_id}",
+            headers=admin_user["headers"],
+        )
+        assert response.status_code == 200
+        data = response.json()
+        assert len(data) == 1
+        assert data[0]["election_id"] == str(election_with_revenue.election_id)

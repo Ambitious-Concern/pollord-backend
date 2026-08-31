@@ -1,7 +1,7 @@
 from typing import Optional
 from uuid import UUID
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.transaction import Transaction
@@ -17,6 +17,28 @@ class TransactionRepository(BaseRepository[Transaction]):
             select(Transaction).where(Transaction.reference == reference)
         )
         return result.scalar_one_or_none()
+
+    async def get_revenue_by_election(self, election_id: UUID) -> float:
+        """Gross revenue (cedis) from paid votes on this election. `amount`
+        is stored in pesewas, matching PayoutRequest.amount's cedis unit
+        requires the /100 — same convention as ticket_repository's
+        get_revenue_by_event, which sums an already-cedis column."""
+        result = await self.session.execute(
+            select(func.sum(Transaction.amount)).where(
+                Transaction.election_id == election_id,
+                Transaction.status == "success",
+            )
+        )
+        return float(result.scalar_one() or 0) / 100
+
+    async def count_paid_votes_by_election(self, election_id: UUID) -> int:
+        result = await self.session.execute(
+            select(func.count()).select_from(Transaction).where(
+                Transaction.election_id == election_id,
+                Transaction.status == "success",
+            )
+        )
+        return result.scalar_one()
 
     async def get_by_id(self, id: UUID, *, id_field: str = "transaction_id") -> Optional[Transaction]:
         return await super().get_by_id(id, id_field=id_field)

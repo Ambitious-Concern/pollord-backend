@@ -5,12 +5,15 @@ from uuid import UUID
 
 from fastapi import HTTPException, status
 
+from app.models.election import Election
 from app.models.event import Event
 from app.models.payout_request import PayoutRequest
 from app.models.user import User
+from app.repositories.election_repository import ElectionRepository
 from app.repositories.event_repository import EventRepository
 from app.repositories.payout_request_repository import PayoutRequestRepository
 from app.repositories.ticket_repository import TicketPurchaseRepository
+from app.repositories.transaction_repository import TransactionRepository
 from app.repositories.user_repository import UserRepository
 from app.schemas.payout import (
     MobileMoneyNetwork,
@@ -20,6 +23,16 @@ from app.schemas.payout import (
 )
 from app.services.paystack_service import PaystackService
 
+TWO_DP = Decimal("0.01")
+
+
+def _cedis(value: float) -> Decimal:
+    """Currency amounts always display with 2 decimal places — a raw
+    float->Decimal(str(...)) conversion drops trailing zeros (500.0 instead
+    of 500.00), which reads like a formatting bug next to amounts sourced
+    straight from a Numeric(10,2) column."""
+    return Decimal(str(value)).quantize(TWO_DP)
+
 
 class PayoutService:
     def __init__(
@@ -28,22 +41,31 @@ class PayoutService:
         event_repo: EventRepository,
         purchase_repo: TicketPurchaseRepository,
         user_repo: UserRepository,
+        election_repo: Optional[ElectionRepository] = None,
+        transaction_repo: Optional[TransactionRepository] = None,
         paystack: Optional[PaystackService] = None,
     ):
         self.payout_repo = payout_repo
         self.event_repo = event_repo
         self.purchase_repo = purchase_repo
         self.user_repo = user_repo
+        self.election_repo = election_repo
+        self.transaction_repo = transaction_repo
         self.paystack = paystack
 
     @staticmethod
     def _to_response(
-        req: PayoutRequest, event: Optional[Event], organizer: Optional[User]
+        req: PayoutRequest,
+        event: Optional[Event],
+        organizer: Optional[User],
+        election: Optional[Election] = None,
     ) -> PayoutRequestResponse:
         return PayoutRequestResponse(
             payout_request_id=req.payout_request_id,
             event_id=req.event_id,
             event_title=event.title if event else "",
+            election_id=req.election_id,
+            election_title=election.title if election else "",
             organizer_id=req.organizer_id,
             organizer_name=organizer.full_name if organizer else "",
             organizer_email=organizer.email if organizer else "",
@@ -69,18 +91,26 @@ class PayoutService:
             raise HTTPException(status_code=403, detail="You do not have access to this event")
         return event
 
+    async def _require_election_and_ownership(self, election_id: UUID, user: User) -> Election:
+        assert self.election_repo is not None
+        election = await self.election_repo.get_by_id(election_id, id_field="election_id")
+        if not election:
+            raise HTTPException(status_code=404, detail="Election not found")
+        is_admin = any(ur.role.role_name == "System Administrator" for ur in user.user_roles)
+        if election.created_by != user.user_id and not is_admin:
+            raise HTTPException(status_code=403, detail="You do not have access to this election")
+        return election
+
     async def get_available(self, event_id: UUID, user: User) -> PayoutAvailableResponse:
         await self._require_event_and_ownership(event_id, user)
-        gross = Decimal(str(await self.purchase_repo.get_revenue_by_event(event_id)))
-        already_requested = Decimal(
-            str(await self.payout_repo.get_total_requested_for_event(event_id))
-        )
+        gross = _cedis(await self.purchase_repo.get_revenue_by_event(event_id))
+        already_requested = _cedis(await self.payout_repo.get_total_requested(event_id=event_id))
         return PayoutAvailableResponse(
             event_id=event_id,
             gross_revenue=gross,
             already_requested=already_requested,
             available=max(gross - already_requested, Decimal("0")),
-            has_pending_request=await self.payout_repo.has_pending(event_id),
+            has_pending_request=await self.payout_repo.has_pending(event_id=event_id),
         )
 
     async def request_payout(
@@ -88,16 +118,14 @@ class PayoutService:
     ) -> PayoutRequestResponse:
         event = await self._require_event_and_ownership(event_id, user)
 
-        if await self.payout_repo.has_pending(event_id):
+        if await self.payout_repo.has_pending(event_id=event_id):
             raise HTTPException(
                 status_code=status.HTTP_409_CONFLICT,
                 detail="There is already a pending payout request for this event",
             )
 
-        gross = Decimal(str(await self.purchase_repo.get_revenue_by_event(event_id)))
-        already_requested = Decimal(
-            str(await self.payout_repo.get_total_requested_for_event(event_id))
-        )
+        gross = _cedis(await self.purchase_repo.get_revenue_by_event(event_id))
+        already_requested = _cedis(await self.payout_repo.get_total_requested(event_id=event_id))
         available = gross - already_requested
         if available <= 0:
             raise HTTPException(
@@ -121,19 +149,85 @@ class PayoutService:
 
     async def list_for_event(self, event_id: UUID, user: User) -> List[PayoutRequestResponse]:
         event = await self._require_event_and_ownership(event_id, user)
-        requests = await self.payout_repo.get_by_event(event_id)
+        requests = await self.payout_repo.get_by_parent(event_id=event_id)
         return [self._to_response(r, event, user) for r in requests]
+
+    # --- Election-scoped mirror of the event methods above. Kept as separate
+    # methods rather than threading a parent_kind flag through the event ones
+    # so a bug in the newer election path can't touch the already-live,
+    # revenue-critical event path. ---
+
+    async def get_available_for_election(
+        self, election_id: UUID, user: User
+    ) -> PayoutAvailableResponse:
+        assert self.transaction_repo is not None
+        await self._require_election_and_ownership(election_id, user)
+        gross = _cedis(await self.transaction_repo.get_revenue_by_election(election_id))
+        already_requested = _cedis(
+            await self.payout_repo.get_total_requested(election_id=election_id)
+        )
+        return PayoutAvailableResponse(
+            election_id=election_id,
+            gross_revenue=gross,
+            already_requested=already_requested,
+            available=max(gross - already_requested, Decimal("0")),
+            has_pending_request=await self.payout_repo.has_pending(election_id=election_id),
+        )
+
+    async def request_payout_for_election(
+        self, election_id: UUID, user: User, data: PayoutRequestCreate
+    ) -> PayoutRequestResponse:
+        assert self.transaction_repo is not None
+        election = await self._require_election_and_ownership(election_id, user)
+
+        if await self.payout_repo.has_pending(election_id=election_id):
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="There is already a pending payout request for this election",
+            )
+
+        gross = _cedis(await self.transaction_repo.get_revenue_by_election(election_id))
+        already_requested = _cedis(
+            await self.payout_repo.get_total_requested(election_id=election_id)
+        )
+        available = gross - already_requested
+        if available <= 0:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="No revenue available to request a payout for",
+            )
+
+        req = await self.payout_repo.create(
+            {
+                "election_id": election_id,
+                "organizer_id": user.user_id,
+                "amount": available,
+                "status": "pending",
+                "payout_method": data.payout_method,
+                "recipient_name": data.recipient_name,
+                "mobile_network": data.mobile_network,
+                "mobile_number": data.mobile_number,
+            }
+        )
+        return self._to_response(req, None, user, election)
+
+    async def list_for_election(
+        self, election_id: UUID, user: User
+    ) -> List[PayoutRequestResponse]:
+        election = await self._require_election_and_ownership(election_id, user)
+        requests = await self.payout_repo.get_by_parent(election_id=election_id)
+        return [self._to_response(r, None, user, election) for r in requests]
 
     async def list_mine(self, organizer_id: UUID) -> List[PayoutRequestResponse]:
         requests = await self.payout_repo.get_by_organizer(organizer_id)
-        # get_by_organizer eager-loads `event`; organizer is always the caller.
+        # get_by_organizer eager-loads `event`/`election`; organizer is always the caller.
         organizer = await self.user_repo.get_by_id(organizer_id, id_field="user_id")
-        return [self._to_response(r, r.event, organizer) for r in requests]
+        return [self._to_response(r, r.event, organizer, r.election) for r in requests]
 
     async def list_all(self, status_filter: Optional[str] = None) -> List[PayoutRequestResponse]:
         requests = await self.payout_repo.get_all(status_filter)
-        # get_all eager-loads both `event` and `organizer`.
-        return [self._to_response(r, r.event, r.organizer) for r in requests]
+        # get_all eager-loads `event`, `election`, and `organizer`.
+        return [self._to_response(r, r.event, r.organizer, r.election) for r in requests]
 
     async def review(
         self, payout_request_id: UUID, new_status: str, admin_notes: Optional[str], admin: User
@@ -145,9 +239,18 @@ class PayoutService:
         )
         if not req:
             raise HTTPException(status_code=404, detail="Payout request not found")
-        event = await self.event_repo.get_by_id(req.event_id, id_field="event_id")
+        event = (
+            await self.event_repo.get_by_id(req.event_id, id_field="event_id")
+            if req.event_id
+            else None
+        )
+        election = (
+            await self.election_repo.get_by_id(req.election_id, id_field="election_id")
+            if req.election_id and self.election_repo
+            else None
+        )
         organizer = await self.user_repo.get_by_id(req.organizer_id, id_field="user_id")
-        return self._to_response(req, event, organizer)
+        return self._to_response(req, event, organizer, election)
 
     async def list_mobile_money_networks(self) -> List[MobileMoneyNetwork]:
         """Fetched live from Paystack rather than hardcoded — a wrong network
@@ -196,12 +299,22 @@ class PayoutService:
             recipient_code = recipient["recipient_code"]
             await self.payout_repo.set_recipient_code(payout_request_id, recipient_code)
 
-        event = await self.event_repo.get_by_id(req.event_id, id_field="event_id")
+        event = (
+            await self.event_repo.get_by_id(req.event_id, id_field="event_id")
+            if req.event_id
+            else None
+        )
+        election = (
+            await self.election_repo.get_by_id(req.election_id, id_field="election_id")
+            if req.election_id and self.election_repo
+            else None
+        )
+        parent_title = event.title if event else election.title if election else (req.event_id or req.election_id)
         reference = f"payout_{secrets.token_urlsafe(16)}"
         transfer = await self.paystack.initiate_transfer(
             amount=int(req.amount * 100),  # pesewas
             recipient_code=recipient_code,
-            reason=f"Pollord payout: {event.title if event else req.event_id}",
+            reason=f"Pollord payout: {parent_title}",
             reference=reference,
         )
 
@@ -227,4 +340,4 @@ class PayoutService:
             updated = req
 
         organizer = await self.user_repo.get_by_id(req.organizer_id, id_field="user_id")
-        return self._to_response(updated, event, organizer)
+        return self._to_response(updated, event, organizer, election)

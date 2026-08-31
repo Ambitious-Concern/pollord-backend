@@ -14,10 +14,18 @@ class PayoutRequestRepository(BaseRepository[PayoutRequest]):
     def __init__(self, model, session: AsyncSession):
         super().__init__(model, session)
 
-    async def get_by_event(self, event_id: UUID) -> List[PayoutRequest]:
+    @staticmethod
+    def _parent_clause(event_id: Optional[UUID], election_id: Optional[UUID]):
+        if event_id is not None:
+            return PayoutRequest.event_id == event_id
+        return PayoutRequest.election_id == election_id
+
+    async def get_by_parent(
+        self, *, event_id: Optional[UUID] = None, election_id: Optional[UUID] = None
+    ) -> List[PayoutRequest]:
         result = await self.session.execute(
             select(PayoutRequest)
-            .where(PayoutRequest.event_id == event_id)
+            .where(self._parent_clause(event_id, election_id))
             .order_by(PayoutRequest.requested_at.desc())
         )
         return list(result.scalars().all())
@@ -26,38 +34,46 @@ class PayoutRequestRepository(BaseRepository[PayoutRequest]):
         result = await self.session.execute(
             select(PayoutRequest)
             .where(PayoutRequest.organizer_id == organizer_id)
-            .options(selectinload(PayoutRequest.event))
+            .options(selectinload(PayoutRequest.event), selectinload(PayoutRequest.election))
             .order_by(PayoutRequest.requested_at.desc())
         )
         return list(result.scalars().all())
 
     async def get_all(self, status: Optional[str] = None) -> List[PayoutRequest]:
         query = select(PayoutRequest).options(
-            selectinload(PayoutRequest.event), selectinload(PayoutRequest.organizer)
+            selectinload(PayoutRequest.event),
+            selectinload(PayoutRequest.election),
+            selectinload(PayoutRequest.organizer),
         )
         if status:
             query = query.where(PayoutRequest.status == status)
         result = await self.session.execute(query.order_by(PayoutRequest.requested_at.desc()))
         return list(result.scalars().all())
 
-    async def get_total_requested_for_event(
-        self, event_id: UUID, exclude_status: str = "rejected"
+    async def get_total_requested(
+        self,
+        *,
+        event_id: Optional[UUID] = None,
+        election_id: Optional[UUID] = None,
+        exclude_status: str = "rejected",
     ) -> float:
-        """Sum of amounts already requested (pending or paid) for an event —
+        """Sum of amounts already requested (pending or paid) for a parent —
         subtracted from gross revenue so an organizer can't request the same
         money twice."""
         result = await self.session.execute(
             select(PayoutRequest).where(
-                PayoutRequest.event_id == event_id,
+                self._parent_clause(event_id, election_id),
                 PayoutRequest.status != exclude_status,
             )
         )
         return float(sum(r.amount for r in result.scalars().all()))
 
-    async def has_pending(self, event_id: UUID) -> bool:
+    async def has_pending(
+        self, *, event_id: Optional[UUID] = None, election_id: Optional[UUID] = None
+    ) -> bool:
         result = await self.session.execute(
             select(PayoutRequest.payout_request_id).where(
-                PayoutRequest.event_id == event_id,
+                self._parent_clause(event_id, election_id),
                 PayoutRequest.status == "pending",
             )
         )

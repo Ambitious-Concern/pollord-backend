@@ -12,6 +12,7 @@ from app.models.vote import Vote
 from app.repositories.election_repository import ElectionRepository
 from app.repositories.event_repository import EventRepository
 from app.repositories.ticket_repository import TicketPurchaseRepository, TicketRepository
+from app.repositories.transaction_repository import TransactionRepository
 from app.repositories.vote_repository import VoteRepository
 
 
@@ -50,11 +51,19 @@ class AnalyticsService:
             .order_by("hour")
         )
 
+        # Revenue from paid votes — same "sales" concept as get_event_stats'
+        # total_revenue, sourced from Transaction instead of TicketPurchase.
+        transaction_repo = TransactionRepository(self.session)
+        total_revenue = await transaction_repo.get_revenue_by_election(election_id)
+        total_paid_votes = await transaction_repo.count_paid_votes_by_election(election_id)
+
         return {
             "election_id": str(election_id),
             "total_eligible_voters": total_eligible,
             "total_votes_cast": total_votes,
             "turnout_percentage": round(turnout, 2),
+            "total_revenue": total_revenue,
+            "total_paid_votes": total_paid_votes,
             "voting_timeline": [
                 {"hour": str(row.hour), "count": row.count}
                 for row in timeline.all()

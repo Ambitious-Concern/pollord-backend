@@ -7,13 +7,16 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.config import settings
 from app.core.dependencies import get_current_active_user, require_roles
 from app.db.base import get_db
+from app.models.election import Election
 from app.models.event import Event
 from app.models.payout_request import PayoutRequest
 from app.models.ticket import TicketPurchase
 from app.models.user import User
+from app.repositories.election_repository import ElectionRepository
 from app.repositories.event_repository import EventRepository
 from app.repositories.payout_request_repository import PayoutRequestRepository
 from app.repositories.ticket_repository import TicketPurchaseRepository
+from app.repositories.transaction_repository import TransactionRepository
 from app.repositories.user_repository import UserRepository
 from app.schemas.payout import (
     MobileMoneyNetwork,
@@ -28,6 +31,7 @@ from app.services.paystack_service import PaystackService
 router = APIRouter(prefix="/payouts", tags=["Payouts"])
 
 ORGANIZER_ROLES = ("System Administrator", "Event Organizer")
+ELECTION_ROLES = ("System Administrator", "Election Administrator")
 ADMIN_ROLE = "System Administrator"
 
 
@@ -37,6 +41,8 @@ def _get_service(db: AsyncSession) -> PayoutService:
         event_repo=EventRepository(Event, db),
         purchase_repo=TicketPurchaseRepository(TicketPurchase, db),
         user_repo=UserRepository(User, db),
+        election_repo=ElectionRepository(Election, db),
+        transaction_repo=TransactionRepository(db),
         paystack=PaystackService(settings.PAYSTACK_SECRET_KEY),
     )
 
@@ -53,7 +59,9 @@ async def get_available_payout(
 
 @router.get("/mobile-money-networks", response_model=List[MobileMoneyNetwork])
 async def list_mobile_money_networks(
-    current_user: User = Depends(require_roles(*ORGANIZER_ROLES)),
+    current_user: User = Depends(
+        require_roles("System Administrator", "Event Organizer", "Election Administrator")
+    ),
     db: AsyncSession = Depends(get_db),
 ):
     """Paystack's own list of supported GHS mobile money networks + their
@@ -83,9 +91,43 @@ async def list_event_payout_requests(
     return await _get_service(db).list_for_event(event_id, current_user)
 
 
+@router.get("/elections/{election_id}/available", response_model=PayoutAvailableResponse)
+async def get_available_election_payout(
+    election_id: UUID,
+    current_user: User = Depends(require_roles(*ELECTION_ROLES)),
+    db: AsyncSession = Depends(get_db),
+):
+    """How much revenue for this election's paid votes hasn't been requested
+    (or paid) yet."""
+    return await _get_service(db).get_available_for_election(election_id, current_user)
+
+
+@router.post("/elections/{election_id}", response_model=PayoutRequestResponse, status_code=201)
+async def request_election_payout(
+    election_id: UUID,
+    data: PayoutRequestCreate,
+    current_user: User = Depends(require_roles(*ELECTION_ROLES)),
+    db: AsyncSession = Depends(get_db),
+):
+    """Request payout of an election's outstanding paid-vote revenue, to the
+    given mobile money destination. Mirrors the event payout flow."""
+    return await _get_service(db).request_payout_for_election(election_id, current_user, data)
+
+
+@router.get("/elections/{election_id}", response_model=List[PayoutRequestResponse])
+async def list_election_payout_requests(
+    election_id: UUID,
+    current_user: User = Depends(require_roles(*ELECTION_ROLES)),
+    db: AsyncSession = Depends(get_db),
+):
+    return await _get_service(db).list_for_election(election_id, current_user)
+
+
 @router.get("/mine", response_model=List[PayoutRequestResponse])
 async def list_my_payout_requests(
-    current_user: User = Depends(require_roles(*ORGANIZER_ROLES)),
+    current_user: User = Depends(
+        require_roles("System Administrator", "Event Organizer", "Election Administrator")
+    ),
     db: AsyncSession = Depends(get_db),
 ):
     return await _get_service(db).list_mine(current_user.user_id)

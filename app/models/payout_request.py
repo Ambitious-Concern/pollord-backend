@@ -10,17 +10,20 @@ from sqlalchemy.orm import Mapped, mapped_column, relationship
 from app.models.base import Base, TimestampMixin
 
 if TYPE_CHECKING:
+    from app.models.election import Election
     from app.models.event import Event
     from app.models.user import User
 
 
 class PayoutRequest(TimestampMixin, Base):
-    """An organizer's request to be paid the revenue collected for an event.
-    Carries the organizer's payout destination (today: mobile money) so an
-    admin can either pay it out via Paystack Transfer from the admin console
-    (transfer_reference/transfer_status track that) or pay outside the app
-    and mark it paid manually — either way, `status` is the source of truth
-    for whether the organizer has actually been paid."""
+    """An organizer's request to be paid the revenue collected for an event
+    or election (exactly one of event_id/election_id is set — the check
+    constraint below enforces that). Carries the organizer's payout
+    destination (today: mobile money) so an admin can either pay it out via
+    Paystack Transfer from the admin console (transfer_reference/
+    transfer_status track that) or pay outside the app and mark it paid
+    manually — either way, `status` is the source of truth for whether the
+    organizer has actually been paid."""
 
     __tablename__ = "payout_requests"
     __table_args__ = (
@@ -28,13 +31,20 @@ class PayoutRequest(TimestampMixin, Base):
             "status IN ('pending', 'paid', 'rejected')",
             name="ck_payout_requests_status",
         ),
+        CheckConstraint(
+            "(event_id IS NOT NULL)::int + (election_id IS NOT NULL)::int = 1",
+            name="ck_payout_requests_exactly_one_parent",
+        ),
     )
 
     payout_request_id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
     )
-    event_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("events.event_id"), nullable=False, index=True
+    event_id: Mapped[Optional[uuid.UUID]] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("events.event_id"), nullable=True, index=True
+    )
+    election_id: Mapped[Optional[uuid.UUID]] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("elections.election_id"), nullable=True, index=True
     )
     organizer_id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), ForeignKey("users.user_id"), nullable=False
@@ -66,6 +76,7 @@ class PayoutRequest(TimestampMixin, Base):
         UUID(as_uuid=True), ForeignKey("users.user_id"), nullable=True
     )
 
-    event: Mapped["Event"] = relationship(foreign_keys=[event_id], lazy="select")
+    event: Mapped[Optional["Event"]] = relationship(foreign_keys=[event_id], lazy="select")
+    election: Mapped[Optional["Election"]] = relationship(foreign_keys=[election_id], lazy="select")
     organizer: Mapped["User"] = relationship(foreign_keys=[organizer_id], lazy="select")
     reviewer: Mapped[Optional["User"]] = relationship(foreign_keys=[reviewed_by], lazy="select")

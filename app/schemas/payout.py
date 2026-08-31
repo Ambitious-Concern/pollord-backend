@@ -26,8 +26,10 @@ class PayoutRequestResponse(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
     payout_request_id: UUID
-    event_id: UUID
+    event_id: Optional[UUID] = None
     event_title: str = ""
+    election_id: Optional[UUID] = None
+    election_title: str = ""
     organizer_id: UUID
     organizer_name: str = ""
     organizer_email: str = ""
@@ -45,7 +47,8 @@ class PayoutRequestResponse(BaseModel):
 
 
 class PayoutAvailableResponse(BaseModel):
-    event_id: UUID
+    event_id: Optional[UUID] = None
+    election_id: Optional[UUID] = None
     gross_revenue: Decimal
     already_requested: Decimal
     available: Decimal
