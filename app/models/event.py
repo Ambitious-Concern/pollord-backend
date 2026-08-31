@@ -46,6 +46,16 @@ class Event(TimestampMixin, Base):
     # sales. vote_price mirrors Election.vote_price (nullable = inherit global price).
     vote_price: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
     allow_revoting: Mapped[bool] = mapped_column(Boolean, default=False)
+    # Independent of event_date/event_time — a pageant's voting often opens well
+    # before the event night and can close at or after it. Both null (the
+    # default for every event created before this field existed) falls back to
+    # "the event's own start time through the end of that calendar day".
+    voting_starts_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    voting_ends_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
     # Whether ticket check-in is open. Switching this off kills every
     # outstanding check-in link immediately — that's the point, so a leaked
     # link can be revoked mid-event. Defaults true so existing events keep

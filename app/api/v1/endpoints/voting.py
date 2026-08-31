@@ -119,13 +119,19 @@ def _assert_open_for_voting(parent, parent_kind: str) -> None:
         if now < parent.start_datetime or now > parent.end_datetime:
             raise HTTPException(status_code=400, detail="Election is not within voting period")
     else:
-        # Events have no eligibility/visibility gating, and no separate end_datetime
-        # like elections — voting runs from the event's own start time through the
-        # end of that same calendar day.
+        # Events have no eligibility/visibility gating like elections. Voting
+        # runs on its own window (voting_starts_at/voting_ends_at) when the
+        # organizer has set one — a pageant's voting often opens well before
+        # the event night. Falls back to "the event's own start time through
+        # the end of that calendar day" for events that never set one.
         if parent.status != "published":
             raise HTTPException(status_code=400, detail="Event is not open for voting")
-        starts_at = datetime.combine(parent.event_date, parent.event_time, tzinfo=timezone.utc)
-        ends_at = datetime.combine(parent.event_date, time.max, tzinfo=timezone.utc)
+        if parent.voting_starts_at is not None and parent.voting_ends_at is not None:
+            starts_at = parent.voting_starts_at
+            ends_at = parent.voting_ends_at
+        else:
+            starts_at = datetime.combine(parent.event_date, parent.event_time, tzinfo=timezone.utc)
+            ends_at = datetime.combine(parent.event_date, time.max, tzinfo=timezone.utc)
         if now < starts_at or now > ends_at:
             raise HTTPException(status_code=400, detail="Event is not within its voting period")
 

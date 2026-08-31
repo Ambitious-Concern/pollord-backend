@@ -26,6 +26,10 @@ class EventCreate(BaseModel):
     # pesewas, None = inherit the global platform price (mirrors Election).
     vote_price: Optional[int] = None
     allow_revoting: bool = False
+    # Independent voting window — None means "fall back to the event's own
+    # start time through end of that calendar day" (see EventResponse).
+    voting_starts_at: Optional[datetime] = None
+    voting_ends_at: Optional[datetime] = None
     # Whether ticket check-in is open.
     scan_enabled: bool = True
 
@@ -45,6 +49,8 @@ class EventUpdate(BaseModel):
     show_ticket_counts: Optional[bool] = None
     vote_price: Optional[int] = None
     allow_revoting: Optional[bool] = None
+    voting_starts_at: Optional[datetime] = None
+    voting_ends_at: Optional[datetime] = None
     scan_enabled: Optional[bool] = None
 
 
@@ -67,6 +73,8 @@ class EventResponse(BaseModel):
     show_ticket_counts: bool = True
     vote_price: Optional[int] = None
     allow_revoting: bool = False
+    voting_starts_at: Optional[datetime] = None
+    voting_ends_at: Optional[datetime] = None
     scan_enabled: bool = True
     created_by: UUID
     created_at: datetime

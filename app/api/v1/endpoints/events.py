@@ -197,6 +197,8 @@ async def _build_event_with_ticket_types(event, db: AsyncSession) -> EventWithTi
         show_ticket_counts=event.show_ticket_counts,
         vote_price=event.vote_price,
         allow_revoting=event.allow_revoting,
+        voting_starts_at=event.voting_starts_at,
+        voting_ends_at=event.voting_ends_at,
         scan_enabled=event.scan_enabled,
         created_by=event.created_by,
         created_at=event.created_at,
