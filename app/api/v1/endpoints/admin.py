@@ -264,7 +264,7 @@ async def verify_organization(
         from app.services.email_service import _base_template, send_email
         from app.core.config import settings
         status_word = "approved" if data.is_verified else "rejected"
-        subject = f"Organization {status_word.capitalize()} — Pollord"
+        subject = f"Organization {status_word.capitalize()}: Pollord"
         content = f"""
         <h2>Organization {status_word.capitalize()}</h2>
         <p>Your organization <span class="highlight">{org.name}</span> has been <strong>{status_word}</strong>.</p>

@@ -10,7 +10,7 @@ class NotificationService:
         from app.core.config import settings
         link = f"{settings.FRONTEND_URL}/verify-email?token={token}"
         subject, html = email_service.password_reset_email("User", link)
-        subject = "Verify Your Email — Pollord"
+        subject = "Verify Your Email: Pollord"
         email_service.send_email(email, subject, html)
 
     async def send_password_reset_email(self, email: str, token: str) -> None:
@@ -23,7 +23,7 @@ class NotificationService:
         self, email: str, event_title: str, ticket_count: int
     ) -> None:
         from app.core.config import settings
-        subject = f"Ticket Confirmation — {event_title}"
+        subject = f"Ticket Confirmation: {event_title}"
         content = f"""
         <h2>Ticket Confirmation</h2>
         <p>You have successfully purchased <span class="highlight">{ticket_count} ticket(s)</span> for:</p>
@@ -38,7 +38,7 @@ class NotificationService:
     async def send_vote_confirmation(
         self, email: str, election_title: str, receipt_code: str
     ) -> None:
-        subject = f"Vote Confirmation — {election_title}"
+        subject = f"Vote Confirmation: {election_title}"
         content = f"""
         <h2>Your Vote Has Been Recorded</h2>
         <p>Thank you for voting in:</p>
@@ -48,7 +48,7 @@ class NotificationService:
         <p>Your vote receipt code:</p>
         <div class="otp-box">
           <div class="otp-code" style="font-size:24px;">{receipt_code}</div>
-          <div class="otp-label">Keep this safe — it proves you voted</div>
+          <div class="otp-label">Keep this safe: it proves you voted</div>
         </div>
         """
         html = email_service._base_template(content, f"Vote confirmed in {election_title}")
@@ -63,7 +63,7 @@ class NotificationService:
     async def send_event_cancellation(
         self, email: str, event_title: str
     ) -> None:
-        subject = f"Event Cancelled — {event_title}"
+        subject = f"Event Cancelled: {event_title}"
         content = f"""
         <h2>Event Cancelled</h2>
         <p>We're sorry to inform you that the following event has been cancelled:</p>

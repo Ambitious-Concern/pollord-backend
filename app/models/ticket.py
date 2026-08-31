@@ -119,7 +119,7 @@ class TicketPurchase(Base):
     # Without this an admin has no way to find the buyers whose ticket
     # email silently failed, since send_email only logs its failures.
     confirmation_email_status: Mapped[Optional[str]] = mapped_column(
-        String(20), nullable=True
+        String(20), nullable=True, index=True
     )
     confirmation_email_attempted_at: Mapped[Optional[datetime]] = mapped_column(
         DateTime(timezone=True), nullable=True

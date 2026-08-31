@@ -1,29 +1,47 @@
 import uuid
 from datetime import datetime
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Optional
 
-from sqlalchemy import DateTime, ForeignKey, Integer, LargeBinary, String, UniqueConstraint, func
+from sqlalchemy import (
+    CheckConstraint, DateTime, ForeignKey, Integer, LargeBinary, String,
+    UniqueConstraint, func,
+)
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.models.base import Base
 
 if TYPE_CHECKING:
-    from app.models.election import Election
+    from app.models.election import Election, Category
+    from app.models.event import Event
     from app.models.user import User
 
 
 class Vote(Base):
     __tablename__ = "votes"
     __table_args__ = (
-        UniqueConstraint("election_id", "voter_hash", name="uq_vote_per_election"),
+        UniqueConstraint("category_id", "voter_hash", name="uq_vote_per_category"),
+        CheckConstraint(
+            "(election_id IS NOT NULL) != (event_id IS NOT NULL)",
+            name="ck_vote_exactly_one_parent",
+        ),
     )
 
     vote_id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
     )
-    election_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("elections.election_id"), nullable=False,
+    category_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("categories.category_id"), nullable=False,
+        index=True,
+    )
+    # Denormalized parent references (exactly one set) — kept for existing
+    # election-wide aggregates (turnout, timelines) that predate categories.
+    election_id: Mapped[Optional[uuid.UUID]] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("elections.election_id"), nullable=True,
+        index=True,
+    )
+    event_id: Mapped[Optional[uuid.UUID]] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("events.event_id"), nullable=True,
         index=True,
     )
     voter_hash: Mapped[str] = mapped_column(String(64), nullable=False)
@@ -35,9 +53,11 @@ class Vote(Base):
     )
 
     # Relationships
-    election: Mapped["Election"] = relationship(
+    category: Mapped["Category"] = relationship(lazy="select")
+    election: Mapped[Optional["Election"]] = relationship(
         back_populates="votes", lazy="select"
     )
+    event: Mapped[Optional["Event"]] = relationship(lazy="select")
 
 
 class VoteReceipt(Base):

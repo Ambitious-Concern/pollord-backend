@@ -17,8 +17,8 @@ class CryptographyService:
     def decrypt_vote_data(self, encrypted: bytes) -> dict:
         return decrypt_vote(encrypted)
 
-    def generate_voter_hash(self, user_id: UUID, election_id: UUID) -> str:
-        return generate_voter_hash(user_id, election_id)
+    def generate_voter_hash(self, user_id: UUID, category_id: UUID) -> str:
+        return generate_voter_hash(user_id, category_id)
 
     def sign_vote(self, encrypted_data: bytes, cast_at: str) -> str:
         return sign_vote(encrypted_data, cast_at)

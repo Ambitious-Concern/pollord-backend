@@ -5,30 +5,44 @@ from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, field_validator
 
+from app.schemas.election import CategoryWithCandidates
+
 
 class EventCreate(BaseModel):
     title: str
+    slug: Optional[str] = None  # auto-generated from title if omitted
     description: Optional[str] = None
     event_date: date
     event_time: time
     location: str
     category: Optional[str] = None
+    latitude: Optional[float] = None
+    longitude: Optional[float] = None
     capacity: Optional[int] = None
     banner_image_url: Optional[str] = None
     # Whether buyers see remaining-ticket counts. Sold-out is always shown.
     show_ticket_counts: bool = True
+    # Category-voting settings — independent of ticket sales. vote_price is
+    # pesewas, None = inherit the global platform price (mirrors Election).
+    vote_price: Optional[int] = None
+    allow_revoting: bool = False
 
 
 class EventUpdate(BaseModel):
     title: Optional[str] = None
+    slug: Optional[str] = None
     description: Optional[str] = None
     event_date: Optional[date] = None
     event_time: Optional[time] = None
     location: Optional[str] = None
     category: Optional[str] = None
+    latitude: Optional[float] = None
+    longitude: Optional[float] = None
     capacity: Optional[int] = None
     banner_image_url: Optional[str] = None
     show_ticket_counts: Optional[bool] = None
+    vote_price: Optional[int] = None
+    allow_revoting: Optional[bool] = None
 
 
 class EventResponse(BaseModel):
@@ -36,15 +50,20 @@ class EventResponse(BaseModel):
 
     event_id: UUID
     title: str
+    slug: Optional[str] = None
     description: Optional[str] = None
     event_date: date
     event_time: time
     location: str
     category: Optional[str] = None
+    latitude: Optional[float] = None
+    longitude: Optional[float] = None
     capacity: Optional[int] = None
     banner_image_url: Optional[str] = None
     status: str
     show_ticket_counts: bool = True
+    vote_price: Optional[int] = None
+    allow_revoting: bool = False
     created_by: UUID
     created_at: datetime
     updated_at: datetime
@@ -103,3 +122,8 @@ class TicketTypeResponse(BaseModel):
 
 class EventWithTicketTypes(EventResponse):
     ticket_types: List[TicketTypeResponse] = []
+
+
+class EventWithCategories(EventResponse):
+    categories: List[CategoryWithCandidates] = []
+    effective_vote_price: int = 100

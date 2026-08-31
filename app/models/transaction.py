@@ -18,7 +18,15 @@ class Transaction(Base):
     reference: Mapped[str] = mapped_column(
         String(100), unique=True, nullable=False, index=True
     )
-    election_id: Mapped[uuid.UUID] = mapped_column(
+    # Plain (no FK) columns, matching this table's existing convention. Exactly one
+    # of election_id/event_id is set depending on which parent the category belongs to.
+    election_id: Mapped[Optional[uuid.UUID]] = mapped_column(
+        UUID(as_uuid=True), nullable=True, index=True
+    )
+    event_id: Mapped[Optional[uuid.UUID]] = mapped_column(
+        UUID(as_uuid=True), nullable=True, index=True
+    )
+    category_id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), nullable=False, index=True
     )
     voter_hash: Mapped[str] = mapped_column(String(64), nullable=False)

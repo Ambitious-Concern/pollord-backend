@@ -160,7 +160,7 @@ async def initiate_ticket_payment(
     if total_amount <= 0:
         raise HTTPException(
             status_code=http_status.HTTP_400_BAD_REQUEST,
-            detail="This purchase is free — use POST /tickets/purchase instead",
+            detail="This purchase is free. Use POST /tickets/purchase instead",
         )
 
     reference = f"ticket_{secrets.token_urlsafe(16)}"
@@ -214,7 +214,7 @@ async def verify_and_purchase_tickets(
     if txn.status == "success":
         raise HTTPException(status_code=http_status.HTTP_409_CONFLICT, detail="This payment has already been fulfilled")
     if txn.status in ("failed", "needs_refund"):
-        raise HTTPException(status_code=http_status.HTTP_400_BAD_REQUEST, detail="Payment failed — please try again")
+        raise HTTPException(status_code=http_status.HTTP_400_BAD_REQUEST, detail="Payment failed, please try again")
 
     paystack = PaystackService(settings.PAYSTACK_SECRET_KEY)
     ps_data = await paystack.verify_transaction(data.reference)
@@ -326,7 +326,7 @@ async def initiate_ticket_payment_guest(
     if total_amount <= 0:
         raise HTTPException(
             status_code=http_status.HTTP_400_BAD_REQUEST,
-            detail="This purchase is free — use POST /tickets/public/purchase instead",
+            detail="This purchase is free. Use POST /tickets/public/purchase instead",
         )
 
     reference = f"ticket_{secrets.token_urlsafe(16)}"
@@ -379,7 +379,7 @@ async def verify_and_purchase_tickets_guest(
     if txn.status == "success":
         raise HTTPException(status_code=http_status.HTTP_409_CONFLICT, detail="This payment has already been fulfilled")
     if txn.status in ("failed", "needs_refund"):
-        raise HTTPException(status_code=http_status.HTTP_400_BAD_REQUEST, detail="Payment failed — please try again")
+        raise HTTPException(status_code=http_status.HTTP_400_BAD_REQUEST, detail="Payment failed, please try again")
 
     paystack = PaystackService(settings.PAYSTACK_SECRET_KEY)
     ps_data = await paystack.verify_transaction(data.reference)

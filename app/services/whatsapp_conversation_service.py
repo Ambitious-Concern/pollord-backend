@@ -3,10 +3,13 @@ WhatsApp conversation state machine.
 
 States (stored per phone number in Redis, TTL = 10 min):
   idle              → greet, ask for election ID
+  awaiting_category → election has >1 category, waiting for a category number
   awaiting_vote     → ballot shown, waiting for candidate short code(s)
   awaiting_payment  → payment link sent, waiting for Paystack webhook
 
-Voter identity: phone number is HMAC-hashed per election — never stored in plaintext.
+Voter identity: phone number is HMAC-hashed per category — never stored in
+plaintext. A category_id alone already implies its election, so the hash
+doubles as the per-category duplicate-vote key.
 Payment: Paystack redirect flow. Vote is cast automatically when charge.success fires.
 """
 import hashlib
@@ -25,12 +28,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.config import settings
 from app.core.security import generate_whatsapp_voter_hash
 from app.models.audit_log import AuditLog
-from app.models.election import Election
+from app.models.election import Category, Election
 from app.models.platform_setting import PlatformSetting
 from app.models.transaction import Transaction
 from app.models.vote import Vote
 from app.repositories.audit_log_repository import AuditLogRepository
-from app.repositories.election_repository import ElectionRepository
+from app.repositories.election_repository import CategoryRepository, ElectionRepository
 from app.repositories.transaction_repository import TransactionRepository
 from app.repositories.vote_repository import VoteRepository
 from app.services.cryptography_service import CryptographyService
@@ -63,6 +66,7 @@ class WhatsAppConversationService:
         self.redis = redis
         self.crypto = CryptographyService()
         self.election_repo = ElectionRepository(Election, db)
+        self.category_repo = CategoryRepository(Category, db)
         self.vote_repo = VoteRepository(Vote, db)
         self.txn_repo = TransactionRepository(db)
         self.audit_repo = AuditLogRepository(AuditLog, db)
@@ -91,12 +95,14 @@ class WhatsAppConversationService:
 
         if state == "awaiting_payment":
             reference = session.get("reference", "")
-            symbol = _CURRENCY_SYMBOL.get(settings.VOTE_CURRENCY, settings.VOTE_CURRENCY)
             return (
                 f"Your payment is still pending.\n\n"
                 f"Complete payment via the link sent earlier, or send *CANCEL* to start over.\n\n"
                 f"Reference: `{reference}`"
             )
+
+        if state == "awaiting_category":
+            return await self._handle_category_selection(phone, text, session)
 
         if state == "awaiting_vote":
             return await self._handle_vote_input(phone, text, session)
@@ -125,7 +131,7 @@ class WhatsAppConversationService:
         except ValueError:
             return "That doesn't look like a valid Election ID. Please check and try again."
 
-        election = await self.election_repo.get_with_candidates(election_id)
+        election = await self.election_repo.get_with_categories(election_id)
         if not election:
             return "Election not found. Please check the ID and try again."
 
@@ -147,37 +153,70 @@ class WhatsAppConversationService:
         if now < election.start_datetime or now > election.end_datetime:
             return "This election is outside its voting window."
 
-        allow_revoting = getattr(election, "allow_revoting", False)
-        if not allow_revoting:
-            voter_hash = generate_whatsapp_voter_hash(phone, election_id)
-            if await self.vote_repo.has_voted(voter_hash, election_id):
-                return f"You have already voted in *{election.title}*."
-
-        candidates = sorted(election.candidates, key=lambda c: c.display_order)
-        if not candidates:
+        categories = sorted(election.categories, key=lambda c: c.display_order)
+        categories = [c for c in categories if c.candidates]
+        if not categories:
             return "This election has no candidates yet."
 
-        election_type = election.election_type
-        max_sel = getattr(election, "max_selections", None)
+        if len(categories) == 1:
+            return await self._present_ballot(phone, election, categories[0])
+
+        lines = [f"🗳️ *{election.title}*", "", "This election has multiple categories.", "Reply with a number to pick one:\n"]
+        for i, cat in enumerate(categories, start=1):
+            lines.append(f"  *{i}*: {cat.name}")
+        lines.append("\nSend *CANCEL* to exit.")
+
+        await self._set_session(phone, {
+            "state": "awaiting_category",
+            "election_id": str(election_id),
+            "category_ids": [str(c.category_id) for c in categories],
+        })
+        return "\n".join(lines)
+
+    async def _handle_category_selection(self, phone: str, text: str, session: dict) -> str:
+        election_id = UUID(session["election_id"])
+        category_ids = session.get("category_ids", [])
+
+        choice = text.strip()
+        if not choice.isdigit() or not (1 <= int(choice) <= len(category_ids)):
+            return f"Please reply with a number from *1* to *{len(category_ids)}*, or send *CANCEL* to exit."
+
+        category_id = UUID(category_ids[int(choice) - 1])
+
+        election = await self.election_repo.get_with_categories(election_id)
+        if not election:
+            await self._clear_session(phone)
+            return "Election no longer available. Send *VOTE <election-id>* to try again."
+
+        category = next((c for c in election.categories if c.category_id == category_id), None)
+        if not category:
+            await self._clear_session(phone)
+            return "That category is no longer available. Send *VOTE <election-id>* to try again."
+
+        return await self._present_ballot(phone, election, category)
+
+    async def _present_ballot(self, phone: str, election, category) -> str:
+        allow_revoting = getattr(election, "allow_revoting", False)
+        if not allow_revoting:
+            voter_hash = generate_whatsapp_voter_hash(phone, category.category_id)
+            if await self.vote_repo.has_voted(voter_hash, category.category_id):
+                return f"You have already voted in *{category.name}*."
+
+        candidates = sorted(category.candidates, key=lambda c: c.display_order)
         vote_price = await self._get_vote_price(election)
 
-        lines = [f"🗳️ *{election.title}*"]
-        if election.description:
-            lines.append(election.description)
+        lines = [f"🗳️ *{election.title}*: {category.name}"]
+        if category.description:
+            lines.append(category.description)
         lines.append("")
 
-        if election_type == "single_choice":
+        if category.election_type == "single_choice":
             lines.append("Reply with *one candidate code* to cast your vote:\n")
-        elif election_type == "multiple_choice":
-            if max_sel:
-                lines.append(f"Reply with up to *{max_sel} candidate codes* (comma-separated):\n")
-            else:
-                lines.append("Reply with *candidate codes* separated by commas:\n")
         else:
             lines.append("Reply with your candidate code(s):\n")
 
         for c in candidates:
-            lines.append(f"  *{c.short_code}* — {c.name}")
+            lines.append(f"  *{c.short_code}*: {c.name}")
 
         if vote_price > 0:
             symbol = _CURRENCY_SYMBOL.get(settings.VOTE_CURRENCY, settings.VOTE_CURRENCY)
@@ -187,10 +226,11 @@ class WhatsAppConversationService:
 
         await self._set_session(phone, {
             "state": "awaiting_vote",
-            "election_id": str(election_id),
+            "election_id": str(election.election_id),
+            "category_id": str(category.category_id),
+            "category_name": category.name,
             "election_title": election.title,
-            "election_type": election_type,
-            "max_selections": max_sel,
+            "election_type": category.election_type,
             "allow_revoting": allow_revoting,
             "vote_price": vote_price,
         })
@@ -199,12 +239,12 @@ class WhatsAppConversationService:
 
     async def _handle_vote_input(self, phone: str, text: str, session: dict) -> str:
         election_id = UUID(session["election_id"])
+        category_id = UUID(session["category_id"])
         election_type = session.get("election_type", "single_choice")
-        max_sel = session.get("max_selections")
         allow_revoting = session.get("allow_revoting", False)
         vote_price = session.get("vote_price", 0)
 
-        election = await self.election_repo.get_with_candidates(election_id)
+        election = await self.election_repo.get_with_categories(election_id)
         if not election:
             await self._clear_session(phone)
             return "Election no longer available. Send *VOTE <election-id>* to try again."
@@ -218,6 +258,11 @@ class WhatsAppConversationService:
             await self._clear_session(phone)
             return "This election is outside its voting window."
 
+        category = next((c for c in election.categories if c.category_id == category_id), None)
+        if not category:
+            await self._clear_session(phone)
+            return "That category is no longer available. Send *VOTE <election-id>* to try again."
+
         # Parse short codes
         raw_codes = [c.strip().upper() for c in re.split(r"[,\s]+", text) if c.strip()]
         if not raw_codes:
@@ -225,7 +270,7 @@ class WhatsAppConversationService:
 
         code_map = {
             c.short_code.upper(): c.candidate_id
-            for c in election.candidates
+            for c in category.candidates
             if c.short_code
         }
 
@@ -247,41 +292,38 @@ class WhatsAppConversationService:
             )
 
         if election_type == "single_choice" and len(candidate_ids) != 1:
-            return "This election requires *exactly one* candidate code."
-
-        if max_sel and len(candidate_ids) > max_sel:
-            return f"You can select at most *{max_sel}* candidate(s)."
+            return "This category requires *exactly one* candidate code."
 
         # Deduplicate
         seen: set = set()
         candidate_ids = [cid for cid in candidate_ids if not (cid in seen or seen.add(cid))]
 
         # Voter hash (computed now so it's consistent between initiation and webhook)
-        base_hash = generate_whatsapp_voter_hash(phone, election_id)
+        base_hash = generate_whatsapp_voter_hash(phone, category_id)
         if allow_revoting:
             voter_hash = hashlib.sha256(f"{base_hash}:{_uuid.uuid4().hex}".encode()).hexdigest()
         else:
             voter_hash = base_hash
-            if await self.vote_repo.has_voted(voter_hash, election_id):
+            if await self.vote_repo.has_voted(voter_hash, category_id):
                 await self._clear_session(phone)
-                return f"You have already voted in *{election.title}*."
+                return f"You have already voted in *{category.name}*."
 
-        # Free election — cast vote immediately
+        # Free category — cast vote immediately
         if vote_price == 0:
             return await self._cast_vote_directly(
-                phone, election, election_id, candidate_ids, voter_hash, now
+                phone, election, category, candidate_ids, voter_hash, now
             )
 
-        # Paid election — initiate Paystack payment
+        # Paid category — initiate Paystack payment
         return await self._initiate_payment(
-            phone, election, election_id, candidate_ids, voter_hash, vote_price
+            phone, election, category, candidate_ids, voter_hash, vote_price
         )
 
     async def _cast_vote_directly(
         self,
         phone: str,
         election,
-        election_id: UUID,
+        category,
         candidate_ids: list,
         voter_hash: str,
         now: datetime,
@@ -291,7 +333,8 @@ class WhatsAppConversationService:
         signature = self.crypto.sign_vote(encrypted, cast_at)
 
         await self.vote_repo.create({
-            "election_id": election_id,
+            "category_id": category.category_id,
+            "election_id": election.election_id,
             "voter_hash": voter_hash,
             "vote_data": encrypted,
             "vote_signature": signature,
@@ -303,7 +346,7 @@ class WhatsAppConversationService:
         await self.audit_repo.log_action(
             action_type="VOTE_CAST",
             entity_type="Election",
-            entity_id=election_id,
+            entity_id=election.election_id,
             user_id=None,
             ip_address="whatsapp",
             user_agent=f"WhatsApp:{phone[:4]}****",
@@ -312,14 +355,14 @@ class WhatsAppConversationService:
         await self._clear_session(phone)
 
         selected_names = [
-            next(c.name for c in election.candidates if c.candidate_id == cid)
+            next(c.name for c in category.candidates if c.candidate_id == cid)
             for cid in candidate_ids
         ]
         names_str = ", ".join(f"*{n}*" for n in selected_names)
 
         return (
             f"✅ Vote cast successfully!\n\n"
-            f"Election: *{election.title}*\n"
+            f"Election: *{election.title}*, {category.name}\n"
             f"Candidate(s): {names_str}\n\n"
             f"Your receipt code:\n*{receipt_code}*\n\n"
             "Thank you for participating! 🎉"
@@ -329,7 +372,7 @@ class WhatsAppConversationService:
         self,
         phone: str,
         election,
-        election_id: UUID,
+        category,
         candidate_ids: list,
         voter_hash: str,
         vote_price: int,
@@ -343,7 +386,8 @@ class WhatsAppConversationService:
         # Persist pending transaction
         await self.txn_repo.create({
             "reference": reference,
-            "election_id": election_id,
+            "election_id": election.election_id,
+            "category_id": category.category_id,
             "voter_hash": voter_hash,
             "email": placeholder_email,
             "candidate_ids": [str(cid) for cid in candidate_ids],
@@ -360,7 +404,8 @@ class WhatsAppConversationService:
             reference=reference,
             currency=settings.VOTE_CURRENCY,
             metadata={
-                "election_id": str(election_id),
+                "election_id": str(election.election_id),
+                "category_id": str(category.category_id),
                 "election_title": election.title,
                 "channel": "whatsapp",
             },
@@ -376,7 +421,7 @@ class WhatsAppConversationService:
         # Move session to awaiting_payment to block duplicate attempts
         await self._set_session(phone, {
             "state": "awaiting_payment",
-            "election_id": str(election_id),
+            "election_id": str(election.election_id),
             "reference": reference,
         })
 
@@ -384,14 +429,14 @@ class WhatsAppConversationService:
         amount_display = f"{symbol}{vote_price / 100:.2f}"
 
         selected_names = [
-            next(c.name for c in election.candidates if c.candidate_id == cid)
+            next(c.name for c in category.candidates if c.candidate_id == cid)
             for cid in candidate_ids
         ]
         names_str = ", ".join(f"*{n}*" for n in selected_names)
 
         return (
             f"💳 *Payment required*\n\n"
-            f"Election: *{election.title}*\n"
+            f"Election: *{election.title}*, {category.name}\n"
             f"Candidate(s): {names_str}\n"
             f"Amount: *{amount_display}*\n\n"
             f"Tap to pay:\n{ps_data['authorization_url']}\n\n"
@@ -409,7 +454,7 @@ class WhatsAppConversationService:
         except ValueError:
             return "Invalid Election ID format."
 
-        election = await self.election_repo.get_with_candidates(election_id)
+        election = await self.election_repo.get_with_categories(election_id)
         if not election:
             return "Election not found."
 
@@ -421,26 +466,41 @@ class WhatsAppConversationService:
 
         votes = await self.vote_repo.get_votes_by_election(election_id)
         counts: dict = {}
-        total = 0
         for vote in votes:
             weight = getattr(vote, "count", 1)
-            total += weight
             decrypted = self.crypto.decrypt_vote_data(vote.vote_data)
+            cat_counts = counts.setdefault(vote.category_id, {})
             for cid_str in decrypted.get("candidate_ids", []):
-                counts[cid_str] = counts.get(cid_str, 0) + weight
+                cat_counts[cid_str] = cat_counts.get(cid_str, 0) + weight
 
-        if total == 0:
+        categories = sorted(election.categories, key=lambda c: c.display_order)
+        lines = [f"📊 *Results: {election.title}*"]
+        grand_total = 0
+
+        for category in categories:
+            cat_counts = counts.get(category.category_id, {})
+            total = sum(cat_counts.values())
+            grand_total += total
+            candidates = sorted(category.candidates, key=lambda c: c.display_order)
+            if not candidates:
+                continue
+
+            lines.append(f"\n*{category.name}*")
+            if total == 0:
+                lines.append("No votes yet.")
+                continue
+
+            for c in sorted(candidates, key=lambda c: cat_counts.get(str(c.candidate_id), 0), reverse=True):
+                count = cat_counts.get(str(c.candidate_id), 0)
+                pct = round(count / total * 100, 1)
+                bar = "█" * int(pct / 5)
+                lines.append(f"{c.name}: *{count}* votes ({pct}%)\n{bar}")
+            lines.append(f"Category total: *{total}*")
+
+        if grand_total == 0:
             return f"No votes have been cast in *{election.title}* yet."
 
-        candidates = sorted(election.candidates, key=lambda c: c.display_order)
-        lines = [f"📊 *Results — {election.title}*\n"]
-        for c in sorted(candidates, key=lambda c: counts.get(str(c.candidate_id), 0), reverse=True):
-            count = counts.get(str(c.candidate_id), 0)
-            pct = round(count / total * 100, 1)
-            bar = "█" * int(pct / 5)
-            lines.append(f"{c.name}: *{count}* votes ({pct}%)\n{bar}")
-
-        lines.append(f"\nTotal votes: *{total}*")
+        lines.append(f"\nTotal votes across all categories: *{grand_total}*")
         return "\n".join(lines)
 
     # ------------------------------------------------------------------

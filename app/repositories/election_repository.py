@@ -6,7 +6,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
-from app.models.election import Candidate, Election, EligibleVoter
+from app.models.election import Candidate, Category, Election, EligibleVoter
 from app.repositories.base import BaseRepository
 
 
@@ -14,11 +14,19 @@ class ElectionRepository(BaseRepository[Election]):
     def __init__(self, model, session: AsyncSession):
         super().__init__(model, session)
 
-    async def get_with_candidates(self, election_id: UUID) -> Optional[Election]:
+    async def get_with_categories(self, election_id: UUID) -> Optional[Election]:
         result = await self.session.execute(
             select(Election)
-            .options(selectinload(Election.candidates))
+            .options(selectinload(Election.categories).selectinload(Category.candidates))
             .where(Election.election_id == election_id)
+        )
+        return result.scalar_one_or_none()
+
+    async def get_by_slug(self, slug: str) -> Optional[Election]:
+        result = await self.session.execute(
+            select(Election)
+            .options(selectinload(Election.categories).selectinload(Category.candidates))
+            .where(Election.slug == slug)
         )
         return result.scalar_one_or_none()
 
@@ -26,7 +34,7 @@ class ElectionRepository(BaseRepository[Election]):
         now = datetime.now(timezone.utc)
         result = await self.session.execute(
             select(Election)
-            .options(selectinload(Election.candidates))
+            .options(selectinload(Election.categories).selectinload(Category.candidates))
             .where(
                 Election.status == "active",
                 Election.start_datetime <= now,
@@ -112,6 +120,37 @@ class ElectionRepository(BaseRepository[Election]):
         return result.scalar_one()
 
 
+class CategoryRepository(BaseRepository[Category]):
+    def __init__(self, model, session: AsyncSession):
+        super().__init__(model, session)
+
+    async def get_by_election(self, election_id: UUID) -> List[Category]:
+        result = await self.session.execute(
+            select(Category)
+            .options(selectinload(Category.candidates))
+            .where(Category.election_id == election_id)
+            .order_by(Category.display_order)
+        )
+        return list(result.scalars().all())
+
+    async def get_by_event(self, event_id: UUID) -> List[Category]:
+        result = await self.session.execute(
+            select(Category)
+            .options(selectinload(Category.candidates))
+            .where(Category.event_id == event_id)
+            .order_by(Category.display_order)
+        )
+        return list(result.scalars().all())
+
+    async def get_with_candidates(self, category_id: UUID) -> Optional[Category]:
+        result = await self.session.execute(
+            select(Category)
+            .options(selectinload(Category.candidates))
+            .where(Category.category_id == category_id)
+        )
+        return result.scalar_one_or_none()
+
+
 class CandidateRepository(BaseRepository[Candidate]):
     def __init__(self, model, session: AsyncSession):
         super().__init__(model, session)
@@ -120,6 +159,22 @@ class CandidateRepository(BaseRepository[Candidate]):
         result = await self.session.execute(
             select(Candidate)
             .where(Candidate.election_id == election_id)
+            .order_by(Candidate.display_order)
+        )
+        return list(result.scalars().all())
+
+    async def get_by_event(self, event_id: UUID) -> List[Candidate]:
+        result = await self.session.execute(
+            select(Candidate)
+            .where(Candidate.event_id == event_id)
+            .order_by(Candidate.display_order)
+        )
+        return list(result.scalars().all())
+
+    async def get_by_category(self, category_id: UUID) -> List[Candidate]:
+        result = await self.session.execute(
+            select(Candidate)
+            .where(Candidate.category_id == category_id)
             .order_by(Candidate.display_order)
         )
         return list(result.scalars().all())

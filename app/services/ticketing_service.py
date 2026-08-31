@@ -143,7 +143,7 @@ class TicketingService:
         if total_amount > 0:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
-                detail="This purchase requires payment — use POST /tickets/initiate-payment instead",
+                detail="This purchase requires payment. Use POST /tickets/initiate-payment instead",
             )
 
         # 3. Create purchase record
@@ -502,7 +502,7 @@ class TicketingService:
                 + (
                     ""
                     if email_sent
-                    else " The ticket email could not be sent — resend it from "
+                    else " The ticket email could not be sent. Resend it from "
                     "Ticket Purchases once mail is working."
                 )
             ),
@@ -582,7 +582,7 @@ class TicketingService:
                 status_code=status.HTTP_409_CONFLICT,
                 detail=(
                     "This purchase has no issued tickets, so there is nothing to "
-                    "resend. The payment was most likely never fulfilled — check "
+                    "resend. The payment was most likely never fulfilled. Check "
                     "the ticket transaction for this reference."
                 ),
             )
@@ -653,7 +653,7 @@ class TicketingService:
                 f"Ticket email sent to {recipient}."
                 if sent
                 else (
-                    f"Could not send to {recipient} — the mail server rejected the "
+                    f"Could not send to {recipient}. The mail server rejected the "
                     "message or is unreachable. Check the server logs."
                 )
             ),
@@ -754,7 +754,7 @@ class TicketingService:
             # directly from the webhook branch (Task 4), which never goes
             # through the verify-and-purchase endpoint's own checks, so this
             # can't just live in the endpoint.
-            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Payment failed — please try again")
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Payment failed, please try again")
 
         # Capture the scalars we need off `txn` up front rather than reading
         # `txn.*` again after any of the commits below.
@@ -791,7 +791,7 @@ class TicketingService:
                     txn_repo, reference, paystack_data,
                     transaction_id=txn_id, user_id=txn_user_id,
                     reason="ticket_type_unavailable", ticket_type_id=ticket_type_id,
-                    detail="Payment succeeded but a ticket type became unavailable. Your payment will be refunded — contact support if you don't hear back within 24 hours.",
+                    detail="Payment succeeded but a ticket type became unavailable. Your payment will be refunded. Contact support if you don't hear back within 24 hours.",
                     decremented_so_far=decremented,
                 )
 
@@ -801,7 +801,7 @@ class TicketingService:
                     txn_repo, reference, paystack_data,
                     transaction_id=txn_id, user_id=txn_user_id,
                     reason="sold_out", ticket_type_id=ticket_type_id,
-                    detail="Payment succeeded but this ticket type sold out before it could be issued. Your payment will be refunded — contact support if you don't hear back within 24 hours.",
+                    detail="Payment succeeded but this ticket type sold out before it could be issued. Your payment will be refunded. Contact support if you don't hear back within 24 hours.",
                     decremented_so_far=decremented,
                 )
             decremented.append((ticket_type_id, quantity))

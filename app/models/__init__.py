@@ -1,5 +1,5 @@
 from app.models.user import User, Role, UserRole
-from app.models.election import Election, Candidate, EligibleVoter
+from app.models.election import Election, Category, Candidate, EligibleVoter
 from app.models.vote import Vote, VoteReceipt
 from app.models.event import Event, TicketType
 from app.models.ticket import Ticket, TicketPurchase
@@ -16,6 +16,7 @@ __all__ = [
     "Role",
     "UserRole",
     "Election",
+    "Category",
     "Candidate",
     "EligibleVoter",
     "Vote",

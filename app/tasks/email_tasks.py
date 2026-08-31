@@ -24,7 +24,7 @@ def send_verification_email(email: str, token: str):
     from app.services.email_service import password_reset_email
     link = f"{settings.FRONTEND_URL}/verify-email?token={token}"
     subject, html = password_reset_email("User", link)
-    subject = "Verify Your Email — Pollord"
+    subject = "Verify Your Email: Pollord"
     send_email_task.delay(email, subject, html)
 
 
@@ -41,7 +41,7 @@ def send_password_reset_email(email: str, token: str):
 def send_ticket_confirmation_email(email: str, event_title: str, ticket_count: int):
     from app.core.config import settings
     from app.services.email_service import _base_template
-    subject = f"Ticket Confirmation — {event_title}"
+    subject = f"Ticket Confirmation: {event_title}"
     content = f"""
     <h2>Ticket Confirmation</h2>
     <p>You have successfully purchased <span class="highlight">{ticket_count} ticket(s)</span> for:</p>
@@ -57,7 +57,7 @@ def send_ticket_confirmation_email(email: str, event_title: str, ticket_count: i
 @celery_app.task
 def send_vote_confirmation_email(email: str, election_title: str, receipt_code: str):
     from app.services.email_service import _base_template
-    subject = f"Vote Confirmation — {election_title}"
+    subject = f"Vote Confirmation: {election_title}"
     content = f"""
     <h2>Your Vote Has Been Recorded</h2>
     <p>Thank you for voting in:</p>
@@ -67,7 +67,7 @@ def send_vote_confirmation_email(email: str, election_title: str, receipt_code: 
     <p>Your vote receipt code:</p>
     <div class="otp-box">
       <div class="otp-code" style="font-size:24px;">{receipt_code}</div>
-      <div class="otp-label">Keep this safe — it proves you voted</div>
+      <div class="otp-label">Keep this safe: it proves you voted</div>
     </div>
     """
     html = _base_template(content, f"Vote confirmed in {election_title}")

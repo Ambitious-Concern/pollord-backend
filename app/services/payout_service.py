@@ -169,14 +169,14 @@ class PayoutService:
         if req.status != "pending":
             raise HTTPException(
                 status_code=status.HTTP_409_CONFLICT,
-                detail=f"This request is already {req.status} — nothing to pay",
+                detail=f"This request is already {req.status}, nothing to pay",
             )
         if not (req.mobile_network and req.mobile_number and req.recipient_name):
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail=(
                     "This request has no payout destination on file (it may predate "
-                    "this feature) — pay the organizer manually and mark it paid instead."
+                    "this feature). Pay the organizer manually and mark it paid instead."
                 ),
             )
 
@@ -201,7 +201,7 @@ class PayoutService:
         transfer = await self.paystack.initiate_transfer(
             amount=int(req.amount * 100),  # pesewas
             recipient_code=recipient_code,
-            reason=f"Pollord payout — {event.title if event else req.event_id}",
+            reason=f"Pollord payout: {event.title if event else req.event_id}",
             reference=reference,
         )
 

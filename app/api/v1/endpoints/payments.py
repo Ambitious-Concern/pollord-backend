@@ -21,11 +21,13 @@ from app.core.config import settings
 from app.core.redis import get_redis
 from app.db.base import get_db
 from app.models.election import Election
+from app.models.event import Event
 from app.models.platform_setting import PlatformSetting
 from app.models.transaction import Transaction
 from app.models.vote import Vote
 from app.api.v1.endpoints.tickets import _get_ticketing_service
 from app.repositories.election_repository import ElectionRepository
+from app.repositories.event_repository import EventRepository
 from app.repositories.ticket_transaction_repository import TicketTransactionRepository
 from app.repositories.transaction_repository import TransactionRepository
 from app.repositories.vote_repository import VoteRepository
@@ -39,9 +41,9 @@ _wa = WhatsAppService()
 _crypto = CryptographyService()
 
 
-async def _resolve_vote_price(election, db: AsyncSession) -> int:
-    if getattr(election, "vote_price", None) is not None:
-        return election.vote_price
+async def _resolve_vote_price(parent, db: AsyncSession) -> int:
+    if getattr(parent, "vote_price", None) is not None:
+        return parent.vote_price
     result = await db.execute(
         select(PlatformSetting).where(PlatformSetting.key == "vote_price")
     )
@@ -140,29 +142,46 @@ async def _handle_charge_success(reference: str, data: dict, db: AsyncSession) -
         )
         return {"status": "amount_mismatch"}
 
-    election_repo = ElectionRepository(Election, db)
-    election = await election_repo.get_with_candidates(txn.election_id)
-    election_title = election.title if election else "the election"
+    if txn.election_id is not None:
+        parent = await ElectionRepository(Election, db).get_by_id(
+            txn.election_id, id_field="election_id"
+        )
+        parent_kind = "election"
+    else:
+        parent = await EventRepository(Event, db).get_by_id(
+            txn.event_id, id_field="event_id"
+        )
+        parent_kind = "event"
+    parent_title = parent.title if parent else f"the {parent_kind}"
 
-    # Reject if the election closed between payment initiation and this webhook
-    if election:
+    # Reject if the election/event closed between payment initiation and this webhook.
+    # Elections gate on status + voting window; events are always open while published.
+    if parent:
         now = datetime.now(timezone.utc)
-        if election.status != "active" or now < election.start_datetime or now > election.end_datetime:
+        if parent_kind == "election":
+            closed = (
+                parent.status != "active"
+                or now < parent.start_datetime
+                or now > parent.end_datetime
+            )
+        else:
+            closed = parent.status != "published"
+        if closed:
             await txn_repo.update_status(reference, "failed", data)
             logger.warning(
-                "Paystack webhook: election no longer active ref=%s election_id=%s status=%s",
-                reference, txn.election_id, election.status,
+                "Paystack webhook: %s no longer active ref=%s id=%s status=%s",
+                parent_kind, reference, txn.election_id or txn.event_id, parent.status,
             )
             await _notify_whatsapp(
                 reference,
-                f"⚠️ *Payment received but the election has ended.*\n\n"
-                f"Election: *{election_title}*\n\n"
+                f"⚠️ *Payment received but the {parent_kind} has ended.*\n\n"
+                f"{parent_kind.title()}: *{parent_title}*\n\n"
                 "Your vote could not be cast. Please contact support to request a refund.",
             )
-            return {"status": "election_ended"}
+            return {"status": f"{parent_kind}_ended"}
 
     # Resolve vote count from the payment amount
-    vote_price = await _resolve_vote_price(election, db) if election else settings.VOTE_PRICE
+    vote_price = await _resolve_vote_price(parent, db) if parent else settings.VOTE_PRICE
     vote_count = max(1, txn.amount // vote_price) if vote_price > 0 else 1
 
     # Cast the vote
@@ -174,7 +193,9 @@ async def _handle_charge_success(reference: str, data: dict, db: AsyncSession) -
 
     try:
         await vote_repo.create({
+            "category_id": txn.category_id,
             "election_id": txn.election_id,
+            "event_id": txn.event_id,
             "voter_hash": txn.voter_hash,
             "vote_data": encrypted,
             "vote_signature": signature,
@@ -189,7 +210,7 @@ async def _handle_charge_success(reference: str, data: dict, db: AsyncSession) -
     await _notify_whatsapp(
         reference,
         f"✅ Payment confirmed! Vote cast successfully.\n\n"
-        f"Election: *{election_title}*\n\n"
+        f"{parent_kind.title()}: *{parent_title}*\n\n"
         f"Your receipt code:\n*{receipt_code}*\n\n"
         "Thank you for participating! 🎉",
     )

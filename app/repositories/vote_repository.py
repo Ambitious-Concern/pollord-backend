@@ -12,10 +12,13 @@ class VoteRepository(BaseRepository[Vote]):
     def __init__(self, model, session: AsyncSession):
         super().__init__(model, session)
 
-    async def has_voted(self, voter_hash: str, election_id: UUID) -> bool:
+    async def has_voted(self, voter_hash: str, category_id: UUID) -> bool:
+        """category_id alone scopes uq_vote_per_category — it already uniquely
+        implies its parent (election or event), so no separate election_id
+        argument is needed."""
         result = await self.session.execute(
             select(Vote).where(
-                Vote.election_id == election_id,
+                Vote.category_id == category_id,
                 Vote.voter_hash == voter_hash,
             )
         )
@@ -24,6 +27,12 @@ class VoteRepository(BaseRepository[Vote]):
     async def get_votes_by_election(self, election_id: UUID) -> List[Vote]:
         result = await self.session.execute(
             select(Vote).where(Vote.election_id == election_id)
+        )
+        return list(result.scalars().all())
+
+    async def get_votes_by_event(self, event_id: UUID) -> List[Vote]:
+        result = await self.session.execute(
+            select(Vote).where(Vote.event_id == event_id)
         )
         return list(result.scalars().all())
 

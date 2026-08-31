@@ -11,26 +11,32 @@ from datetime import datetime, timedelta, timezone
 from app.core.config import settings
 from app.core.dependencies import get_current_active_user, require_roles
 from app.core.security import create_candidate_result_token, decode_token
+from app.core.slug import generate_slug
 from app.db.base import get_db
 from app.models.audit_log import AuditLog
-from app.models.election import Candidate, CandidateAccessOTP, Election, EligibleVoter
+from app.models.election import Candidate, CandidateAccessOTP, Category, Election, EligibleVoter
 from app.models.organization import Organization
 from app.models.platform_setting import PlatformSetting
 from app.models.user import User
 from app.repositories.audit_log_repository import AuditLogRepository
-from app.repositories.election_repository import CandidateRepository, ElectionRepository
+from app.repositories.election_repository import CandidateRepository, CategoryRepository, ElectionRepository
 from app.repositories.organization_repository import OrganizationRepository
 from app.services import email_service
 from app.services.file_storage_service import file_storage_service
+from app.services.voting_service import VotingService
 from app.schemas.election import (
     CandidateCreate,
     CandidateResponse,
     CandidateUpdate,
+    CategoryCreate,
+    CategoryResponse,
+    CategoryUpdate,
+    CategoryWithCandidates,
     ElectionCreate,
     ElectionPublicResponse,
     ElectionResponse,
     ElectionUpdate,
-    ElectionWithCandidates,
+    ElectionWithCategories,
     EligibleVoterAdd,
     EligibleVoterResponse,
 )
@@ -57,14 +63,18 @@ SETTINGS_FIELDS = (
     "allow_result_viewing",
     "require_verification",
     "anonymous_results",
-    "allow_abstain",
     "show_candidate_count",
     "randomize_candidate_order",
     "enable_notifications",
-    "max_selections",
     "allow_revoting",
     "vote_price",
 )
+
+# Once an election is active, its ballot (dates, categories, voting rules,
+# access) is locked so results stay trustworthy — but purely cosmetic/info
+# fields are still safe to fix up (a typo in the title, a wrong venue, etc).
+SAFE_FIELDS_WHILE_ACTIVE = {"title", "description", "venue", "latitude", "longitude", "tag"}
+SAFE_SETTINGS_WHILE_ACTIVE = {"enable_notifications"}
 
 
 def _extract_settings(data) -> dict:
@@ -116,6 +126,20 @@ async def _validate_vote_price(data, db: AsyncSession) -> None:
 # =========================================================================
 
 
+async def _get_global_vote_price(db: AsyncSession) -> int:
+    """Read the global vote price from platform_settings, falling back to the env-var constant."""
+    result = await db.execute(
+        select(PlatformSetting).where(PlatformSetting.key == "vote_price")
+    )
+    row = result.scalar_one_or_none()
+    if row:
+        try:
+            return int(row.value)
+        except (ValueError, TypeError):
+            pass
+    return settings.VOTE_PRICE
+
+
 @router.get("/public", response_model=List[ElectionPublicResponse])
 async def list_public_elections(
     db: AsyncSession = Depends(get_db),
@@ -135,47 +159,52 @@ async def list_public_elections(
 
     # Filter to only public elections
     public = [e for e in elections if getattr(e, "visibility", "public") == "public"]
-    return [ElectionPublicResponse.model_validate(e) for e in public]
+
+    global_vote_price = await _get_global_vote_price(db)
+    responses = []
+    for e in public:
+        resp = ElectionPublicResponse.model_validate(e)
+        resp.effective_vote_price = e.vote_price if e.vote_price is not None else global_vote_price
+        responses.append(resp)
+    return responses
 
 
-@router.get("/public/{election_id}", response_model=ElectionWithCandidates)
+@router.get("/public/{election_id}", response_model=ElectionWithCategories)
 async def get_public_election(
     election_id: UUID,
     db: AsyncSession = Depends(get_db),
 ):
-    """Get a single public election with candidates. No auth required."""
+    """Get a single public election with its categories/candidates. No auth required."""
     election_repo = ElectionRepository(Election, db)
-    election = await election_repo.get_with_candidates(election_id)
+    election = await election_repo.get_with_categories(election_id)
     if not election:
         raise HTTPException(status_code=404, detail="Election not found")
 
     if getattr(election, "visibility", "public") != "public":
         raise HTTPException(status_code=404, detail="Election not found")
 
-    return ElectionWithCandidates(
-        election_id=election.election_id,
-        title=election.title,
-        description=election.description,
-        election_type=election.election_type,
-        start_datetime=election.start_datetime,
-        end_datetime=election.end_datetime,
-        status=election.status,
-        created_by=election.created_by,
-        created_at=election.created_at,
-        updated_at=election.updated_at,
-        banner_image_url=getattr(election, "banner_image_url", None),
-        visibility=getattr(election, "visibility", "public"),
-        access_code=None,  # Don't expose access code publicly
-        allow_result_viewing=getattr(election, "allow_result_viewing", "after_end"),
-        require_verification=getattr(election, "require_verification", False),
-        anonymous_results=getattr(election, "anonymous_results", True),
-        allow_abstain=getattr(election, "allow_abstain", False),
-        show_candidate_count=getattr(election, "show_candidate_count", False),
-        randomize_candidate_order=getattr(election, "randomize_candidate_order", False),
-        enable_notifications=getattr(election, "enable_notifications", True),
-        max_selections=getattr(election, "max_selections", None),
-        candidates=[CandidateResponse.model_validate(c) for c in election.candidates],
-    )
+    response = VotingService.build_election_with_categories(election)
+    response.access_code = None  # Don't expose access code publicly
+    return response
+
+
+@router.get("/public/by-slug/{slug}", response_model=ElectionWithCategories)
+async def get_public_election_by_slug(
+    slug: str,
+    db: AsyncSession = Depends(get_db),
+):
+    """Same as get_public_election, keyed by slug — for slug-based routing (v2)."""
+    election_repo = ElectionRepository(Election, db)
+    election = await election_repo.get_by_slug(slug)
+    if not election:
+        raise HTTPException(status_code=404, detail="Election not found")
+
+    if getattr(election, "visibility", "public") != "public":
+        raise HTTPException(status_code=404, detail="Election not found")
+
+    response = VotingService.build_election_with_categories(election)
+    response.access_code = None
+    return response
 
 
 @router.get("/user/{user_id}", response_model=List[ElectionPublicResponse])
@@ -212,11 +241,15 @@ async def create_election(
 
     create_data = {
         "title": data.title,
+        "slug": data.slug or generate_slug(data.title),
         "description": data.description,
-        "election_type": data.election_type,
         "start_datetime": data.start_datetime,
         "end_datetime": data.end_datetime,
         "banner_image_url": data.banner_image_url,
+        "venue": data.venue,
+        "latitude": data.latitude,
+        "longitude": data.longitude,
+        "tag": data.tag,
         "created_by": current_user.user_id,
         **_extract_settings(data),
     }
@@ -252,42 +285,19 @@ async def list_elections(
     return [ElectionResponse.model_validate(e) for e in elections]
 
 
-@router.get("/{election_id}", response_model=ElectionWithCandidates)
+@router.get("/{election_id}", response_model=ElectionWithCategories)
 async def get_election(
     election_id: UUID,
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(require_roles(*ADMIN_ROLES)),
 ):
     election_repo = ElectionRepository(Election, db)
-    election = await election_repo.get_with_candidates(election_id)
+    election = await election_repo.get_with_categories(election_id)
     if not election:
         raise HTTPException(status_code=404, detail="Election not found")
     _require_ownership(election, current_user)
 
-    return ElectionWithCandidates(
-        election_id=election.election_id,
-        title=election.title,
-        description=election.description,
-        election_type=election.election_type,
-        start_datetime=election.start_datetime,
-        end_datetime=election.end_datetime,
-        status=election.status,
-        created_by=election.created_by,
-        created_at=election.created_at,
-        updated_at=election.updated_at,
-        banner_image_url=getattr(election, "banner_image_url", None),
-        visibility=getattr(election, "visibility", "public"),
-        access_code=getattr(election, "access_code", None),
-        allow_result_viewing=getattr(election, "allow_result_viewing", "after_end"),
-        require_verification=getattr(election, "require_verification", False),
-        anonymous_results=getattr(election, "anonymous_results", True),
-        allow_abstain=getattr(election, "allow_abstain", False),
-        show_candidate_count=getattr(election, "show_candidate_count", False),
-        randomize_candidate_order=getattr(election, "randomize_candidate_order", False),
-        enable_notifications=getattr(election, "enable_notifications", True),
-        max_selections=getattr(election, "max_selections", None),
-        candidates=[CandidateResponse.model_validate(c) for c in election.candidates],
-    )
+    return VotingService.build_election_with_categories(election)
 
 
 @router.put("/{election_id}", response_model=ElectionResponse)
@@ -303,7 +313,23 @@ async def update_election(
         raise HTTPException(status_code=404, detail="Election not found")
     _require_ownership(election, current_user)
 
-    if election.status not in ("draft", "scheduled"):
+    update_data = data.model_dump(exclude_unset=True, exclude={"settings"})
+    settings_data = _extract_settings(data)
+
+    if election.status == "active":
+        disallowed = sorted(set(update_data) - SAFE_FIELDS_WHILE_ACTIVE)
+        if disallowed:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Cannot change {', '.join(disallowed)} while the election is active",
+            )
+        disallowed_settings = sorted(set(settings_data) - SAFE_SETTINGS_WHILE_ACTIVE)
+        if disallowed_settings:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Cannot change {', '.join(disallowed_settings)} while the election is active",
+            )
+    elif election.status not in ("draft", "scheduled"):
         raise HTTPException(
             status_code=400,
             detail="Cannot modify election after voting has started",
@@ -311,8 +337,7 @@ async def update_election(
 
     await _validate_vote_price(data, db)
 
-    update_data = data.model_dump(exclude_unset=True, exclude={"settings"})
-    update_data.update(_extract_settings(data))
+    update_data.update(settings_data)
 
     updated = await election_repo.update(
         election_id, update_data, id_field="election_id"
@@ -370,6 +395,19 @@ async def publish_election(
             status_code=400,
             detail=f"Cannot activate election with status '{election.status}'",
         )
+
+    election_with_categories = await election_repo.get_with_categories(election_id)
+    if not election_with_categories.categories:
+        raise HTTPException(
+            status_code=400,
+            detail="Election must have at least one category before it can be activated",
+        )
+    for category in election_with_categories.categories:
+        if not category.candidates:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Category '{category.name}' has no candidates",
+            )
 
     updated = await election_repo.update_status(election_id, "active")
 
@@ -465,6 +503,11 @@ async def add_candidate(
             status_code=400,
             detail="Cannot add candidates after voting has started",
         )
+
+    category_repo = CategoryRepository(Category, db)
+    category = await category_repo.get_by_id(data.category_id, id_field="category_id")
+    if not category or category.election_id != election_id:
+        raise HTTPException(status_code=400, detail="Invalid category for this election")
 
     candidate_repo = CandidateRepository(Candidate, db)
     candidate_id = uuid_lib.uuid4()
@@ -642,6 +685,120 @@ async def update_candidate(
 
 
 # =========================================================================
+# Categories — a position/prize within the election (e.g. "President").
+# Each category owns its own election_type/allow_abstain and candidates.
+# =========================================================================
+
+
+@router.post("/{election_id}/categories", response_model=CategoryResponse, status_code=201)
+async def add_category(
+    election_id: UUID,
+    data: CategoryCreate,
+    current_user: User = Depends(require_roles(*ADMIN_ROLES)),
+    db: AsyncSession = Depends(get_db),
+):
+    election_repo = ElectionRepository(Election, db)
+    election = await election_repo.get_by_id(election_id, id_field="election_id")
+    if not election:
+        raise HTTPException(status_code=404, detail="Election not found")
+    _require_ownership(election, current_user)
+
+    if election.status not in ("draft", "scheduled"):
+        raise HTTPException(
+            status_code=400,
+            detail="Cannot add categories after voting has started",
+        )
+
+    category_repo = CategoryRepository(Category, db)
+    category = await category_repo.create(
+        {**data.model_dump(), "election_id": election_id}
+    )
+    return CategoryResponse.model_validate(category)
+
+
+@router.get("/{election_id}/categories", response_model=List[CategoryWithCandidates])
+async def list_categories(
+    election_id: UUID,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_active_user),
+):
+    category_repo = CategoryRepository(Category, db)
+    categories = await category_repo.get_by_election(election_id)
+    return [CategoryWithCandidates.model_validate(c) for c in categories]
+
+
+@router.get("/{election_id}/categories/{category_id}", response_model=CategoryWithCandidates)
+async def get_category(
+    election_id: UUID,
+    category_id: UUID,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_active_user),
+):
+    category_repo = CategoryRepository(Category, db)
+    category = await category_repo.get_with_candidates(category_id)
+    if not category or category.election_id != election_id:
+        raise HTTPException(status_code=404, detail="Category not found")
+    return CategoryWithCandidates.model_validate(category)
+
+
+@router.put("/{election_id}/categories/{category_id}", response_model=CategoryResponse)
+async def update_category(
+    election_id: UUID,
+    category_id: UUID,
+    data: CategoryUpdate,
+    current_user: User = Depends(require_roles(*ADMIN_ROLES)),
+    db: AsyncSession = Depends(get_db),
+):
+    election_repo = ElectionRepository(Election, db)
+    election = await election_repo.get_by_id(election_id, id_field="election_id")
+    if not election:
+        raise HTTPException(status_code=404, detail="Election not found")
+    _require_ownership(election, current_user)
+
+    if election.status not in ("draft", "scheduled"):
+        raise HTTPException(
+            status_code=400,
+            detail="Cannot edit categories after voting has started",
+        )
+
+    category_repo = CategoryRepository(Category, db)
+    category = await category_repo.get_by_id(category_id, id_field="category_id")
+    if not category or category.election_id != election_id:
+        raise HTTPException(status_code=404, detail="Category not found")
+
+    update_data = data.model_dump(exclude_unset=True)
+    updated = await category_repo.update(category_id, update_data, id_field="category_id")
+    return CategoryResponse.model_validate(updated)
+
+
+@router.delete("/{election_id}/categories/{category_id}", status_code=204)
+async def delete_category(
+    election_id: UUID,
+    category_id: UUID,
+    current_user: User = Depends(require_roles(*ADMIN_ROLES)),
+    db: AsyncSession = Depends(get_db),
+):
+    election_repo = ElectionRepository(Election, db)
+    election = await election_repo.get_by_id(election_id, id_field="election_id")
+    if not election:
+        raise HTTPException(status_code=404, detail="Election not found")
+    _require_ownership(election, current_user)
+
+    if election.status not in ("draft", "scheduled"):
+        raise HTTPException(
+            status_code=400,
+            detail="Cannot delete categories after voting has started",
+        )
+
+    category_repo = CategoryRepository(Category, db)
+    category = await category_repo.get_by_id(category_id, id_field="category_id")
+    if not category or category.election_id != election_id:
+        raise HTTPException(status_code=404, detail="Category not found")
+
+    await category_repo.delete(category_id, id_field="category_id")
+
+
+# =========================================================================
 # Eligible Voters
 # =========================================================================
 
@@ -772,6 +929,58 @@ async def request_candidate_otp(
     return {"message": "If that email is registered as a candidate, a code has been sent."}
 
 
+async def _get_candidate_standing(db: AsyncSession, election, candidate: Candidate) -> dict:
+    """A candidate's rank/vote count/turnout, scoped to their OWN category —
+    ranking across the whole election would be meaningless once categories
+    can have entirely different candidate pools."""
+    category = next(
+        (c for c in election.categories if c.category_id == candidate.category_id),
+        None,
+    )
+    if category is None:
+        raise HTTPException(status_code=404, detail="Candidate's category not found")
+
+    from app.repositories.vote_repository import VoteRepository
+    from app.models.vote import Vote
+    from app.services.cryptography_service import CryptographyService
+
+    vote_repo = VoteRepository(Vote, db)
+    all_votes = await vote_repo.get_votes_by_election(election.election_id)
+    category_votes = [v for v in all_votes if v.category_id == category.category_id]
+    crypto = CryptographyService()
+
+    candidate_counts: dict = {}
+    for vote in category_votes:
+        try:
+            decrypted = crypto.decrypt_vote_data(vote.vote_data)
+            weight = getattr(vote, "count", 1)
+            for cid_str in decrypted.get("candidate_ids", []):
+                candidate_counts[cid_str] = candidate_counts.get(cid_str, 0) + weight
+        except Exception:
+            pass
+
+    total_votes = sum(getattr(v, "count", 1) for v in category_votes)
+    my_count = candidate_counts.get(str(candidate.candidate_id), 0)
+    my_pct = round((my_count / total_votes * 100) if total_votes > 0 else 0, 2)
+
+    all_counts = [candidate_counts.get(str(c.candidate_id), 0) for c in category.candidates]
+    all_counts.sort(reverse=True)
+    rank = all_counts.index(my_count) + 1
+
+    election_repo = ElectionRepository(Election, db)
+    total_eligible = await election_repo.count_eligible_voters(election.election_id)
+    turnout = round((total_votes / total_eligible * 100) if total_eligible > 0 else 0, 2)
+
+    return {
+        "vote_count": my_count,
+        "percentage": my_pct,
+        "rank": rank,
+        "total_candidates": len(category.candidates),
+        "total_votes": total_votes,
+        "turnout_percentage": turnout,
+    }
+
+
 @router.post("/{election_id}/candidate-access/verify-otp", response_model=CandidateResultResponse)
 async def verify_candidate_otp(
     election_id: UUID,
@@ -805,41 +1014,9 @@ async def verify_candidate_otp(
     candidate = cand_result.scalar_one()
 
     election_repo = ElectionRepository(Election, db)
-    election = await election_repo.get_with_candidates(election_id)
+    election = await election_repo.get_with_categories(election_id)
 
-    # Tally votes (reuse voting service logic inline)
-    from app.repositories.vote_repository import VoteRepository
-    from app.models.vote import Vote
-    from app.services.cryptography_service import CryptographyService
-
-    vote_repo = VoteRepository(Vote, db)
-    votes = await vote_repo.get_votes_by_election(election_id)
-    crypto = CryptographyService()
-
-    candidate_counts: dict = {}
-    for vote in votes:
-        try:
-            decrypted = crypto.decrypt_vote_data(vote.vote_data)
-            for cid_str in decrypted.get("candidate_ids", []):
-                candidate_counts[cid_str] = candidate_counts.get(cid_str, 0) + 1
-        except Exception:
-            pass
-
-    total_votes = len(votes)
-    my_count = candidate_counts.get(str(candidate.candidate_id), 0)
-    my_pct = round((my_count / total_votes * 100) if total_votes > 0 else 0, 2)
-
-    # Rank
-    all_counts = [
-        candidate_counts.get(str(c.candidate_id), 0)
-        for c in election.candidates
-    ]
-    all_counts.sort(reverse=True)
-    rank = all_counts.index(my_count) + 1
-
-    # Turnout
-    total_eligible = await election_repo.count_eligible_voters(election_id)
-    turnout = round((total_votes / total_eligible * 100) if total_eligible > 0 else 0, 2)
+    standing = await _get_candidate_standing(db, election, candidate)
 
     access_token = create_candidate_result_token(
         candidate_id=str(candidate.candidate_id),
@@ -867,13 +1044,8 @@ async def verify_candidate_otp(
         election_status=election.status,
         start_datetime=election.start_datetime.isoformat(),
         end_datetime=election.end_datetime.isoformat(),
-        vote_count=my_count,
-        percentage=my_pct,
-        rank=rank,
-        total_candidates=len(election.candidates),
-        total_votes=total_votes,
-        turnout_percentage=turnout,
         access_token=access_token,
+        **standing,
     )
 
 
@@ -901,40 +1073,11 @@ async def get_candidate_results_by_token(
         raise HTTPException(status_code=404, detail="Candidate not found")
 
     election_repo = ElectionRepository(Election, db)
-    election = await election_repo.get_with_candidates(election_id)
+    election = await election_repo.get_with_categories(election_id)
     if not election:
         raise HTTPException(status_code=404, detail="Election not found")
 
-    from app.repositories.vote_repository import VoteRepository
-    from app.models.vote import Vote
-    from app.services.cryptography_service import CryptographyService
-
-    vote_repo = VoteRepository(Vote, db)
-    votes = await vote_repo.get_votes_by_election(election_id)
-    crypto = CryptographyService()
-
-    candidate_counts: dict = {}
-    for vote in votes:
-        try:
-            decrypted = crypto.decrypt_vote_data(vote.vote_data)
-            for cid_str in decrypted.get("candidate_ids", []):
-                candidate_counts[cid_str] = candidate_counts.get(cid_str, 0) + 1
-        except Exception:
-            pass
-
-    total_votes = len(votes)
-    my_count = candidate_counts.get(str(candidate.candidate_id), 0)
-    my_pct = round((my_count / total_votes * 100) if total_votes > 0 else 0, 2)
-
-    all_counts = [
-        candidate_counts.get(str(c.candidate_id), 0)
-        for c in election.candidates
-    ]
-    all_counts.sort(reverse=True)
-    rank = all_counts.index(my_count) + 1
-
-    total_eligible = await election_repo.count_eligible_voters(election_id)
-    turnout = round((total_votes / total_eligible * 100) if total_eligible > 0 else 0, 2)
+    standing = await _get_candidate_standing(db, election, candidate)
 
     return CandidateResultResponse(
         candidate_id=str(candidate.candidate_id),
@@ -945,11 +1088,6 @@ async def get_candidate_results_by_token(
         election_status=election.status,
         start_datetime=election.start_datetime.isoformat(),
         end_datetime=election.end_datetime.isoformat(),
-        vote_count=my_count,
-        percentage=my_pct,
-        rank=rank,
-        total_candidates=len(election.candidates),
-        total_votes=total_votes,
-        turnout_percentage=turnout,
         access_token=token,
+        **standing,
     )

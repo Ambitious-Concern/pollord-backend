@@ -104,7 +104,7 @@ def otp_email(user_name: str, otp_code: str) -> tuple[str, str]:
 
 def password_reset_email(user_name: str, reset_link: str) -> tuple[str, str]:
     """Return (subject, html_body) for password reset."""
-    subject = "Reset Your Password — Pollord"
+    subject = "Reset Your Password: Pollord"
     content = f"""
     <h2>Reset Your Password</h2>
     <p>Hi {user_name}, we received a request to reset your password.</p>
@@ -120,7 +120,7 @@ def election_invite_email(
     user_name: str, election_title: str, election_id: str
 ) -> tuple[str, str]:
     """Return (subject, html_body) for election voter invite."""
-    subject = f"You're invited to vote — {election_title}"
+    subject = f"You're invited to vote: {election_title}"
     link = f"{settings.FRONTEND_URL}/voting/ballot/{election_id}"
     content = f"""
     <h2>You're Invited to Vote</h2>
@@ -145,7 +145,7 @@ def candidate_nomination_email(
     org_name: str,
 ) -> tuple[str, str]:
     """Return (subject, html_body) notifying someone they've been added as a candidate."""
-    subject = f"You've been nominated — {election_title}"
+    subject = f"You've been nominated: {election_title}"
     import urllib.parse
     results_url = (
         f"{settings.FRONTEND_URL}/candidate/results"
@@ -161,7 +161,7 @@ def candidate_nomination_email(
         Voting period: {start_datetime} &ndash; {end_datetime}
       </div>
     </div>
-    <p>During and after the election you can track your personal performance in real time. Click the button below — you'll be asked to verify your email with a one-time code.</p>
+    <p>During and after the election you can track your personal performance in real time. Click the button below. You'll be asked to verify your email with a one-time code.</p>
     <p style="text-align:center; margin:24px 0;">
       <a href="{results_url}" class="btn">View My Results</a>
     </p>
@@ -175,7 +175,7 @@ def candidate_nomination_email(
 
 def candidate_otp_email(candidate_name: str, otp_code: str, election_title: str) -> tuple[str, str]:
     """OTP email for candidate result access (no account required)."""
-    subject = f"Your results access code — {election_title}"
+    subject = f"Your results access code: {election_title}"
     content = f"""
     <h2>Your Access Code</h2>
     <p>Hi {candidate_name}, use the code below to view your results for <span class="highlight">{election_title}</span>.</p>
@@ -188,13 +188,28 @@ def candidate_otp_email(candidate_name: str, otp_code: str, election_title: str)
     return subject, _base_template(content, f"Your access code: {otp_code}")
 
 
+def voter_otp_email(otp_code: str, category_name: str, parent_title: str) -> tuple[str, str]:
+    """OTP email verifying a voter's identity before a free public vote is cast."""
+    subject = f"Your voting code: {parent_title}"
+    content = f"""
+    <h2>Your Voting Code</h2>
+    <p>Use the code below to verify your vote for <span class="highlight">{category_name}</span> in <span class="highlight">{parent_title}</span>.</p>
+    <div class="otp-box">
+      <div class="otp-code">{otp_code}</div>
+      <div class="otp-label">One-Time Voting Code</div>
+    </div>
+    <p>This code expires in <span class="highlight">10 minutes</span>. If you didn't request this, you can safely ignore it.</p>
+    """
+    return subject, _base_template(content, f"Your voting code: {otp_code}")
+
+
 def candidate_result_link_email(
     candidate_name: str,
     election_title: str,
     results_url: str,
 ) -> tuple[str, str]:
     """Persistent link email sent after successful OTP verification."""
-    subject = f"Your results link — {election_title}"
+    subject = f"Your results link: {election_title}"
     content = f"""
     <h2>Bookmark Your Results</h2>
     <p>Hi {candidate_name}, here is your personal link to view your performance in <span class="highlight">{election_title}</span> at any time.</p>
@@ -234,7 +249,7 @@ def org_invitation_email(
 
 def waitlist_confirmation_email() -> tuple[str, str]:
     """Return (subject, html_body) confirming a waitlist signup."""
-    subject = "You're on the list — Pollord launches August 13!"
+    subject = "You're on the list. Pollord launches August 13!"
     content = """
     <h2>You're on the list! 🎉</h2>
     <p>Thanks for joining the <span class="highlight">Pollord</span> waitlist.</p>
@@ -242,14 +257,14 @@ def waitlist_confirmation_email() -> tuple[str, str]:
       <div style="color:#fff; font-size:20px; font-weight:800;">Launching August 13, 2026</div>
       <div class="otp-label">Mark your calendar</div>
     </div>
-    <p>You'll be the first to know the moment we go live — secure elections, event
+    <p>You'll be the first to know the moment we go live: secure elections, event
     management, and digital ticketing, all in one platform built on transparency.</p>
     """
     return subject, _base_template(content, "You're on the Pollord waitlist!")
 
 
 def ticket_confirmation_email(event_title: str, ticket_count: int) -> tuple[str, str]:
-    subject = f"Ticket Confirmation — {event_title}"
+    subject = f"Ticket Confirmation: {event_title}"
     content = f"""
     <h2>Ticket Confirmation</h2>
     <p>You have successfully purchased <strong>{ticket_count} ticket(s)</strong> for:</p>
@@ -269,7 +284,7 @@ def guest_ticket_confirmation_email(
 ) -> tuple[str, str]:
     """Confirmation for a guest (no account) purchase — links straight to each
     ticket's PDF instead of a My Tickets page they can't sign in to see."""
-    subject = f"Ticket Confirmation — {event_title}"
+    subject = f"Ticket Confirmation: {event_title}"
     buttons = "".join(
         f'<p style="text-align:center; margin:12px 0;">'
         f'<a href="{link}" class="btn">Download Ticket {i + 1}</a></p>'
@@ -282,7 +297,7 @@ def guest_ticket_confirmation_email(
       <div style="color:#fff; font-size:20px; font-weight:800;">{event_title}</div>
     </div>
     {buttons}
-    <p style="font-size:13px; color:rgba(255,255,255,0.4);">Keep this email — these links are how you'll re-download your ticket(s).</p>
+    <p style="font-size:13px; color:rgba(255,255,255,0.4);">Keep this email. These links are how you'll re-download your ticket(s).</p>
     """
     html = _base_template(content, f"{ticket_count} ticket(s) confirmed for {event_title}")
     return subject, html
@@ -293,8 +308,8 @@ def launch_announcement_email() -> tuple[str, str]:
     subject = "POLLORD is live! 🎉"
     content = f"""
     <h2>We're Live! 🎉</h2>
-    <p>The wait is over — <span class="highlight">Pollord</span> is officially live.</p>
-    <p>Run secure elections, manage events, and sell tickets — all from one
+    <p>The wait is over: <span class="highlight">Pollord</span> is officially live.</p>
+    <p>Run secure elections, manage events, and sell tickets, all from one
     platform built on transparency. Your account is one click away.</p>
     <p style="text-align:center; margin:32px 0;">
       <a href="{settings.FRONTEND_URL}" class="btn">Explore Pollord</a>
@@ -306,7 +321,7 @@ def launch_announcement_email() -> tuple[str, str]:
 def send_email(to: str, subject: str, html_body: str) -> bool:
     """Send an email via Zoho SMTP with SSL."""
     if not settings.MAIL_PASSWORD:
-        logger.warning(f"MAIL_PASSWORD not set — skipping email to {to}")
+        logger.warning(f"MAIL_PASSWORD not set, skipping email to {to}")
         return False
 
     try:

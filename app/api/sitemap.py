@@ -12,14 +12,18 @@ from app.models.event import Event
 router = APIRouter(tags=["Sitemap"])
 
 # (path, changefreq, priority) for pages that always exist, independent of DB content.
+# Matches the v2 frontend's routes (src/app/routes.tsx) now that v1's public site is
+# retired: "/vote" (the old access-gate page) and the old "/public/*" UUID-keyed
+# detail pages no longer exist, replaced by slug-keyed "/listings/:slug" below.
 STATIC_ROUTES = [
     ("/", "weekly", "1.0"),
     ("/explore", "daily", "0.9"),
+    ("/listings", "daily", "0.9"),
     ("/pricing", "monthly", "0.8"),
     ("/contact", "monthly", "0.5"),
     ("/privacy", "yearly", "0.3"),
     ("/terms", "yearly", "0.3"),
-    ("/vote", "monthly", "0.5"),
+    ("/status", "daily", "0.3"),
 ]
 
 
@@ -43,19 +47,23 @@ async def sitemap(db: AsyncSession = Depends(get_db)):
     entries = [_url_entry(f"{base}{path}", None, changefreq, priority) for path, changefreq, priority in STATIC_ROUTES]
 
     elections = await db.execute(
-        select(Election.election_id, Election.updated_at).where(
+        select(Election.slug, Election.updated_at).where(
             Election.visibility == "public",
             Election.status != "draft",
+            Election.slug.isnot(None),
         )
     )
-    for election_id, updated_at in elections.all():
-        entries.append(_url_entry(f"{base}/public/elections/{election_id}", updated_at, "weekly", "0.7"))
+    for slug, updated_at in elections.all():
+        entries.append(_url_entry(f"{base}/listings/{slug}", updated_at, "weekly", "0.7"))
 
     events = await db.execute(
-        select(Event.event_id, Event.updated_at).where(Event.status == "published")
+        select(Event.slug, Event.updated_at).where(
+            Event.status == "published",
+            Event.slug.isnot(None),
+        )
     )
-    for event_id, updated_at in events.all():
-        entries.append(_url_entry(f"{base}/public/events/{event_id}", updated_at, "weekly", "0.7"))
+    for slug, updated_at in events.all():
+        entries.append(_url_entry(f"{base}/listings/{slug}", updated_at, "weekly", "0.7"))
 
     xml = (
         '<?xml version="1.0" encoding="UTF-8"?>\n'

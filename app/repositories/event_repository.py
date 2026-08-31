@@ -5,6 +5,7 @@ from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
+from app.models.election import Category
 from app.models.event import Event, TicketType
 from app.repositories.base import BaseRepository
 
@@ -17,6 +18,22 @@ class EventRepository(BaseRepository[Event]):
         result = await self.session.execute(
             select(Event)
             .options(selectinload(Event.ticket_types))
+            .where(Event.event_id == event_id)
+        )
+        return result.scalar_one_or_none()
+
+    async def get_by_slug(self, slug: str) -> Optional[Event]:
+        result = await self.session.execute(
+            select(Event)
+            .options(selectinload(Event.ticket_types))
+            .where(Event.slug == slug)
+        )
+        return result.scalar_one_or_none()
+
+    async def get_with_categories(self, event_id: UUID) -> Optional[Event]:
+        result = await self.session.execute(
+            select(Event)
+            .options(selectinload(Event.categories).selectinload(Category.candidates))
             .where(Event.event_id == event_id)
         )
         return result.scalar_one_or_none()

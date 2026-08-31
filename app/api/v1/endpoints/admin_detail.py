@@ -21,13 +21,14 @@ from app.api.v1.endpoints.admin import ADMIN_ROLE, _get_platform_setting
 from app.core.dependencies import require_roles
 from app.db.base import get_db
 from app.models.audit_log import AuditLog
-from app.models.election import Candidate, Election
+from app.models.election import Candidate, Category, Election
 from app.models.event import Event, TicketType
 from app.models.ticket import Ticket, TicketPurchase
 from app.models.user import User
 from app.models.vote import Vote, VoteReceipt
 from app.repositories.audit_log_repository import AuditLogRepository
-from app.repositories.election_repository import CandidateRepository, ElectionRepository
+from app.repositories.election_repository import CandidateRepository, CategoryRepository, ElectionRepository
+from app.repositories.event_repository import EventRepository
 from app.repositories.vote_repository import VoteReceiptRepository, VoteRepository
 from app.services.cryptography_service import CryptographyService
 from app.services.voting_service import VotingService
@@ -226,7 +227,7 @@ class AdminElectionDetailResponse(BaseModel):
     election_id: UUID
     title: str
     description: Optional[str] = None
-    election_type: str
+    category_count: int
     start_datetime: datetime
     end_datetime: datetime
     status: str
@@ -237,7 +238,6 @@ class AdminElectionDetailResponse(BaseModel):
     allow_result_viewing: str
     anonymous_results: bool
     allow_revoting: bool
-    max_selections: Optional[int] = None
 
     organizer_id: UUID
     organizer_name: str = ""
@@ -271,7 +271,7 @@ async def get_election_detail(
     """Everything about one election: its record, the candidate vote
     breakdown, and the payments behind the revenue figure."""
     election_repo = ElectionRepository(Election, db)
-    election = await election_repo.get_with_candidates(election_id)
+    election = await election_repo.get_with_categories(election_id)
     if not election:
         raise HTTPException(status_code=404, detail="Election not found")
 
@@ -287,6 +287,8 @@ async def get_election_detail(
     # SQL path to a per-candidate breakdown.
     voting_service = VotingService(
         election_repo=election_repo,
+        event_repo=EventRepository(Event, db),
+        category_repo=CategoryRepository(Category, db),
         candidate_repo=CandidateRepository(Candidate, db),
         vote_repo=VoteRepository(Vote, db),
         receipt_repo=VoteReceiptRepository(VoteReceipt, db),
@@ -295,7 +297,16 @@ async def get_election_detail(
     )
     results = await voting_service.get_live_results(election_id)
 
-    by_id = {c.candidate_id: c for c in election.candidates}
+    all_candidates = [c for category in election.categories for c in category.candidates]
+    by_id = {c.candidate_id: c for c in all_candidates}
+    # Flatten every category's results into one combined, re-ranked list —
+    # this admin view predates categories and shows one ranked table; a
+    # category-aware breakdown would need its own UI, out of scope here.
+    flat_results = sorted(
+        (r for cat in results.categories for r in cat.results),
+        key=lambda r: r.vote_count,
+        reverse=True,
+    )
     candidates = [
         AdminCandidateResult(
             candidate_id=r.candidate_id,
@@ -308,8 +319,7 @@ async def get_election_detail(
             percentage=r.percentage,
             rank=index + 1,
         )
-        # get_live_results already sorts descending by vote count.
-        for index, r in enumerate(results.results)
+        for index, r in enumerate(flat_results)
     ]
 
     # Transaction.election_id has no FK and no relationship — filter manually.
@@ -361,7 +371,7 @@ async def get_election_detail(
         election_id=election.election_id,
         title=election.title,
         description=election.description,
-        election_type=election.election_type,
+        category_count=len(election.categories),
         start_datetime=election.start_datetime,
         end_datetime=election.end_datetime,
         status=election.status,
@@ -372,14 +382,13 @@ async def get_election_detail(
         allow_result_viewing=election.allow_result_viewing,
         anonymous_results=election.anonymous_results,
         allow_revoting=election.allow_revoting,
-        max_selections=election.max_selections,
         organizer_id=election.created_by,
         organizer_name=organizer.full_name if organizer else "",
         organizer_email=organizer.email if organizer else "",
         vote_price=election.vote_price,
         effective_vote_price=effective_price,
         total_votes=results.total_votes,
-        total_candidates=len(election.candidates),
+        total_candidates=len(all_candidates),
         total_eligible_voters=results.total_eligible_voters,
         turnout_percentage=results.turnout_percentage,
         total_receipts=int(receipts.scalar_one()),

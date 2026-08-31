@@ -4,11 +4,14 @@ from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, field_validator
 
+ELECTION_TYPES = {"single_choice", "ranked"}
+
 
 # --- Candidate schemas ---
 
 
 class CandidateCreate(BaseModel):
+    category_id: UUID
     name: str
     email: Optional[str] = None
     description: Optional[str] = None
@@ -17,6 +20,7 @@ class CandidateCreate(BaseModel):
 
 
 class CandidateUpdate(BaseModel):
+    category_id: Optional[UUID] = None
     name: Optional[str] = None
     email: Optional[str] = None
     description: Optional[str] = None
@@ -28,13 +32,68 @@ class CandidateResponse(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
     candidate_id: UUID
-    election_id: UUID
+    category_id: UUID
+    election_id: Optional[UUID] = None
+    event_id: Optional[UUID] = None
     name: str
     short_code: Optional[str] = None
     email: Optional[str] = None
     description: Optional[str] = None
     image_url: Optional[str] = None
     display_order: int
+
+
+# --- Category schemas ---
+# A Category is a position/prize within an Election or Event — e.g. "President",
+# "Best Dressed". election_type/allow_abstain live here, not on the parent, so
+# each category can run its own kind of ballot.
+
+
+class CategoryCreate(BaseModel):
+    name: str
+    description: Optional[str] = None
+    election_type: str
+    allow_abstain: bool = False
+    display_order: int = 0
+
+    @field_validator("election_type")
+    @classmethod
+    def validate_type(cls, v: str) -> str:
+        if v not in ELECTION_TYPES:
+            raise ValueError(f"election_type must be one of: {ELECTION_TYPES}")
+        return v
+
+
+class CategoryUpdate(BaseModel):
+    name: Optional[str] = None
+    description: Optional[str] = None
+    election_type: Optional[str] = None
+    allow_abstain: Optional[bool] = None
+    display_order: Optional[int] = None
+
+    @field_validator("election_type")
+    @classmethod
+    def validate_type(cls, v: Optional[str]) -> Optional[str]:
+        if v is not None and v not in ELECTION_TYPES:
+            raise ValueError(f"election_type must be one of: {ELECTION_TYPES}")
+        return v
+
+
+class CategoryResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    category_id: UUID
+    election_id: Optional[UUID] = None
+    event_id: Optional[UUID] = None
+    name: str
+    description: Optional[str] = None
+    election_type: str
+    allow_abstain: bool = False
+    display_order: int
+
+
+class CategoryWithCandidates(CategoryResponse):
+    candidates: List[CandidateResponse] = []
 
 
 # --- Election schemas ---
@@ -47,11 +106,9 @@ class ElectionSettings(BaseModel):
     allow_result_viewing: str = "after_end"  # live | after_end | admin_only
     require_verification: bool = False
     anonymous_results: bool = True
-    allow_abstain: bool = False
     show_candidate_count: bool = False
     randomize_candidate_order: bool = False
     enable_notifications: bool = True
-    max_selections: Optional[int] = None
     allow_revoting: bool = False
     vote_price: Optional[int] = None  # pesewas; None = inherit global platform price
 
@@ -83,20 +140,16 @@ class ElectionSettings(BaseModel):
 
 class ElectionCreate(BaseModel):
     title: str
+    slug: Optional[str] = None  # auto-generated from title if omitted
     description: Optional[str] = None
-    election_type: str
     start_datetime: datetime
     end_datetime: datetime
     banner_image_url: Optional[str] = None
+    venue: Optional[str] = None
+    latitude: Optional[float] = None
+    longitude: Optional[float] = None
+    tag: Optional[str] = None
     settings: Optional[ElectionSettings] = None
-
-    @field_validator("election_type")
-    @classmethod
-    def validate_type(cls, v: str) -> str:
-        allowed = {"single_choice", "multiple_choice", "ranked"}
-        if v not in allowed:
-            raise ValueError(f"Election type must be one of: {allowed}")
-        return v
 
     @field_validator("end_datetime")
     @classmethod
@@ -109,11 +162,15 @@ class ElectionCreate(BaseModel):
 
 class ElectionUpdate(BaseModel):
     title: Optional[str] = None
+    slug: Optional[str] = None
     description: Optional[str] = None
-    election_type: Optional[str] = None
     start_datetime: Optional[datetime] = None
     end_datetime: Optional[datetime] = None
     banner_image_url: Optional[str] = None
+    venue: Optional[str] = None
+    latitude: Optional[float] = None
+    longitude: Optional[float] = None
+    tag: Optional[str] = None
     settings: Optional[ElectionSettings] = None
 
 
@@ -122,8 +179,8 @@ class ElectionResponse(BaseModel):
 
     election_id: UUID
     title: str
+    slug: Optional[str] = None
     description: Optional[str] = None
-    election_type: str
     start_datetime: datetime
     end_datetime: datetime
     status: str
@@ -136,13 +193,15 @@ class ElectionResponse(BaseModel):
     allow_result_viewing: str = "after_end"
     require_verification: bool = False
     anonymous_results: bool = True
-    allow_abstain: bool = False
     show_candidate_count: bool = False
     randomize_candidate_order: bool = False
     enable_notifications: bool = True
-    max_selections: Optional[int] = None
     allow_revoting: bool = False
     vote_price: Optional[int] = None  # None means election uses the global platform price
+    venue: Optional[str] = None
+    latitude: Optional[float] = None
+    longitude: Optional[float] = None
+    tag: Optional[str] = None
 
 
 class ElectionPublicResponse(BaseModel):
@@ -151,8 +210,8 @@ class ElectionPublicResponse(BaseModel):
 
     election_id: UUID
     title: str
+    slug: Optional[str] = None
     description: Optional[str] = None
-    election_type: str
     start_datetime: datetime
     end_datetime: datetime
     status: str
@@ -160,10 +219,16 @@ class ElectionPublicResponse(BaseModel):
     banner_image_url: Optional[str] = None
     visibility: str = "public"
     created_at: datetime
+    venue: Optional[str] = None
+    latitude: Optional[float] = None
+    longitude: Optional[float] = None
+    tag: Optional[str] = None
+    vote_price: Optional[int] = None
+    effective_vote_price: int = 100  # resolved price (global or per-election), always set
 
 
-class ElectionWithCandidates(ElectionResponse):
-    candidates: List[CandidateResponse] = []
+class ElectionWithCategories(ElectionResponse):
+    categories: List[CategoryWithCandidates] = []
     effective_vote_price: int = 100  # resolved price (global or per-election), always set
 
 

@@ -10,10 +10,16 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.config import settings
 from app.core.dependencies import get_current_active_user
 from app.db.base import get_db
+from app.models.election import Election
+from app.models.event import Event
 from app.models.organization import Organization, OrganizationMember
 from app.models.user import User
+from app.models.vote import Vote
+from app.repositories.election_repository import ElectionRepository
+from app.repositories.event_repository import EventRepository
 from app.repositories.organization_repository import OrganizationRepository
 from app.repositories.user_repository import UserRepository
+from app.repositories.vote_repository import VoteRepository
 from app.schemas.organization import (
     AcceptInvitationRequest,
     OrganizationCreate,
@@ -47,6 +53,15 @@ class OrganizationMemberInvite(BaseModel):
         return v
 
 router = APIRouter(prefix="/organizations", tags=["Organizations"])
+
+
+class OrganizationStatsResponse(BaseModel):
+    """Aggregate public stats for an org's profile page (e.g. v2's organiser card)."""
+    org_id: UUID
+    elections_count: int
+    events_count: int
+    total_votes_cast: int
+    member_since_year: int
 
 
 class OrganizationPublicResponse(BaseModel):
@@ -214,6 +229,43 @@ async def get_public_organization(
         owner_id=org.owner_id,
         created_at=org.created_at,
         member_count=len(org.members or []),
+    )
+
+
+# --- Public org stats by org_id (no auth required) ---
+
+
+@router.get("/{org_id}/stats", response_model=OrganizationStatsResponse)
+async def get_organization_stats(
+    org_id: UUID,
+    db: AsyncSession = Depends(get_db),
+):
+    """Aggregate elections/events run and total votes cast, scoped to the org's
+    owner (same scoping the public org page already uses for its listings)."""
+    repo = OrganizationRepository(Organization, db)
+    org = await repo.get_with_members(org_id)
+    if not org:
+        raise HTTPException(status_code=404, detail="Organization not found")
+
+    election_repo = ElectionRepository(Election, db)
+    event_repo = EventRepository(Event, db)
+    elections = await election_repo.get_elections_by_creator(org.owner_id, limit=10_000)
+    events = await event_repo.get_events_by_creator(org.owner_id, limit=10_000)
+
+    vote_repo = VoteRepository(Vote, db)
+    total_votes = 0
+    for election in elections:
+        total_votes += await vote_repo.count_by_election(election.election_id)
+    for event in events:
+        event_votes = await vote_repo.get_votes_by_event(event.event_id)
+        total_votes += sum(getattr(v, "count", 1) for v in event_votes)
+
+    return OrganizationStatsResponse(
+        org_id=org.org_id,
+        elections_count=len(elections),
+        events_count=len(events),
+        total_votes_cast=total_votes,
+        member_since_year=org.created_at.year,
     )
 
 

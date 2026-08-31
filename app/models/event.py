@@ -4,7 +4,7 @@ from decimal import Decimal
 from typing import TYPE_CHECKING, List, Optional
 
 from sqlalchemy import (
-    Boolean, Date, DateTime, Integer, Numeric, String, Text, Time, func,
+    Boolean, Date, DateTime, Float, Integer, Numeric, String, Text, Time, func,
 )
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
@@ -15,6 +15,7 @@ from app.models.base import Base, TimestampMixin
 if TYPE_CHECKING:
     from app.models.ticket import Ticket, TicketPurchase
     from app.models.user import User
+    from app.models.election import Category
 
 
 class Event(TimestampMixin, Base):
@@ -24,11 +25,14 @@ class Event(TimestampMixin, Base):
         UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
     )
     title: Mapped[str] = mapped_column(String(255), nullable=False)
+    slug: Mapped[Optional[str]] = mapped_column(String(255), unique=True, index=True, nullable=True)
     description: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     event_date: Mapped[date] = mapped_column(Date, nullable=False)
     event_time: Mapped[time] = mapped_column(Time, nullable=False)
     location: Mapped[str] = mapped_column(String(500), nullable=False)
     category: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
+    latitude: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    longitude: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
     capacity: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
     banner_image_url: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     status: Mapped[str] = mapped_column(String(20), default="draft", index=True)
@@ -38,6 +42,10 @@ class Event(TimestampMixin, Base):
     show_ticket_counts: Mapped[bool] = mapped_column(
         Boolean, default=True, server_default="true", nullable=False
     )
+    # Category voting (e.g. "Best Dressed", "Most Popular") — independent of ticket
+    # sales. vote_price mirrors Election.vote_price (nullable = inherit global price).
+    vote_price: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    allow_revoting: Mapped[bool] = mapped_column(Boolean, default=False)
     created_by: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), ForeignKey("users.user_id"), nullable=False
     )
@@ -54,6 +62,9 @@ class Event(TimestampMixin, Base):
     )
     purchases: Mapped[List["TicketPurchase"]] = relationship(
         back_populates="event", lazy="select"
+    )
+    categories: Mapped[List["Category"]] = relationship(
+        back_populates="event", cascade="all, delete-orphan", lazy="selectin"
     )
 
 

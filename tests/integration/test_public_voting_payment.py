@@ -10,6 +10,10 @@ Covers:
   6. Duplicate vote prevention (single-vote election)
   7. Payment idempotency (already-used reference rejected)
   8. Failed/invalid payment rejected
+
+All casting/payment endpoints are category_id-driven (a category always
+belongs to exactly one election or event) — these fixtures create one
+category per election to match.
 """
 
 import hashlib
@@ -22,7 +26,7 @@ from httpx import AsyncClient
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
-from app.models.election import Candidate, Election
+from app.models.election import Candidate, Category, Election
 from app.models.transaction import Transaction
 from app.models.vote import Vote
 
@@ -44,7 +48,6 @@ async def public_single_election(db_session: AsyncSession, admin_user):
     election = Election(
         title="Public Single Election",
         description="Single vote, no revoting",
-        election_type="single_choice",
         start_datetime=_now() - timedelta(hours=1),
         end_datetime=_now() + timedelta(hours=23),
         status="active",
@@ -56,11 +59,17 @@ async def public_single_election(db_session: AsyncSession, admin_user):
     db_session.add(election)
     await db_session.flush()
 
-    c1 = Candidate(election_id=election.election_id, name="Alice", display_order=1)
-    c2 = Candidate(election_id=election.election_id, name="Bob", display_order=2)
+    category = Category(
+        election_id=election.election_id, name="Winner", election_type="single_choice"
+    )
+    db_session.add(category)
+    await db_session.flush()
+
+    c1 = Candidate(category_id=category.category_id, election_id=election.election_id, name="Alice", display_order=1)
+    c2 = Candidate(category_id=category.category_id, election_id=election.election_id, name="Bob", display_order=2)
     db_session.add_all([c1, c2])
     await db_session.flush()
-    return {"election": election, "candidates": [c1, c2]}
+    return {"election": election, "category": category, "candidates": [c1, c2]}
 
 
 @pytest.fixture
@@ -69,7 +78,6 @@ async def public_revoting_election(db_session: AsyncSession, admin_user):
     election = Election(
         title="Public Revoting Election",
         description="Multiple votes allowed",
-        election_type="single_choice",
         start_datetime=_now() - timedelta(hours=1),
         end_datetime=_now() + timedelta(hours=23),
         status="active",
@@ -81,10 +89,16 @@ async def public_revoting_election(db_session: AsyncSession, admin_user):
     db_session.add(election)
     await db_session.flush()
 
-    c1 = Candidate(election_id=election.election_id, name="Alice", display_order=1)
+    category = Category(
+        election_id=election.election_id, name="Winner", election_type="single_choice"
+    )
+    db_session.add(category)
+    await db_session.flush()
+
+    c1 = Candidate(category_id=category.category_id, election_id=election.election_id, name="Alice", display_order=1)
     db_session.add(c1)
     await db_session.flush()
-    return {"election": election, "candidates": [c1]}
+    return {"election": election, "category": category, "candidates": [c1]}
 
 
 @pytest.fixture
@@ -92,7 +106,6 @@ async def draft_election(db_session: AsyncSession, admin_user):
     """Draft election for testing settings update."""
     election = Election(
         title="Draft Election",
-        election_type="single_choice",
         start_datetime=_now() + timedelta(hours=1),
         end_datetime=_now() + timedelta(hours=25),
         status="draft",
@@ -104,10 +117,16 @@ async def draft_election(db_session: AsyncSession, admin_user):
     db_session.add(election)
     await db_session.flush()
 
-    c1 = Candidate(election_id=election.election_id, name="Alice", display_order=1)
+    category = Category(
+        election_id=election.election_id, name="Winner", election_type="single_choice"
+    )
+    db_session.add(category)
+    await db_session.flush()
+
+    c1 = Candidate(category_id=category.category_id, election_id=election.election_id, name="Alice", display_order=1)
     db_session.add(c1)
     await db_session.flush()
-    return {"election": election, "candidates": [c1]}
+    return {"election": election, "category": category, "candidates": [c1]}
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -134,7 +153,6 @@ class TestAllowRevotingSetting:
                     "allow_result_viewing": "after_end",
                     "require_verification": False,
                     "anonymous_results": True,
-                    "allow_abstain": False,
                     "show_candidate_count": False,
                     "randomize_candidate_order": False,
                     "enable_notifications": True,
@@ -164,7 +182,6 @@ class TestAllowRevotingSetting:
                     "allow_result_viewing": "after_end",
                     "require_verification": False,
                     "anonymous_results": True,
-                    "allow_abstain": False,
                     "show_candidate_count": False,
                     "randomize_candidate_order": False,
                     "enable_notifications": True,
@@ -215,7 +232,8 @@ class TestPublicBallot:
         resp = await client.get(f"/api/v1/voting/public/ballot/{election.election_id}")
         assert resp.status_code == 200
         data = resp.json()
-        assert len(data["candidates"]) == 2
+        assert len(data["categories"]) == 1
+        assert len(data["categories"][0]["candidates"]) == 2
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -229,12 +247,13 @@ class TestPublicCastFree:
         self, client: AsyncClient, public_single_election
     ):
         election = public_single_election["election"]
+        category = public_single_election["category"]
         candidate = public_single_election["candidates"][0]
 
         resp = await client.post(
             "/api/v1/voting/public/cast",
             json={
-                "election_id": str(election.election_id),
+                "category_id": str(category.category_id),
                 "candidate_ids": [str(candidate.candidate_id)],
             },
         )
@@ -247,10 +266,10 @@ class TestPublicCastFree:
         self, client: AsyncClient, public_single_election
     ):
         """Same IP/UA cannot vote twice on a single-vote election."""
-        election = public_single_election["election"]
+        category = public_single_election["category"]
         candidate = public_single_election["candidates"][0]
         payload = {
-            "election_id": str(election.election_id),
+            "category_id": str(category.category_id),
             "candidate_ids": [str(candidate.candidate_id)],
         }
 
@@ -264,10 +283,10 @@ class TestPublicCastFree:
         self, client: AsyncClient, public_revoting_election
     ):
         """allow_revoting=True: same voter can cast more than once."""
-        election = public_revoting_election["election"]
+        category = public_revoting_election["category"]
         candidate = public_revoting_election["candidates"][0]
         payload = {
-            "election_id": str(election.election_id),
+            "category_id": str(category.category_id),
             "candidate_ids": [str(candidate.candidate_id)],
         }
 
@@ -279,11 +298,11 @@ class TestPublicCastFree:
     async def test_cast_invalid_candidate(
         self, client: AsyncClient, public_single_election
     ):
-        election = public_single_election["election"]
+        category = public_single_election["category"]
         resp = await client.post(
             "/api/v1/voting/public/cast",
             json={
-                "election_id": str(election.election_id),
+                "category_id": str(category.category_id),
                 "candidate_ids": [str(uuid.uuid4())],
             },
         )
@@ -325,14 +344,14 @@ class TestInitiatePayment:
         self, client: AsyncClient, public_single_election
     ):
         """Single-vote election: backend always charges exactly VOTE_PRICE."""
-        election = public_single_election["election"]
+        category = public_single_election["category"]
         candidate = public_single_election["candidates"][0]
 
         with patch(PAYSTACK_INIT_PATH, new=_init_mock(VP)):
             resp = await client.post(
                 "/api/v1/voting/public/initiate-payment",
                 json={
-                    "election_id": str(election.election_id),
+                    "category_id": str(category.category_id),
                     "candidate_ids": [str(candidate.candidate_id)],
                     "email": "voter@example.com",
                     # amount_pesewas intentionally omitted for single-vote
@@ -352,7 +371,7 @@ class TestInitiatePayment:
         self, client: AsyncClient, public_revoting_election
     ):
         """allow_revoting election: backend must use the supplied amount_pesewas."""
-        election = public_revoting_election["election"]
+        category = public_revoting_election["category"]
         candidate = public_revoting_election["candidates"][0]
         n_votes = 11
         amount = VP * n_votes  # exactly 11 votes worth
@@ -361,7 +380,7 @@ class TestInitiatePayment:
             resp = await client.post(
                 "/api/v1/voting/public/initiate-payment",
                 json={
-                    "election_id": str(election.election_id),
+                    "category_id": str(category.category_id),
                     "candidate_ids": [str(candidate.candidate_id)],
                     "email": "voter@example.com",
                     "amount_pesewas": amount,
@@ -377,7 +396,7 @@ class TestInitiatePayment:
         self, client: AsyncClient, public_revoting_election
     ):
         """Amount not a multiple of VOTE_PRICE is floored to the nearest multiple."""
-        election = public_revoting_election["election"]
+        category = public_revoting_election["category"]
         candidate = public_revoting_election["candidates"][0]
         # e.g. VP=1000: send 1500 → floored to 1000 → 1 vote
         amount_in = VP + VP // 2      # 1.5x VOTE_PRICE
@@ -387,7 +406,7 @@ class TestInitiatePayment:
             resp = await client.post(
                 "/api/v1/voting/public/initiate-payment",
                 json={
-                    "election_id": str(election.election_id),
+                    "category_id": str(category.category_id),
                     "candidate_ids": [str(candidate.candidate_id)],
                     "email": "voter@example.com",
                     "amount_pesewas": amount_in,
@@ -403,17 +422,17 @@ class TestInitiatePayment:
         self, client: AsyncClient, public_single_election
     ):
         """For single-vote elections, custom amount_pesewas is ignored; always charges VOTE_PRICE."""
-        election = public_single_election["election"]
+        category = public_single_election["category"]
         candidate = public_single_election["candidates"][0]
 
         with patch(PAYSTACK_INIT_PATH, new=_init_mock(VP)):
             resp = await client.post(
                 "/api/v1/voting/public/initiate-payment",
                 json={
-                    "election_id": str(election.election_id),
+                    "category_id": str(category.category_id),
                     "candidate_ids": [str(candidate.candidate_id)],
                     "email": "voter@example.com",
-                    "amount_pesewas": VP * 11,  # should be ignored
+                    "amount_pesewas": VP * 11,  # should be ignored — not allow_revoting
                 },
             )
 
@@ -427,12 +446,12 @@ class TestInitiatePayment:
 class TestVerifyAndCast:
 
     async def _initiate(
-        self, client: AsyncClient, election_id: str, candidate_id: str,
+        self, client: AsyncClient, category_id: str, candidate_id: str,
         email: str, amount_pesewas: int | None
     ) -> str:
         """Helper: initiate payment and return the reference."""
         payload = {
-            "election_id": election_id,
+            "category_id": category_id,
             "candidate_ids": [candidate_id],
             "email": email,
         }
@@ -450,10 +469,11 @@ class TestVerifyAndCast:
         self, client: AsyncClient, db_session: AsyncSession, public_single_election
     ):
         election = public_single_election["election"]
+        category = public_single_election["category"]
         candidate = public_single_election["candidates"][0]
 
         ref = await self._initiate(
-            client, str(election.election_id), str(candidate.candidate_id),
+            client, str(category.category_id), str(candidate.candidate_id),
             "voter1@example.com", None,
         )
 
@@ -479,12 +499,13 @@ class TestVerifyAndCast:
     ):
         """Paying N×VOTE_PRICE must create 1 vote record with count=N."""
         election = public_revoting_election["election"]
+        category = public_revoting_election["category"]
         candidate = public_revoting_election["candidates"][0]
         n_votes = 11
         amount = VP * n_votes
 
         ref = await self._initiate(
-            client, str(election.election_id), str(candidate.candidate_id),
+            client, str(category.category_id), str(candidate.candidate_id),
             "voter2@example.com", amount,
         )
 
@@ -509,11 +530,12 @@ class TestVerifyAndCast:
     ):
         """Two separate payments produce two records; sum of counts = total votes."""
         election = public_revoting_election["election"]
+        category = public_revoting_election["category"]
         candidate = public_revoting_election["candidates"][0]
 
         # Payment 1: 3 votes
         ref1 = await self._initiate(
-            client, str(election.election_id), str(candidate.candidate_id),
+            client, str(category.category_id), str(candidate.candidate_id),
             "voter3a@example.com", VP * 3,
         )
         with patch(PAYSTACK_VERIFY_PATH, new=_verify_mock(VP * 3)):
@@ -521,7 +543,7 @@ class TestVerifyAndCast:
 
         # Payment 2: 5 votes
         ref2 = await self._initiate(
-            client, str(election.election_id), str(candidate.candidate_id),
+            client, str(category.category_id), str(candidate.candidate_id),
             "voter3b@example.com", VP * 5,
         )
         with patch(PAYSTACK_VERIFY_PATH, new=_verify_mock(VP * 5)):
@@ -545,11 +567,11 @@ class TestVerifyAndCast:
         self, client: AsyncClient, public_single_election
     ):
         """Calling verify-and-cast twice with the same reference must fail on 2nd call."""
-        election = public_single_election["election"]
+        category = public_single_election["category"]
         candidate = public_single_election["candidates"][0]
 
         ref = await self._initiate(
-            client, str(election.election_id), str(candidate.candidate_id),
+            client, str(category.category_id), str(candidate.candidate_id),
             "voter4@example.com", None,
         )
 
@@ -568,11 +590,11 @@ class TestVerifyAndCast:
         self, client: AsyncClient, public_single_election
     ):
         """If Paystack reports status != success, vote must not be cast."""
-        election = public_single_election["election"]
+        category = public_single_election["category"]
         candidate = public_single_election["candidates"][0]
 
         ref = await self._initiate(
-            client, str(election.election_id), str(candidate.candidate_id),
+            client, str(category.category_id), str(candidate.candidate_id),
             "voter5@example.com", None,
         )
 
@@ -587,11 +609,11 @@ class TestVerifyAndCast:
         self, client: AsyncClient, public_single_election
     ):
         """Paystack amount less than charged amount must be rejected."""
-        election = public_single_election["election"]
+        category = public_single_election["category"]
         candidate = public_single_election["candidates"][0]
 
         ref = await self._initiate(
-            client, str(election.election_id), str(candidate.candidate_id),
+            client, str(category.category_id), str(candidate.candidate_id),
             "voter6@example.com", None,
         )
 
@@ -616,6 +638,7 @@ class TestPublicLiveResults:
     ):
         """After N paid votes, live results must show vote_count = N for the candidate."""
         election = public_revoting_election["election"]
+        category = public_revoting_election["category"]
         candidate = public_revoting_election["candidates"][0]
         amount = VP * 7  # 7 votes
 
@@ -623,7 +646,7 @@ class TestPublicLiveResults:
             init_resp = await client.post(
                 "/api/v1/voting/public/initiate-payment",
                 json={
-                    "election_id": str(election.election_id),
+                    "category_id": str(category.category_id),
                     "candidate_ids": [str(candidate.candidate_id)],
                     "email": "voter7@example.com",
                     "amount_pesewas": amount,
@@ -641,8 +664,9 @@ class TestPublicLiveResults:
         )
         assert results_resp.status_code == 200
         data = results_resp.json()
+        category_result = data["categories"][0]
         candidate_result = next(
-            r for r in data["results"]
+            r for r in category_result["results"]
             if r["candidate_id"] == str(candidate.candidate_id)
         )
         # 1 vote record with count=7; results engine sums count → 7

@@ -6,7 +6,7 @@ from pydantic import BaseModel, ConfigDict, EmailStr, field_validator
 
 
 class InitiateVotePaymentRequest(BaseModel):
-    election_id: UUID
+    category_id: UUID
     candidate_ids: List[UUID]
     email: EmailStr
     # Custom amount in pesewas for multi-vote elections.
@@ -39,7 +39,9 @@ class TransactionResponse(BaseModel):
 
     transaction_id: UUID
     reference: str
-    election_id: UUID
+    election_id: Optional[UUID] = None
+    event_id: Optional[UUID] = None
+    category_id: UUID
     email: Optional[str]
     amount: int
     currency: str

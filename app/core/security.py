@@ -130,8 +130,11 @@ def decrypt_vote(encrypted: bytes) -> dict:
 
 
 # Voter anonymization (HMAC-SHA256)
-def generate_voter_hash(user_id: UUID, election_id: UUID) -> str:
-    message = f"{user_id}{election_id}"
+# Keyed by category_id (not election_id) so a voter can cast one free vote per
+# category — the same person voting in two categories of the same election
+# produces two different hashes instead of colliding on uq_vote_per_category.
+def generate_voter_hash(user_id: UUID, category_id: UUID) -> str:
+    message = f"{user_id}{category_id}"
     return hmac.new(
         settings.HMAC_SECRET_KEY.encode(),
         message.encode(),
@@ -139,9 +142,9 @@ def generate_voter_hash(user_id: UUID, election_id: UUID) -> str:
     ).hexdigest()
 
 
-def generate_anonymous_voter_hash(ip: str, user_agent: str, election_id: UUID) -> str:
-    """Voter hash for unauthenticated public-election voters, keyed by IP + UA."""
-    message = f"anon:{ip}:{user_agent}:{election_id}"
+def generate_anonymous_voter_hash(ip: str, user_agent: str, category_id: UUID) -> str:
+    """Voter hash for unauthenticated public voters, keyed by IP + UA + category."""
+    message = f"anon:{ip}:{user_agent}:{category_id}"
     return hmac.new(
         settings.HMAC_SECRET_KEY.encode(),
         message.encode(),
@@ -149,9 +152,21 @@ def generate_anonymous_voter_hash(ip: str, user_agent: str, election_id: UUID) -
     ).hexdigest()
 
 
-def generate_whatsapp_voter_hash(phone: str, election_id: UUID) -> str:
+def generate_whatsapp_voter_hash(phone: str, category_id: UUID) -> str:
     """Voter hash for WhatsApp voters, keyed by phone number. Phone is never stored."""
-    message = f"whatsapp:{phone}:{election_id}"
+    message = f"whatsapp:{phone}:{category_id}"
+    return hmac.new(
+        settings.HMAC_SECRET_KEY.encode(),
+        message.encode(),
+        hashlib.sha256,
+    ).hexdigest()
+
+
+def generate_email_voter_hash(email: str, category_id: UUID) -> str:
+    """Voter hash for OTP-verified public web voters, keyed by verified email.
+    Stronger dedup than generate_anonymous_voter_hash's IP+UA (which is defeated
+    by switching networks or clearing cookies) — email is never stored."""
+    message = f"email:{email.lower()}:{category_id}"
     return hmac.new(
         settings.HMAC_SECRET_KEY.encode(),
         message.encode(),

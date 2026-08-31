@@ -9,7 +9,7 @@ from httpx import AsyncClient
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.security import generate_secure_token
-from app.models.election import Candidate, Election
+from app.models.election import Candidate, Category, Election
 from app.models.event import Event, TicketType
 from app.models.ticket import Ticket, TicketPurchase
 from app.models.transaction import Transaction
@@ -205,7 +205,6 @@ async def detailed_election(db_session: AsyncSession, admin_user) -> dict:
     election = Election(
         title="Detail Test Election",
         description="An election with real votes",
-        election_type="single_choice",
         start_datetime=now - timedelta(days=1),
         end_datetime=now + timedelta(days=1),
         status="active",
@@ -215,10 +214,18 @@ async def detailed_election(db_session: AsyncSession, admin_user) -> dict:
     db_session.add(election)
     await db_session.flush()
 
-    alice = Candidate(
-        election_id=election.election_id, name="Alice", display_order=0
+    category = Category(
+        election_id=election.election_id, name="Winner", election_type="single_choice"
     )
-    bob = Candidate(election_id=election.election_id, name="Bob", display_order=1)
+    db_session.add(category)
+    await db_session.flush()
+
+    alice = Candidate(
+        category_id=category.category_id, election_id=election.election_id, name="Alice", display_order=0
+    )
+    bob = Candidate(
+        category_id=category.category_id, election_id=election.election_id, name="Bob", display_order=1
+    )
     db_session.add_all([alice, bob])
     await db_session.flush()
 
@@ -228,6 +235,7 @@ async def detailed_election(db_session: AsyncSession, admin_user) -> dict:
         encrypted = crypto.encrypt_vote_data([str(candidate_id)])
         cast_at = now.isoformat()
         return Vote(
+            category_id=category.category_id,
             election_id=election.election_id,
             voter_hash=hash_seed.ljust(64, "0"),
             vote_data=encrypted,
@@ -249,6 +257,7 @@ async def detailed_election(db_session: AsyncSession, admin_user) -> dict:
             Transaction(
                 reference="vote_ok_1",
                 election_id=election.election_id,
+                category_id=category.category_id,
                 voter_hash="a1".ljust(64, "0"),
                 email="voter1@example.com",
                 candidate_ids=[str(alice.candidate_id)],
@@ -258,6 +267,7 @@ async def detailed_election(db_session: AsyncSession, admin_user) -> dict:
             Transaction(
                 reference="vote_ok_2",
                 election_id=election.election_id,
+                category_id=category.category_id,
                 voter_hash="b1".ljust(64, "0"),
                 email="voter2@example.com",
                 candidate_ids=[str(bob.candidate_id)],
@@ -267,6 +277,7 @@ async def detailed_election(db_session: AsyncSession, admin_user) -> dict:
             Transaction(
                 reference="vote_bad_1",
                 election_id=election.election_id,
+                category_id=category.category_id,
                 voter_hash="c1".ljust(64, "0"),
                 email="voter3@example.com",
                 candidate_ids=[str(bob.candidate_id)],
@@ -376,7 +387,6 @@ class TestElectionDetail:
         now = datetime.now(timezone.utc)
         election = Election(
             title="Empty Election",
-            election_type="single_choice",
             start_datetime=now,
             end_datetime=now + timedelta(days=1),
             status="draft",
