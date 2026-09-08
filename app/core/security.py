@@ -174,6 +174,17 @@ def generate_email_voter_hash(email: str, category_id: UUID) -> str:
     ).hexdigest()
 
 
+def generate_ussd_voter_hash(phone: str, category_id: UUID) -> str:
+    """Voter hash for USSD voters, keyed by the phone number that dialed in.
+    Phone is never stored — same pattern as generate_whatsapp_voter_hash."""
+    message = f"ussd:{phone}:{category_id}"
+    return hmac.new(
+        settings.HMAC_SECRET_KEY.encode(),
+        message.encode(),
+        hashlib.sha256,
+    ).hexdigest()
+
+
 # Vote signing
 def sign_vote(vote_data: bytes, cast_at: str) -> str:
     message = vote_data + cast_at.encode()

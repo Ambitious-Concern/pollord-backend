@@ -11,6 +11,7 @@ from app.core.config import settings
 from app.core.dependencies import get_current_active_user, require_roles
 from app.core.security import create_ticket_scan_token
 from app.core.slug import generate_slug
+from app.core.ussd import generate_unique_ussd_code
 from app.db.base import get_db
 from app.models.audit_log import AuditLog
 from app.models.election import Candidate, Category
@@ -108,6 +109,7 @@ async def create_event(
 
     create_data = data.model_dump()
     create_data["slug"] = create_data.get("slug") or generate_slug(data.title)
+    create_data["ussd_code"] = await generate_unique_ussd_code(db)
     event = await event_repo.create(
         {**create_data, "created_by": current_user.user_id}
     )

@@ -56,6 +56,47 @@ class PaystackService:
             )
         return body["data"]
 
+    async def charge_mobile_money(
+        self,
+        email: str,
+        amount: int,
+        reference: str,
+        phone: str,
+        provider: str,
+        currency: str = "GHS",
+        metadata: dict | None = None,
+    ) -> dict:
+        """
+        Direct server-initiated mobile money charge (Ghana/Kenya/CIV only) —
+        used for USSD, where there's no browser to redirect to a hosted page.
+        `provider` is one of Paystack's mobile_money identifiers: mtn | atl | vod.
+        The customer approves on their own phone; completion is always async,
+        reported later via the charge.success/charge.failed webhook — this
+        call only confirms Paystack *accepted* the charge attempt.
+        """
+        async with httpx.AsyncClient() as client:
+            r = await client.post(
+                f"{self.BASE_URL}/charge",
+                headers=self._headers,
+                json={
+                    "email": email,
+                    "amount": amount,
+                    "currency": currency,
+                    "reference": reference,
+                    "mobile_money": {"phone": phone, "provider": provider},
+                    "metadata": metadata or {},
+                },
+                timeout=30.0,
+            )
+
+        body = r.json()
+        if not body.get("status"):
+            raise HTTPException(
+                status_code=PAYSTACK_REJECTED,
+                detail=f"Paystack error: {body.get('message', 'Unknown error')}",
+            )
+        return body["data"]
+
     async def verify_transaction(self, reference: str) -> dict:
         """
         Verify a transaction by reference.

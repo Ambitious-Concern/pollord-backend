@@ -30,6 +30,14 @@ class ElectionRepository(BaseRepository[Election]):
         )
         return result.scalar_one_or_none()
 
+    async def get_by_ussd_code(self, code: str) -> Optional[Election]:
+        result = await self.session.execute(
+            select(Election)
+            .options(selectinload(Election.categories).selectinload(Category.candidates))
+            .where(Election.ussd_code == code)
+        )
+        return result.scalar_one_or_none()
+
     async def get_active_elections(self) -> List[Election]:
         now = datetime.now(timezone.utc)
         result = await self.session.execute(

@@ -71,6 +71,16 @@ class Settings(BaseSettings):
     WHATSAPP_APP_SECRET: str = ""       # Meta App Secret for webhook signature verification
     WHATSAPP_API_VERSION: str = "v19.0"
 
+    # USSD (Arkesel gateway) + SMS confirmations
+    # Arkesel's USSD callback has no signature scheme of its own, so the shared
+    # secret below is required as a query param on the callback URL you
+    # register with them (e.g. https://.../ussd/arkesel/callback?token=...) —
+    # anyone without it gets rejected before we touch the DB.
+    ARKESEL_API_KEY: str = ""
+    ARKESEL_SMS_SENDER_ID: str = "Pollord"
+    ARKESEL_WEBHOOK_TOKEN: str = ""
+    USSD_SESSION_TTL_SECONDS: int = 180   # matches Arkesel's own USSD session timeout
+
     # Rate Limiting
     RATE_LIMIT_DEFAULT: str = "100/minute"
     RATE_LIMIT_VOTING: str = "10/minute"

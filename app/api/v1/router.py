@@ -1,6 +1,6 @@
 from fastapi import APIRouter
 
-from app.api.v1.endpoints import admin, admin_detail, admin_tickets, analytics, auth, elections, events, files, organizations, payments, payouts, settings, tickets, users, voting, waitlist, whatsapp
+from app.api.v1.endpoints import admin, admin_detail, admin_tickets, analytics, auth, elections, events, files, organizations, payments, payouts, settings, tickets, users, ussd, voting, waitlist, whatsapp
 
 api_router = APIRouter(prefix="/api/v1")
 
@@ -16,6 +16,7 @@ api_router.include_router(admin_tickets.router)
 api_router.include_router(admin_detail.router)
 api_router.include_router(organizations.router)
 api_router.include_router(whatsapp.router)
+api_router.include_router(ussd.router)
 api_router.include_router(payments.router)
 api_router.include_router(payouts.router)
 api_router.include_router(files.router)

@@ -26,6 +26,9 @@ class Event(TimestampMixin, Base):
     )
     title: Mapped[str] = mapped_column(String(255), nullable=False)
     slug: Mapped[Optional[str]] = mapped_column(String(255), unique=True, index=True, nullable=True)
+    # Short numeric code for USSD voting — see Election.ussd_code for why this
+    # is separate from slug. Unique across both elections and events.
+    ussd_code: Mapped[Optional[str]] = mapped_column(String(10), unique=True, index=True, nullable=True)
     description: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     event_date: Mapped[date] = mapped_column(Date, nullable=False)
     event_time: Mapped[time] = mapped_column(Time, nullable=False)

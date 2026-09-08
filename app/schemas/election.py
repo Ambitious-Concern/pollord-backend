@@ -180,6 +180,7 @@ class ElectionResponse(BaseModel):
     election_id: UUID
     title: str
     slug: Optional[str] = None
+    ussd_code: Optional[str] = None
     description: Optional[str] = None
     start_datetime: datetime
     end_datetime: datetime
@@ -211,6 +212,7 @@ class ElectionPublicResponse(BaseModel):
     election_id: UUID
     title: str
     slug: Optional[str] = None
+    ussd_code: Optional[str] = None
     description: Optional[str] = None
     start_datetime: datetime
     end_datetime: datetime

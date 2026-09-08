@@ -60,6 +60,7 @@ class EventResponse(BaseModel):
     event_id: UUID
     title: str
     slug: Optional[str] = None
+    ussd_code: Optional[str] = None
     description: Optional[str] = None
     event_date: date
     event_time: time

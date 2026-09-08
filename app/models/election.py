@@ -26,6 +26,12 @@ class Election(TimestampMixin, Base):
     )
     title: Mapped[str] = mapped_column(String(255), nullable=False)
     slug: Mapped[Optional[str]] = mapped_column(String(255), unique=True, index=True, nullable=True)
+    # Short numeric code for USSD voting — a slug is far too long to type on a
+    # keypad. Unlike access_code (a private-election passphrase, deliberately
+    # never exposed publicly), this is meant to be shared openly, the same way
+    # a slug is. Unique across BOTH elections and events since a USSD caller
+    # looks one up by code alone before we know which type it is.
+    ussd_code: Mapped[Optional[str]] = mapped_column(String(10), unique=True, index=True, nullable=True)
     description: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     start_datetime: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False

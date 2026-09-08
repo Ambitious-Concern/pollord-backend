@@ -12,6 +12,7 @@ from app.core.config import settings
 from app.core.dependencies import get_current_active_user, require_roles
 from app.core.security import create_candidate_result_token, decode_token
 from app.core.slug import generate_slug
+from app.core.ussd import generate_unique_ussd_code
 from app.db.base import get_db
 from app.models.audit_log import AuditLog
 from app.models.election import Candidate, CandidateAccessOTP, Category, Election, EligibleVoter
@@ -253,6 +254,7 @@ async def create_election(
     create_data = {
         "title": data.title,
         "slug": data.slug or generate_slug(data.title),
+        "ussd_code": await generate_unique_ussd_code(db),
         "description": data.description,
         "start_datetime": data.start_datetime,
         "end_datetime": data.end_datetime,

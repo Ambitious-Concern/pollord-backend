@@ -38,6 +38,14 @@ class EventRepository(BaseRepository[Event]):
         )
         return result.scalar_one_or_none()
 
+    async def get_by_ussd_code(self, code: str) -> Optional[Event]:
+        result = await self.session.execute(
+            select(Event)
+            .options(selectinload(Event.categories).selectinload(Category.candidates))
+            .where(Event.ussd_code == code)
+        )
+        return result.scalar_one_or_none()
+
     async def get_published_events(
         self,
         skip: int = 0,

@@ -31,6 +31,7 @@ from app.repositories.event_repository import EventRepository
 from app.repositories.ticket_transaction_repository import TicketTransactionRepository
 from app.repositories.transaction_repository import TransactionRepository
 from app.repositories.vote_repository import VoteRepository
+from app.services.arkesel_service import ArkeselService
 from app.services.cryptography_service import CryptographyService
 from app.services.whatsapp_service import WhatsAppService
 
@@ -38,6 +39,7 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/payments", tags=["Payments"])
 
 _wa = WhatsAppService()
+_arkesel = ArkeselService()
 _crypto = CryptographyService()
 
 
@@ -117,6 +119,28 @@ async def _notify_whatsapp(reference: str, body: str) -> None:
         await redis.delete(f"whatsapp:payment:{reference}")
 
 
+async def _notify_ussd(reference: str, body: str) -> None:
+    """Text the phone linked to this USSD payment reference via Arkesel SMS —
+    the USSD session itself is almost always long closed by the time a mobile
+    money approval and this webhook land, so SMS is the only way back to the
+    voter."""
+    if not settings.ARKESEL_API_KEY:
+        return
+    redis = await get_redis()
+    raw = await redis.get(f"ussd:payment:{reference}")
+    if not raw:
+        return
+    try:
+        data = json.loads(raw)
+        phone = data.get("phone", "")
+        if phone:
+            await _arkesel.send_sms(to=phone, message=body)
+    except Exception:
+        logger.exception("Failed to send USSD confirmation SMS for ref=%s", reference)
+    finally:
+        await redis.delete(f"ussd:payment:{reference}")
+
+
 async def _handle_charge_success(reference: str, data: dict, db: AsyncSession) -> dict:
     txn_repo = TransactionRepository(db)
     txn = await txn_repo.get_by_reference(reference)
@@ -139,6 +163,10 @@ async def _handle_charge_success(reference: str, data: dict, db: AsyncSession) -
         await _notify_whatsapp(
             reference,
             "❌ *Payment amount mismatch.*\n\nYour vote was not cast. Please contact support.",
+        )
+        await _notify_ussd(
+            reference,
+            "Payment amount mismatch. Your vote was not cast. Please contact support.",
         )
         return {"status": "amount_mismatch"}
 
@@ -178,6 +206,11 @@ async def _handle_charge_success(reference: str, data: dict, db: AsyncSession) -
                 f"{parent_kind.title()}: *{parent_title}*\n\n"
                 "Your vote could not be cast. Please contact support to request a refund.",
             )
+            await _notify_ussd(
+                reference,
+                f"Payment received but the {parent_kind} ({parent_title}) has ended. "
+                "Your vote could not be cast. Please contact support for a refund.",
+            )
             return {"status": f"{parent_kind}_ended"}
 
     # Resolve vote count from the payment amount
@@ -214,6 +247,11 @@ async def _handle_charge_success(reference: str, data: dict, db: AsyncSession) -
         f"Your receipt code:\n*{receipt_code}*\n\n"
         "Thank you for participating! 🎉",
     )
+    await _notify_ussd(
+        reference,
+        f"Payment confirmed! Vote cast successfully for {parent_title}. "
+        f"Receipt: {receipt_code[:12]}. Thank you!",
+    )
     return {"status": "ok"}
 
 
@@ -232,6 +270,10 @@ async def _handle_charge_failed(reference: str, data: dict, db: AsyncSession) ->
         reference,
         "❌ *Payment unsuccessful.*\n\n"
         "Your vote was not cast. Send *VOTE <election-id>* to try again.",
+    )
+    await _notify_ussd(
+        reference,
+        "Payment unsuccessful. Your vote was not cast. Dial in again to retry.",
     )
     logger.info("Paystack charge failed/abandoned for ref=%s", reference)
     return {"status": "ok"}
