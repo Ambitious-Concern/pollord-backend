@@ -4,6 +4,8 @@ from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, field_validator
 
+from app.core.pricing import validate_vote_price
+
 ELECTION_TYPES = {"single_choice", "ranked"}
 
 
@@ -115,13 +117,7 @@ class ElectionSettings(BaseModel):
     @field_validator("vote_price")
     @classmethod
     def validate_vote_price(cls, v: Optional[int]) -> Optional[int]:
-        if v is None:
-            return v
-        if v < 50:
-            raise ValueError("Vote price must be at least 50 pesewas (₵0.50)")
-        if v % 50 != 0:
-            raise ValueError("Vote price must be a multiple of 50 pesewas (₵0.50)")
-        return v
+        return validate_vote_price(v)
 
     @field_validator("visibility")
     @classmethod

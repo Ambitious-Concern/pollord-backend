@@ -8,6 +8,7 @@ from pydantic import BaseModel, field_validator
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.dependencies import require_roles
+from app.core.pricing import validate_vote_price
 from app.db.base import get_db
 from app.models.audit_log import AuditLog
 from app.models.platform_setting import PlatformSetting
@@ -341,13 +342,7 @@ class PlatformSettingsUpdate(BaseModel):
     @field_validator("vote_price")
     @classmethod
     def validate_vote_price(cls, v: Optional[int]) -> Optional[int]:
-        if v is None:
-            return v
-        if v < 100:
-            raise ValueError("Global vote price must be at least 100 pesewas (₵1)")
-        if v % 100 != 0:
-            raise ValueError("Global vote price must be a multiple of 100 pesewas")
-        return v
+        return validate_vote_price(v)
 
     @field_validator("max_candidates_per_election")
     @classmethod
@@ -486,13 +481,7 @@ class ElectionVotePriceOverride(BaseModel):
     @field_validator("vote_price")
     @classmethod
     def validate_price(cls, v: Optional[int]) -> Optional[int]:
-        if v is None:
-            return v
-        if v < 100:
-            raise ValueError("Vote price must be at least 100 pesewas (₵1)")
-        if v % 100 != 0:
-            raise ValueError("Vote price must be a multiple of 100 pesewas")
-        return v
+        return validate_vote_price(v)
 
 
 class ElectionVotePriceResponse(BaseModel):
