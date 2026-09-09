@@ -235,7 +235,7 @@ async def paid_election_with_candidate(db_session: AsyncSession, admin_user):
 
 @pytest.mark.asyncio
 class TestUssdPaidVoteFlow:
-    async def _dial_to_network_prompt(self, client, election, candidate, phone):
+    async def _dial_to_vote_count_prompt(self, client, election, candidate, phone):
         await client.post(
             f"{WEBHOOK_URL}?token={TOKEN}",
             json=_ussd_post("*928*928#", phone, new_session=True),
@@ -246,6 +246,61 @@ class TestUssdPaidVoteFlow:
         return await client.post(
             f"{WEBHOOK_URL}?token={TOKEN}", json=_ussd_post(candidate.short_code, phone)
         )
+
+    async def _dial_to_network_prompt(self, client, election, candidate, phone, count="1"):
+        await self._dial_to_vote_count_prompt(client, election, candidate, phone)
+        return await client.post(
+            f"{WEBHOOK_URL}?token={TOKEN}", json=_ussd_post(count, phone)
+        )
+
+    async def test_vote_count_prompt_appears_after_candidate_code(
+        self, client: AsyncClient, paid_election_with_candidate
+    ):
+        election, category, candidate = paid_election_with_candidate
+        phone = "233241234569"
+
+        response = await self._dial_to_vote_count_prompt(
+            client, election, candidate, phone
+        )
+        body = response.json()
+        assert body["continueSession"] is True
+        assert "how many votes" in body["message"].lower()
+
+    async def test_vote_count_multiplies_charge_amount(
+        self, client: AsyncClient, paid_election_with_candidate, monkeypatch
+    ):
+        election, category, candidate = paid_election_with_candidate
+        phone = "233241234572"
+        charged = {}
+
+        async def fake_charge(self, **kwargs):
+            charged["amount"] = kwargs["amount"]
+            return {"status": "pay_offline"}
+
+        monkeypatch.setattr(PaystackService, "charge_mobile_money", fake_charge)
+
+        network_prompt = await self._dial_to_network_prompt(
+            client, election, candidate, phone, count="5"
+        )
+        body = network_prompt.json()
+        assert "5 vote" in body["message"]
+
+        await client.post(f"{WEBHOOK_URL}?token={TOKEN}", json=_ussd_post("1", phone))
+        assert charged["amount"] == 250  # 5 votes * 50 pesewas
+
+    async def test_invalid_vote_count_reprompts(
+        self, client: AsyncClient, paid_election_with_candidate
+    ):
+        election, category, candidate = paid_election_with_candidate
+        phone = "233241234573"
+
+        await self._dial_to_vote_count_prompt(client, election, candidate, phone)
+        response = await client.post(
+            f"{WEBHOOK_URL}?token={TOKEN}", json=_ussd_post("0", phone)
+        )
+        body = response.json()
+        assert body["continueSession"] is True
+        assert "enter a number" in body["message"].lower()
 
     async def test_pay_offline_ends_session_immediately(
         self, client: AsyncClient, paid_election_with_candidate, monkeypatch
