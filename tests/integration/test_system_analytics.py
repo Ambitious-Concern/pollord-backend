@@ -5,10 +5,11 @@ revenue) straight off this payload. The endpoint used to be an untyped `dict`
 returning `active_elections`, `active_events` and `total_tickets_issued` with
 no revenue at all, so four of the five tiles read `undefined` and rendered
 "NaN". These tests pin the key names, the active-vs-total distinction, and the
-pesewa normalisation of the two different revenue currencies.
+cedi normalisation of the two different revenue currencies.
 """
 import json
 from datetime import date, datetime, time, timedelta, timezone
+from decimal import Decimal
 from uuid import uuid4
 
 import pytest
@@ -30,7 +31,7 @@ async def platform_activity(db_session: AsyncSession, admin_user) -> dict:
 
     Revenue lands in both currencies the platform uses: election votes are
     paid in pesewas (Transaction.amount) and tickets in cedis
-    (TicketPurchase.total_amount).
+    (TicketPurchase.total_amount). Both must surface as cedis.
     """
     now = datetime.now(timezone.utc)
     creator = admin_user["user"].user_id
@@ -201,7 +202,7 @@ class TestSystemAnalytics:
 
         assert body["total_votes_cast"] == 4
 
-    async def test_revenue_normalises_both_currencies_to_pesewas(
+    async def test_revenue_normalises_both_currencies_to_cedis(
         self, client: AsyncClient, admin_user, platform_activity
     ):
         body = (
@@ -210,11 +211,53 @@ class TestSystemAnalytics:
             )
         ).json()
 
-        # Only the successful transaction counts: 5000 pesewas.
-        assert body["total_election_revenue_pesewas"] == 5000
-        # Only the completed purchase counts: GH¢100.00 -> 10000 pesewas.
-        assert body["total_event_revenue_pesewas"] == 10000
-        assert body["total_revenue_pesewas"] == 15000
+        # Only the successful transaction counts: 5000 pesewas -> GH¢50.00.
+        assert body["total_election_revenue_ghs"] == 50.00
+        # Only the completed purchase counts, already in cedis.
+        assert body["total_event_revenue_ghs"] == 100.00
+        assert body["total_revenue_ghs"] == 150.00
+
+    async def test_revenue_does_not_lose_pesewas_on_odd_cents(
+        self, client: AsyncClient, db_session: AsyncSession, admin_user
+    ):
+        """Odd cent amounts must survive the rounding to 2dp intact."""
+        event = Event(
+            title="Odd Cents Event",
+            event_date=date(2026, 12, 5),
+            event_time=time(19, 0),
+            location="Takoradi Hall",
+            status="published",
+            created_by=admin_user["user"].user_id,
+        )
+        db_session.add(event)
+        await db_session.flush()
+
+        db_session.add_all([
+            TicketPurchase(
+                guest_name="Buyer",
+                guest_email="odd.one@example.com",
+                event_id=event.event_id,
+                total_amount=Decimal("0.29"),
+                payment_status="completed",
+            ),
+            TicketPurchase(
+                guest_name="Buyer",
+                guest_email="odd.two@example.com",
+                event_id=event.event_id,
+                total_amount=Decimal("49.99"),
+                payment_status="completed",
+            ),
+        ])
+        await db_session.flush()
+
+        body = (
+            await client.get(
+                "/api/v1/analytics/system", headers=admin_user["headers"]
+            )
+        ).json()
+
+        # 0.29 + 49.99 == GH¢50.28, exactly — no drifted pesewa.
+        assert body["total_event_revenue_ghs"] == 50.28
 
     async def test_counts_users(
         self, client: AsyncClient, admin_user, platform_activity
@@ -244,9 +287,9 @@ class TestSystemAnalytics:
             "active_events",
             "total_votes_cast",
             "total_tickets_sold",
-            "total_election_revenue_pesewas",
-            "total_event_revenue_pesewas",
-            "total_revenue_pesewas",
+            "total_election_revenue_ghs",
+            "total_event_revenue_ghs",
+            "total_revenue_ghs",
         ):
             assert body[key] == 0, key
 
