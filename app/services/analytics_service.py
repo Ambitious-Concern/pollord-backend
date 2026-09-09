@@ -7,6 +7,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.election import Election, EligibleVoter
 from app.models.event import Event, TicketType
+from app.models.organization import Organization, OrganizationMember
 from app.models.ticket import Ticket, TicketPurchase
 from app.models.transaction import Transaction
 from app.models.user import User
@@ -142,6 +143,79 @@ class AnalyticsService:
             ],
         }
 
+    async def _revenue_by_organization(self) -> list[dict]:
+        """Revenue per organisation, mirroring how the org drill-in attributes it.
+
+        An organisation owns the elections and events created by any of its
+        members (OrganizationMember.user_id), which is the same rule
+        /admin/organizations/{id}/analytics uses — so the figures reconcile
+        with the drill-in an admin has already seen.
+
+        Two caveats inherited from that rule: a user who belongs to more than
+        one organisation has their revenue counted under each, and activity by
+        a creator who belongs to no organisation is in the platform total but
+        under no organisation here. So these rows sum to the platform total
+        only when neither case applies.
+        """
+        # Vote revenue reaches an org two ways, because a paid vote can belong
+        # to an election or to an event's category voting. Sum both streams
+        # into one figure per org.
+        vote_by_org: dict[UUID, int] = {}
+
+        election_votes = await self.session.execute(
+            select(OrganizationMember.org_id, func.sum(Transaction.amount))
+            .join(Election, Election.created_by == OrganizationMember.user_id)
+            .join(Transaction, Transaction.election_id == Election.election_id)
+            .where(Transaction.status == "success")
+            .group_by(OrganizationMember.org_id)
+        )
+        event_votes = await self.session.execute(
+            select(OrganizationMember.org_id, func.sum(Transaction.amount))
+            .join(Event, Event.created_by == OrganizationMember.user_id)
+            .join(Transaction, Transaction.event_id == Event.event_id)
+            .where(Transaction.status == "success")
+            .group_by(OrganizationMember.org_id)
+        )
+        for rows in (election_votes, event_votes):
+            for org_id, amount in rows.all():
+                vote_by_org[org_id] = vote_by_org.get(org_id, 0) + int(amount or 0)
+
+        ticket_rows = await self.session.execute(
+            select(
+                OrganizationMember.org_id,
+                func.sum(TicketPurchase.total_amount),
+            )
+            .join(Event, Event.created_by == OrganizationMember.user_id)
+            .join(TicketPurchase, TicketPurchase.event_id == Event.event_id)
+            .where(TicketPurchase.payment_status == "completed")
+            .group_by(OrganizationMember.org_id)
+        )
+        ticket_by_org = {
+            org_id: Decimal(str(amount or 0)) for org_id, amount in ticket_rows.all()
+        }
+
+        # Every organisation appears, including those earning nothing yet —
+        # a zero row is information, not noise.
+        orgs = await self.session.execute(
+            select(Organization.org_id, Organization.name)
+        )
+
+        breakdown = []
+        for org_id, name in orgs.all():
+            votes = _to_cedis(Decimal(vote_by_org.get(org_id, 0)) / 100)
+            tickets = _to_cedis(ticket_by_org.get(org_id, Decimal(0)))
+            breakdown.append({
+                "org_id": org_id,
+                "name": name,
+                "vote_revenue_ghs": float(votes),
+                "ticket_revenue_ghs": float(tickets),
+                "total_revenue_ghs": float(votes + tickets),
+            })
+
+        # Highest earner first; name breaks ties so the order is stable.
+        breakdown.sort(key=lambda o: (-o["total_revenue_ghs"], o["name"]))
+        return breakdown
+
     async def get_system_stats(self) -> dict:
         """Platform-wide totals for the admin console dashboard.
 
@@ -211,4 +285,5 @@ class AnalyticsService:
             "total_election_revenue_ghs": float(election_revenue_ghs),
             "total_event_revenue_ghs": float(event_revenue_ghs),
             "total_revenue_ghs": float(election_revenue_ghs + event_revenue_ghs),
+            "organizations": await self._revenue_by_organization(),
         }
