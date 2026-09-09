@@ -9,6 +9,9 @@ matches Arkesel's own ~180s session timeout):
   awaiting_vote_count  → paid vote — waiting for how many votes to buy (charge
                          is vote_price * count; free votes skip this entirely)
   awaiting_network     → paid vote — waiting for a mobile money network choice
+                         (only reached if the dialing number's prefix isn't a
+                         recognized network block — otherwise skipped, see
+                         _detect_network)
   awaiting_payment_otp → some providers need Paystack's OTP relayed back via
                          /charge/submit_otp before the debit completes; others
                          ("pay_offline") need nothing further from us at all
@@ -73,7 +76,47 @@ _NETWORKS = {
     "3": ("atl", "AirtelTigo Money"),
 }
 
+# Original Ghana number-block allocations, used to skip the manual network
+# menu entirely — voters are dialing from the phone that already carries
+# their money, so the number itself tells us the network. This is a
+# best-effort guess: a number ported to another network will guess wrong,
+# in which case the charge attempt simply fails with a clear error (existing
+# behavior) rather than silently mischarging anything.
+_NETWORK_PREFIXES = {
+    "24": ("mtn", "MTN Mobile Money"),
+    "25": ("mtn", "MTN Mobile Money"),
+    "53": ("mtn", "MTN Mobile Money"),
+    "54": ("mtn", "MTN Mobile Money"),
+    "55": ("mtn", "MTN Mobile Money"),
+    "59": ("mtn", "MTN Mobile Money"),
+    "20": ("vod", "Vodafone Cash"),
+    "50": ("vod", "Vodafone Cash"),
+    "26": ("atl", "AirtelTigo Money"),
+    "27": ("atl", "AirtelTigo Money"),
+    "56": ("atl", "AirtelTigo Money"),
+    "57": ("atl", "AirtelTigo Money"),
+}
+
 MAX_USSD_VOTE_QUANTITY = 100
+
+
+def _join_sentence(first: str, second: str) -> str:
+    """Join two sentence fragments without a doubled period — needed because
+    `first` is often Paystack's own display_text, which usually already ends
+    with its own punctuation."""
+    return f"{first.rstrip('. ')}. {second}"
+
+
+def _detect_network(phone: str) -> Optional[Tuple[str, str]]:
+    """Best-guess (provider, label) from a Ghana MSISDN's original block
+    allocation, or None if the prefix isn't recognized (caller should fall
+    back to asking). Accepts 233XXXXXXXXX, 0XXXXXXXXX, or bare XXXXXXXXX."""
+    digits = "".join(ch for ch in phone if ch.isdigit())
+    if digits.startswith("233"):
+        digits = "0" + digits[3:]
+    if not digits.startswith("0"):
+        digits = "0" + digits
+    return _NETWORK_PREFIXES.get(digits[1:3])
 
 
 class UssdConversationService:
@@ -323,15 +366,23 @@ class UssdConversationService:
         candidate_name = session.get("candidate_name", "")
         total_amount = vote_price * vote_count
 
-        await self._set_session(
-            phone,
-            {
-                **session,
-                "state": "awaiting_network",
-                "vote_count": vote_count,
-                "amount": total_amount,
-            },
-        )
+        updated_session = {
+            **session,
+            "state": "awaiting_network",
+            "vote_count": vote_count,
+            "amount": total_amount,
+        }
+
+        # The dialing phone is the same one paying — no need to ask which
+        # network it's on when the number itself already tells us.
+        detected = _detect_network(phone)
+        if detected:
+            provider, provider_label = detected
+            return await self._charge_and_respond(
+                phone, updated_session, provider, provider_label
+            )
+
+        await self._set_session(phone, updated_session)
         symbol = _CURRENCY_SYMBOL.get(settings.VOTE_CURRENCY, settings.VOTE_CURRENCY)
         lines = [
             f"{vote_count} vote(s) for {candidate_name}: {symbol}{total_amount / 100:.2f}. "
@@ -349,12 +400,17 @@ class UssdConversationService:
         if not network:
             return ("Reply 1 for MTN, 2 for Vodafone, or 3 for AirtelTigo:", False)
 
+        provider, provider_label = network
+        return await self._charge_and_respond(phone, session, provider, provider_label)
+
+    async def _charge_and_respond(
+        self, phone: str, session: dict, provider: str, provider_label: str
+    ) -> Tuple[str, bool]:
         parent, parent_kind = await self._reload_parent(session)
         if not parent:
             await self._clear_session(phone)
             return ("No longer available. Dial in again to retry.", True)
 
-        provider, provider_label = network
         category_id = UUID(session["category_id"])
         candidate_id = UUID(session["candidate_id"])
         candidate_name = session.get("candidate_name", "")
@@ -447,12 +503,20 @@ class UssdConversationService:
                 },
             )
             prompt = display_text or "Enter the OTP sent to your phone"
-            return (f"{prompt}. Confirm {amount_display}, {vote_label} for {candidate_name}:", False)
+            return (
+                _join_sentence(
+                    prompt, f"Confirm {amount_display}, {vote_label} for {candidate_name}:"
+                ),
+                False,
+            )
 
         await self._clear_session(phone)
         instruction = display_text or f"Check your phone and approve the {provider_label} prompt"
         return (
-            f"{instruction}. {amount_display}, {vote_label} for {candidate_name}. SMS on confirm.",
+            _join_sentence(
+                instruction,
+                f"{amount_display}, {vote_label} for {candidate_name}. SMS on confirm.",
+            ),
             True,
         )
 
@@ -484,7 +548,7 @@ class UssdConversationService:
 
         instruction = result.get("display_text") or "Payment submitted"
         return (
-            f"{instruction}. {vote_label} for {candidate_name}. SMS on confirm.",
+            _join_sentence(instruction, f"{vote_label} for {candidate_name}. SMS on confirm."),
             True,
         )
 

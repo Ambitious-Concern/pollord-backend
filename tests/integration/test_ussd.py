@@ -8,9 +8,32 @@ import app.core.redis as redis_module
 from app.core.config import settings
 from app.models.election import Candidate, Category, Election
 from app.services.paystack_service import PaystackService
+from app.services.ussd_conversation_service import _detect_network
 
 WEBHOOK_URL = "/api/v1/ussd/arkesel/callback"
 TOKEN = "test-ussd-token"
+
+
+class TestDetectNetwork:
+    @pytest.mark.parametrize(
+        "phone,expected_provider",
+        [
+            ("233241234567", "mtn"),
+            ("0241234567", "mtn"),
+            ("241234567", "mtn"),
+            ("233201234567", "vod"),
+            ("233501234567", "vod"),
+            ("233261234567", "atl"),
+            ("233571234567", "atl"),
+        ],
+    )
+    def test_recognized_prefixes(self, phone, expected_provider):
+        result = _detect_network(phone)
+        assert result is not None
+        assert result[0] == expected_provider
+
+    def test_unrecognized_prefix_returns_none(self):
+        assert _detect_network("233991234567") is None
 
 
 @pytest.fixture(autouse=True)
@@ -270,7 +293,7 @@ class TestUssdPaidVoteFlow:
         self, client: AsyncClient, paid_election_with_candidate, monkeypatch
     ):
         election, category, candidate = paid_election_with_candidate
-        phone = "233241234572"
+        phone = "233299234572"  # unrecognized prefix -> exercises the manual network menu
         charged = {}
 
         async def fake_charge(self, **kwargs):
@@ -302,11 +325,30 @@ class TestUssdPaidVoteFlow:
         assert body["continueSession"] is True
         assert "enter a number" in body["message"].lower()
 
+    async def test_recognized_prefix_skips_network_menu(
+        self, client: AsyncClient, paid_election_with_candidate, monkeypatch
+    ):
+        election, category, candidate = paid_election_with_candidate
+        phone = "233241234599"  # 024 -> MTN
+        charged = {}
+
+        async def fake_charge(self, **kwargs):
+            charged["provider"] = kwargs["provider"]
+            return {"status": "pay_offline"}
+
+        monkeypatch.setattr(PaystackService, "charge_mobile_money", fake_charge)
+
+        response = await self._dial_to_network_prompt(client, election, candidate, phone)
+        body = response.json()
+        assert body["continueSession"] is False
+        assert "Choose payment network" not in body["message"]
+        assert charged["provider"] == "mtn"
+
     async def test_pay_offline_ends_session_immediately(
         self, client: AsyncClient, paid_election_with_candidate, monkeypatch
     ):
         election, category, candidate = paid_election_with_candidate
-        phone = "233241234570"
+        phone = "233299234570"  # unrecognized prefix -> exercises the manual network menu
 
         async def fake_charge(self, **kwargs):
             return {"status": "pay_offline"}
@@ -329,7 +371,7 @@ class TestUssdPaidVoteFlow:
         self, client: AsyncClient, paid_election_with_candidate, monkeypatch
     ):
         election, category, candidate = paid_election_with_candidate
-        phone = "233241234571"
+        phone = "233299234571"  # unrecognized prefix -> exercises the manual network menu
         submitted = {}
 
         async def fake_charge(self, **kwargs):
@@ -364,7 +406,7 @@ class TestUssdPaidVoteFlow:
         self, client: AsyncClient, paid_election_with_candidate, monkeypatch
     ):
         election, category, candidate = paid_election_with_candidate
-        phone = "233241234574"
+        phone = "233299234574"  # unrecognized prefix -> exercises the manual network menu
 
         async def fake_charge(self, **kwargs):
             return {
