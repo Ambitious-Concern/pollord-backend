@@ -80,6 +80,8 @@ async def _owns_event(event, current_user: User, db: AsyncSession) -> bool:
 
 
 async def _require_event_ownership(event, current_user: User, db: AsyncSession) -> None:
+    """Raise 403 unless the caller created this event, is a teammate in
+    its organization, or is a System Administrator."""
     if not await _owns_event(event, current_user, db):
         raise HTTPException(status_code=403, detail="You do not have access to this event")
 
@@ -104,6 +106,7 @@ async def create_event(
     current_user: User = Depends(require_roles(*ORGANIZER_ROLES)),
     db: AsyncSession = Depends(get_db),
 ):
+    """Create an event, auto-generating a slug and USSD code."""
     event_repo = EventRepository(Event, db)
     audit_repo = AuditLogRepository(AuditLog, db)
 
@@ -181,11 +184,13 @@ async def _get_global_vote_price(db: AsyncSession) -> int:
 
 
 async def _build_event_with_ticket_types(event, db: AsyncSession) -> EventWithTicketTypes:
+    """Shared response builder for get_event and get_public_event_by_slug."""
     global_vote_price = await _get_global_vote_price(db)
     return EventWithTicketTypes(
         event_id=event.event_id,
         title=event.title,
         slug=event.slug,
+        ussd_code=event.ussd_code,
         description=event.description,
         event_date=event.event_date,
         event_time=event.event_time,
@@ -215,6 +220,7 @@ async def get_event(
     event_id: UUID,
     db: AsyncSession = Depends(get_db),
 ):
+    """Full event detail including ticket types. No auth required."""
     event_repo = EventRepository(Event, db)
     event = await event_repo.get_with_ticket_types(event_id)
     if not event:
@@ -242,6 +248,7 @@ async def update_event(
     current_user: User = Depends(require_roles(*ORGANIZER_ROLES)),
     db: AsyncSession = Depends(get_db),
 ):
+    """Partial update of an event's own fields."""
     event_repo = EventRepository(Event, db)
     event = await event_repo.get_by_id(event_id, id_field="event_id")
     if not event:
@@ -259,6 +266,7 @@ async def delete_event(
     current_user: User = Depends(require_roles(*ORGANIZER_ROLES)),
     db: AsyncSession = Depends(get_db),
 ):
+    """Delete a draft event (published events must be cancelled instead)."""
     event_repo = EventRepository(Event, db)
     event = await event_repo.get_by_id(event_id, id_field="event_id")
     if not event:
@@ -347,6 +355,8 @@ async def publish_event(
     current_user: User = Depends(require_roles(*ORGANIZER_ROLES)),
     db: AsyncSession = Depends(get_db),
 ):
+    """Publish a draft/cancelled event, after checking every category (if
+    any) has at least one candidate."""
     event_repo = EventRepository(Event, db)
     event = await event_repo.get_by_id(event_id, id_field="event_id")
     if not event:
@@ -400,6 +410,8 @@ async def cancel_event(
     current_user: User = Depends(require_roles(*ORGANIZER_ROLES)),
     db: AsyncSession = Depends(get_db),
 ):
+    """Cancel an event (distinct from unpublish — see get_event_scan_token's
+    neighbor unpublish_event for the reversible, no-audit-trail variant)."""
     event_repo = EventRepository(Event, db)
     event = await event_repo.get_by_id(event_id, id_field="event_id")
     if not event:
@@ -452,6 +464,7 @@ async def create_ticket_type(
     current_user: User = Depends(require_roles(*ORGANIZER_ROLES)),
     db: AsyncSession = Depends(get_db),
 ):
+    """Add a ticket type (price tier) to an event."""
     event_repo = EventRepository(Event, db)
     event = await event_repo.get_by_id(event_id, id_field="event_id")
     if not event:
@@ -472,6 +485,7 @@ async def list_ticket_types(
     event_id: UUID,
     db: AsyncSession = Depends(get_db),
 ):
+    """All ticket types for an event. No auth required."""
     tt_repo = TicketTypeRepository(TicketType, db)
     types = await tt_repo.get_by_event(event_id)
     return [TicketTypeResponse.model_validate(tt) for tt in types]
@@ -488,6 +502,7 @@ async def update_ticket_type(
     current_user: User = Depends(require_roles(*ORGANIZER_ROLES)),
     db: AsyncSession = Depends(get_db),
 ):
+    """Partial update of a ticket type."""
     event_repo = EventRepository(Event, db)
     event = await event_repo.get_by_id(event_id, id_field="event_id")
     if not event:
@@ -514,6 +529,7 @@ async def delete_ticket_type(
     current_user: User = Depends(require_roles(*ORGANIZER_ROLES)),
     db: AsyncSession = Depends(get_db),
 ):
+    """Delete a ticket type that has never sold any tickets."""
     event_repo = EventRepository(Event, db)
     event = await event_repo.get_by_id(event_id, id_field="event_id")
     if not event:
@@ -547,6 +563,7 @@ async def add_event_category(
     current_user: User = Depends(require_roles(*ORGANIZER_ROLES)),
     db: AsyncSession = Depends(get_db),
 ):
+    """Add a voting category to a draft event."""
     event_repo = EventRepository(Event, db)
     event = await event_repo.get_by_id(event_id, id_field="event_id")
     if not event:
@@ -580,6 +597,7 @@ async def get_event_category(
     category_id: UUID,
     db: AsyncSession = Depends(get_db),
 ):
+    """One event category with its candidates. No auth required."""
     category_repo = CategoryRepository(Category, db)
     category = await category_repo.get_with_candidates(category_id)
     if not category or category.event_id != event_id:
@@ -595,6 +613,7 @@ async def update_event_category(
     current_user: User = Depends(require_roles(*ORGANIZER_ROLES)),
     db: AsyncSession = Depends(get_db),
 ):
+    """Partial update of a draft event's category."""
     event_repo = EventRepository(Event, db)
     event = await event_repo.get_by_id(event_id, id_field="event_id")
     if not event:
@@ -623,6 +642,7 @@ async def delete_event_category(
     current_user: User = Depends(require_roles(*ORGANIZER_ROLES)),
     db: AsyncSession = Depends(get_db),
 ):
+    """Delete a draft event's category."""
     event_repo = EventRepository(Event, db)
     event = await event_repo.get_by_id(event_id, id_field="event_id")
     if not event:
@@ -654,6 +674,7 @@ async def add_event_candidate(
     current_user: User = Depends(require_roles(*ORGANIZER_ROLES)),
     db: AsyncSession = Depends(get_db),
 ):
+    """Add a nominee to one of a draft event's categories."""
     event_repo = EventRepository(Event, db)
     event = await event_repo.get_by_id(event_id, id_field="event_id")
     if not event:
@@ -690,6 +711,7 @@ async def list_event_candidates(
     event_id: UUID,
     db: AsyncSession = Depends(get_db),
 ):
+    """All nominees across an event's categories. No auth required."""
     candidate_repo = CandidateRepository(Candidate, db)
     candidates = await candidate_repo.get_by_event(event_id)
     return [CandidateResponse.model_validate(c) for c in candidates]
@@ -703,6 +725,7 @@ async def update_event_candidate(
     current_user: User = Depends(require_roles(*ORGANIZER_ROLES)),
     db: AsyncSession = Depends(get_db),
 ):
+    """Partial update of a draft event's nominee."""
     event_repo = EventRepository(Event, db)
     event = await event_repo.get_by_id(event_id, id_field="event_id")
     if not event:
@@ -731,6 +754,7 @@ async def remove_event_candidate(
     current_user: User = Depends(require_roles(*ORGANIZER_ROLES)),
     db: AsyncSession = Depends(get_db),
 ):
+    """Remove a nominee from an event."""
     event_repo = EventRepository(Event, db)
     event = await event_repo.get_by_id(event_id, id_field="event_id")
     if not event:

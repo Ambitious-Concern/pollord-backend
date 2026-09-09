@@ -116,6 +116,10 @@ def tally_votes_by_category(
 
 
 class VotingService:
+    """Authenticated election voting (eligibility-gated) plus read-side
+    ballot/results for both elections and events. Anonymous/public vote
+    casting lives in the voting.py endpoints directly, not here."""
+
     def __init__(
         self,
         election_repo: ElectionRepository,
@@ -149,6 +153,10 @@ class VotingService:
         ip: Optional[str] = None,
         user_agent: Optional[str] = None,
     ) -> VoteReceiptResponse:
+        """Cast an authenticated vote, enforcing eligibility, voting-window,
+        and one-vote-per-category rules (unless the election allows
+        revoting, in which case each vote gets a unique hash instead of
+        being deduped)."""
         category = await self.category_repo.get_with_candidates(data.category_id)
         if not category or category.election_id is None:
             raise HTTPException(
@@ -250,6 +258,8 @@ class VotingService:
         )
 
     async def get_ballot(self, user_id: UUID, election_id: UUID) -> ElectionWithCategories:
+        """Ballot for an authenticated voter — 403s if the election is
+        eligibility-gated and this user isn't on the list."""
         election = await self.election_repo.get_with_categories(election_id)
         if not election:
             raise HTTPException(
@@ -317,6 +327,8 @@ class VotingService:
         )
 
     async def get_results(self, election_id: UUID) -> ElectionResults:
+        """Same as get_live_results, but only once the election has ended —
+        for the "final results" view rather than an in-progress tally."""
         election = await self.election_repo.get_with_categories(election_id)
         if not election:
             raise HTTPException(
@@ -388,6 +400,7 @@ class VotingService:
             election_id=election.election_id,
             title=election.title,
             slug=election.slug,
+            ussd_code=election.ussd_code,
             description=election.description,
             start_datetime=election.start_datetime,
             end_datetime=election.end_datetime,
@@ -422,6 +435,7 @@ class VotingService:
             event_id=event.event_id,
             title=event.title,
             slug=event.slug,
+            ussd_code=event.ussd_code,
             description=event.description,
             event_date=event.event_date,
             event_time=event.event_time,
