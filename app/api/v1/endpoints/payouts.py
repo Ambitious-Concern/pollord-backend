@@ -5,7 +5,7 @@ from fastapi import APIRouter, Depends
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
-from app.core.dependencies import get_current_active_user, require_roles
+from app.core.dependencies import CONSOLE_READ_ROLES, get_current_active_user, require_roles
 from app.db.base import get_db
 from app.models.election import Election
 from app.models.event import Event
@@ -139,7 +139,7 @@ async def list_my_payout_requests(
 @router.get("/admin/all", response_model=List[PayoutRequestResponse])
 async def list_all_payout_requests(
     status: Optional[str] = None,
-    current_user: User = Depends(require_roles(ADMIN_ROLE)),
+    current_user: User = Depends(require_roles(*CONSOLE_READ_ROLES)),
     db: AsyncSession = Depends(get_db),
 ):
     """Every payout request on the platform, for a System Administrator to review."""

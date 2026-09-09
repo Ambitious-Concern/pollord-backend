@@ -22,6 +22,19 @@ DEFAULT_ROLES = [
         },
     },
     {
+        # Read-only console access. The permissions dict is descriptive only —
+        # nothing reads it; enforcement is by role name in CONSOLE_READ_ROLES.
+        "role_name": "Platform Viewer",
+        "permissions": {
+            "users": ["read"],
+            "elections": ["read"],
+            "events": ["read"],
+            "tickets": ["read"],
+            "analytics": ["read"],
+            "audit_logs": ["read"],
+        },
+    },
+    {
         "role_name": "Election Administrator",
         "permissions": {
             "elections": ["create", "read", "update", "delete"],
