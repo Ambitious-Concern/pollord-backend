@@ -18,7 +18,7 @@ from httpx import AsyncClient
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.security import generate_secure_token
-from app.models.election import Election
+from app.models.election import Category, Election
 from app.models.event import Event, TicketType
 from app.models.ticket import Ticket, TicketPurchase
 from app.models.transaction import Transaction
@@ -38,7 +38,6 @@ async def platform_activity(db_session: AsyncSession, admin_user) -> dict:
 
     active_election = Election(
         title="Live Election",
-        election_type="single",
         start_datetime=now - timedelta(days=1),
         end_datetime=now + timedelta(days=1),
         status="active",
@@ -46,7 +45,6 @@ async def platform_activity(db_session: AsyncSession, admin_user) -> dict:
     )
     closed_election = Election(
         title="Finished Election",
-        election_type="single",
         start_datetime=now - timedelta(days=10),
         end_datetime=now - timedelta(days=5),
         status="closed",
@@ -55,10 +53,25 @@ async def platform_activity(db_session: AsyncSession, admin_user) -> dict:
     db_session.add_all([active_election, closed_election])
     await db_session.flush()
 
+    # Votes and transactions hang off a category now, not the election.
+    category = Category(
+        election_id=active_election.election_id,
+        name="Best Overall",
+        election_type="single_choice",
+    )
+    closed_category = Category(
+        election_id=closed_election.election_id,
+        name="Best Newcomer",
+        election_type="single_choice",
+    )
+    db_session.add_all([category, closed_category])
+    await db_session.flush()
+
     # Weighted votes: 3 + 1 == 4 votes cast across 2 rows.
     db_session.add_all([
         Vote(
             election_id=active_election.election_id,
+            category_id=category.category_id,
             voter_hash="hash-a",
             vote_data=b"encrypted-a",
             vote_signature="sig-a",
@@ -66,6 +79,7 @@ async def platform_activity(db_session: AsyncSession, admin_user) -> dict:
         ),
         Vote(
             election_id=closed_election.election_id,
+            category_id=closed_category.category_id,
             voter_hash="hash-b",
             vote_data=b"encrypted-b",
             vote_signature="sig-b",
@@ -78,6 +92,7 @@ async def platform_activity(db_session: AsyncSession, admin_user) -> dict:
         Transaction(
             reference=f"ref-success-{uuid4().hex[:8]}",
             election_id=active_election.election_id,
+            category_id=category.category_id,
             voter_hash="hash-a",
             candidate_ids=[str(uuid4())],
             amount=5000,
@@ -86,6 +101,7 @@ async def platform_activity(db_session: AsyncSession, admin_user) -> dict:
         Transaction(
             reference=f"ref-failed-{uuid4().hex[:8]}",
             election_id=active_election.election_id,
+            category_id=category.category_id,
             voter_hash="hash-c",
             candidate_ids=[str(uuid4())],
             amount=2000,
