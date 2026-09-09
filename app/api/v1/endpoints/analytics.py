@@ -1,3 +1,4 @@
+from typing import List
 from uuid import UUID
 
 from fastapi import APIRouter, Depends
@@ -10,6 +11,17 @@ from app.models.user import User
 from app.services.analytics_service import AnalyticsService
 
 router = APIRouter(prefix="/analytics", tags=["Analytics"])
+
+
+class OrganizationRevenue(BaseModel):
+    """What one organisation has earned, in cedis."""
+
+    org_id: UUID
+    name: str
+    # Paid votes, whether cast in an election or an event's category voting.
+    vote_revenue_ghs: float
+    ticket_revenue_ghs: float
+    total_revenue_ghs: float
 
 
 class SystemAnalyticsResponse(BaseModel):
@@ -29,6 +41,8 @@ class SystemAnalyticsResponse(BaseModel):
     total_election_revenue_ghs: float
     total_event_revenue_ghs: float
     total_revenue_ghs: float
+    # Every organisation, highest earner first; zero-revenue orgs included.
+    organizations: List[OrganizationRevenue] = []
 
 
 @router.get("/elections/{election_id}")
