@@ -10,6 +10,7 @@ from datetime import datetime, timedelta, timezone
 
 from app.core.config import settings
 from app.core.dependencies import get_current_active_user, require_roles
+from app.core.pricing import validate_vote_price
 from app.core.security import create_candidate_result_token, decode_token
 from app.core.slug import generate_slug
 from app.core.ussd import generate_unique_ussd_code
@@ -118,22 +119,15 @@ async def _get_global_vote_price(db: AsyncSession) -> int:
     return settings.VOTE_PRICE
 
 
-MIN_VOTE_PRICE = 50  # pesewas (₵0.50); custom prices must be a multiple of this
-
-
 async def _validate_vote_price(data, db: AsyncSession) -> None:
-    """Raise if a per-election vote_price is below the ₵0.50 minimum or not a ₵0.50 multiple."""
+    """Raise if a per-election vote_price is below the shared ₵0.10 floor."""
     s = getattr(data, "settings", None)
     if not s:
         return
-    price = getattr(s, "vote_price", None)
-    if price is None:
-        return
-    if price < MIN_VOTE_PRICE or price % MIN_VOTE_PRICE != 0:
-        raise HTTPException(
-            status_code=400,
-            detail="Vote price must be at least ₵0.50 and a multiple of ₵0.50",
-        )
+    try:
+        validate_vote_price(getattr(s, "vote_price", None))
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 # =========================================================================
