@@ -1,4 +1,4 @@
-from datetime import datetime, timedelta, timezone
+﻿from datetime import datetime, timedelta, timezone
 
 import pytest
 from httpx import AsyncClient
@@ -19,13 +19,6 @@ def _set_webhook_token(monkeypatch):
 
 @pytest.fixture(autouse=True)
 async def _fresh_redis_client():
-    """The module-level Redis client in app.core.redis is a singleton meant
-    to live for one process's lifetime — it doesn't survive pytest-asyncio
-    creating a new event loop per test. Force a fresh connection each test
-    instead of reusing one bound to an already-closed loop. Also clear any
-    ussd:* keys left over from a previous run — Redis isn't wrapped in the
-    same per-test rollback the Postgres test DB gets, so stale session state
-    for a reused phone number would otherwise leak across test runs."""
     redis_module._client = None
     redis = await redis_module.get_redis()
     keys = await redis.keys("ussd:*")
@@ -79,31 +72,41 @@ async def active_election_with_candidate(db_session: AsyncSession, admin_user):
     return election, category, candidate
 
 
-def _ussd_post(text: str, phone: str = "233241234567", session_id: str = "sess-1"):
+def _ussd_post(
+    user_data: str,
+    phone: str = "233241234567",
+    session_id: str = "sess-1",
+    new_session: bool = False,
+):
     return {
-        "sessionId": session_id,
-        "serviceCode": "*928*928#",
-        "phoneNumber": phone,
-        "text": text,
+        "sessionID": session_id,
+        "userID": "user-1",
+        "msisdn": phone,
+        "newSession": new_session,
+        "userData": user_data,
     }
 
 
 @pytest.mark.asyncio
 class TestUssdWebhookSecurity:
     async def test_missing_token_rejected(self, client: AsyncClient):
-        response = await client.post(WEBHOOK_URL, data=_ussd_post(""))
+        response = await client.post(WEBHOOK_URL, json=_ussd_post("*928*928#", new_session=True))
         assert response.status_code == 403
 
     async def test_wrong_token_rejected(self, client: AsyncClient):
         response = await client.post(
-            f"{WEBHOOK_URL}?token=wrong", data=_ussd_post("")
+            f"{WEBHOOK_URL}?token=wrong", json=_ussd_post("*928*928#", new_session=True)
         )
         assert response.status_code == 403
 
     async def test_correct_token_accepted(self, client: AsyncClient):
-        response = await client.post(f"{WEBHOOK_URL}?token={TOKEN}", data=_ussd_post(""))
+        response = await client.post(
+            f"{WEBHOOK_URL}?token={TOKEN}", json=_ussd_post("*928*928#", new_session=True)
+        )
         assert response.status_code == 200
-        assert response.text.startswith("CON ")
+        body = response.json()
+        assert body["continueSession"] is True
+        assert "Welcome" in body["message"]
 
 
 @pytest.mark.asyncio
@@ -113,29 +116,27 @@ class TestUssdVotingFlow:
     ):
         election, category, candidate = active_election_with_candidate
 
-        # Step 1: dial in, no input yet
-        r1 = await client.post(f"{WEBHOOK_URL}?token={TOKEN}", data=_ussd_post(""))
+        r1 = await client.post(
+            f"{WEBHOOK_URL}?token={TOKEN}", json=_ussd_post("*928*928#", new_session=True)
+        )
         assert r1.status_code == 200
-        assert r1.text.startswith("CON ")
+        assert r1.json()["continueSession"] is True
 
-        # Step 2: enter the election's USSD code — single category, goes
-        # straight to the ballot
         r2 = await client.post(
-            f"{WEBHOOK_URL}?token={TOKEN}", data=_ussd_post(election.ussd_code)
+            f"{WEBHOOK_URL}?token={TOKEN}", json=_ussd_post(election.ussd_code)
         )
         assert r2.status_code == 200
-        assert r2.text.startswith("CON ")
-        assert candidate.short_code in r2.text
+        body2 = r2.json()
+        assert body2["continueSession"] is True
+        assert candidate.short_code in body2["message"]
 
-        # Step 3: enter the candidate's short code (Arkesel sends cumulative
-        # text: "482913*ANNE")
         r3 = await client.post(
-            f"{WEBHOOK_URL}?token={TOKEN}",
-            data=_ussd_post(f"{election.ussd_code}*{candidate.short_code}"),
+            f"{WEBHOOK_URL}?token={TOKEN}", json=_ussd_post(candidate.short_code)
         )
         assert r3.status_code == 200
-        assert r3.text.startswith("END ")
-        assert "Vote cast" in r3.text
+        body3 = r3.json()
+        assert body3["continueSession"] is False
+        assert "Vote cast" in body3["message"]
 
     async def test_duplicate_vote_rejected(
         self, client: AsyncClient, active_election_with_candidate
@@ -143,46 +144,53 @@ class TestUssdVotingFlow:
         election, category, candidate = active_election_with_candidate
         phone = "233241234568"
 
-        await client.post(f"{WEBHOOK_URL}?token={TOKEN}", data=_ussd_post("", phone))
         await client.post(
-            f"{WEBHOOK_URL}?token={TOKEN}", data=_ussd_post(election.ussd_code, phone)
+            f"{WEBHOOK_URL}?token={TOKEN}",
+            json=_ussd_post("*928*928#", phone, new_session=True),
+        )
+        await client.post(
+            f"{WEBHOOK_URL}?token={TOKEN}", json=_ussd_post(election.ussd_code, phone)
         )
         first = await client.post(
-            f"{WEBHOOK_URL}?token={TOKEN}",
-            data=_ussd_post(f"{election.ussd_code}*{candidate.short_code}", phone),
+            f"{WEBHOOK_URL}?token={TOKEN}", json=_ussd_post(candidate.short_code, phone)
         )
-        assert "Vote cast" in first.text
+        assert "Vote cast" in first.json()["message"]
 
-        # Same phone, fresh session — should be rejected as already voted
-        await client.post(f"{WEBHOOK_URL}?token={TOKEN}", data=_ussd_post("", phone))
-        second = await client.post(
-            f"{WEBHOOK_URL}?token={TOKEN}", data=_ussd_post(election.ussd_code, phone)
+        await client.post(
+            f"{WEBHOOK_URL}?token={TOKEN}",
+            json=_ussd_post("*928*928#", phone, new_session=True),
         )
-        assert second.text.startswith("END ")
-        assert "already voted" in second.text
+        second = await client.post(
+            f"{WEBHOOK_URL}?token={TOKEN}", json=_ussd_post(election.ussd_code, phone)
+        )
+        body2 = second.json()
+        assert body2["continueSession"] is False
+        assert "already voted" in body2["message"]
 
     async def test_unknown_code_prompts_retry(self, client: AsyncClient):
         response = await client.post(
-            f"{WEBHOOK_URL}?token={TOKEN}", data=_ussd_post("000000")
+            f"{WEBHOOK_URL}?token={TOKEN}", json=_ussd_post("000000")
         )
         assert response.status_code == 200
-        assert response.text.startswith("CON ")
-        assert "not found" in response.text.lower()
+        body = response.json()
+        assert body["continueSession"] is True
+        assert "not found" in body["message"].lower()
 
     async def test_unknown_candidate_code_reprompts(
         self, client: AsyncClient, active_election_with_candidate
     ):
         election, category, candidate = active_election_with_candidate
-        await client.post(f"{WEBHOOK_URL}?token={TOKEN}", data=_ussd_post(""))
         await client.post(
-            f"{WEBHOOK_URL}?token={TOKEN}", data=_ussd_post(election.ussd_code)
+            f"{WEBHOOK_URL}?token={TOKEN}", json=_ussd_post("*928*928#", new_session=True)
+        )
+        await client.post(
+            f"{WEBHOOK_URL}?token={TOKEN}", json=_ussd_post(election.ussd_code)
         )
         response = await client.post(
-            f"{WEBHOOK_URL}?token={TOKEN}",
-            data=_ussd_post(f"{election.ussd_code}*ZZZZ"),
+            f"{WEBHOOK_URL}?token={TOKEN}", json=_ussd_post("ZZZZ")
         )
         assert response.status_code == 200
-        assert response.text.startswith("CON ")
+        assert response.json()["continueSession"] is True
 
 
 @pytest.mark.asyncio
