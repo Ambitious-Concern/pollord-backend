@@ -25,11 +25,19 @@ class BaseRepository(Generic[ModelType]):
         return result.scalar_one_or_none()
 
     async def get_all(
-        self, *, skip: int = 0, limit: int = 100
+        self, *, skip: int = 0, limit: int = 100, order_by=None
     ) -> List[ModelType]:
-        result = await self.session.execute(
-            select(self.model).offset(skip).limit(limit)
-        )
+        """Rows with OFFSET/LIMIT paging.
+
+        Pass order_by when paging: without an ORDER BY, Postgres may return
+        rows in any order, so a row can appear on two pages or on none.
+        Left optional rather than defaulting, so existing callers keep the
+        behaviour they were written against.
+        """
+        query = select(self.model)
+        if order_by is not None:
+            query = query.order_by(order_by)
+        result = await self.session.execute(query.offset(skip).limit(limit))
         return list(result.scalars().all())
 
     async def create(self, obj_in: dict) -> ModelType:

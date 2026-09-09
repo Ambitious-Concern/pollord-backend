@@ -48,6 +48,7 @@ class UserRepository(BaseRepository[User]):
                     User.full_name.ilike(search),
                 )
             )
+            .order_by(User.created_at.desc())
             .offset(skip)
             .limit(limit)
         )

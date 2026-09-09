@@ -45,7 +45,11 @@ async def list_users(
     if search:
         users = await user_repo.search_users(search, skip, limit)
     else:
-        users = await user_repo.get_all(skip=skip, limit=limit)
+        # Newest first, so someone just added is on the first page rather
+        # than wherever an unordered scan happens to put them.
+        users = await user_repo.get_all(
+            skip=skip, limit=limit, order_by=User.created_at.desc()
+        )
 
     results = []
     for u in users:
@@ -554,6 +558,16 @@ class EventAnalytics(BaseModel):
     total_revenue_ghs: float
 
 
+class OrgMemberSummary(BaseModel):
+    """Who is in the organization — the console only had a count before."""
+
+    user_id: UUID
+    user_name: Optional[str]
+    user_email: Optional[str]
+    role: str
+    joined_at: datetime
+
+
 class OrgAnalyticsResponse(BaseModel):
     org_id: UUID
     name: str
@@ -564,6 +578,9 @@ class OrgAnalyticsResponse(BaseModel):
     total_members: int
     total_election_revenue_pesewas: int
     total_event_revenue_ghs: float
+    # Owner first, then by join date — an admin looking for someone they just
+    # added wants the newest names, and the owner is the useful anchor.
+    members: List[OrgMemberSummary]
     elections: List[ElectionAnalytics]
     events: List[EventAnalytics]
 
@@ -589,11 +606,29 @@ async def get_organization_analytics(
     if not org:
         raise HTTPException(status_code=404, detail="Organization not found")
 
-    # Collect all member user_ids for this org
+    # Collect the org's members, with enough identity for the console to show
+    # who they are rather than just how many there are.
     member_result = await db.execute(
-        select(OrganizationMember.user_id).where(OrganizationMember.org_id == org_id)
+        select(OrganizationMember, User)
+        .join(User, User.user_id == OrganizationMember.user_id)
+        .where(OrganizationMember.org_id == org_id)
+        .order_by(
+            (OrganizationMember.role != "owner"),
+            OrganizationMember.joined_at.desc(),
+        )
     )
-    user_ids = [row[0] for row in member_result.all()]
+    member_rows = member_result.all()
+    user_ids = [m.user_id for m, _ in member_rows]
+    members = [
+        OrgMemberSummary(
+            user_id=m.user_id,
+            user_name=u.full_name,
+            user_email=u.email,
+            role=m.role,
+            joined_at=m.joined_at,
+        )
+        for m, u in member_rows
+    ]
 
     if not user_ids:
         return OrgAnalyticsResponse(
@@ -606,6 +641,7 @@ async def get_organization_analytics(
             total_members=0,
             total_election_revenue_pesewas=0,
             total_event_revenue_ghs=0.0,
+            members=[],
             elections=[],
             events=[],
         )
@@ -721,6 +757,7 @@ async def get_organization_analytics(
         total_members=len(user_ids),
         total_election_revenue_pesewas=total_election_revenue,
         total_event_revenue_ghs=total_event_revenue,
+        members=members,
         elections=election_analytics,
         events=event_analytics,
     )
