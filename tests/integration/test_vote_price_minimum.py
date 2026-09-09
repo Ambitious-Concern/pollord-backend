@@ -22,7 +22,6 @@ async def election(db_session: AsyncSession, admin_user) -> Election:
     now = datetime.now(timezone.utc)
     e = Election(
         title="Priced Election",
-        election_type="single_choice",
         start_datetime=now + timedelta(days=1),
         end_datetime=now + timedelta(days=2),
         status="draft",
@@ -108,7 +107,6 @@ class TestElectionCreateMinimum:
             "/api/v1/elections",
             json={
                 "title": "Cheap Votes",
-                "election_type": "single_choice",
                 "start_datetime": (now + timedelta(days=1)).isoformat(),
                 "end_datetime": (now + timedelta(days=2)).isoformat(),
                 "settings": {"vote_price": 70},
@@ -125,7 +123,6 @@ class TestElectionCreateMinimum:
             "/api/v1/elections",
             json={
                 "title": "Too Cheap",
-                "election_type": "single_choice",
                 "start_datetime": (now + timedelta(days=1)).isoformat(),
                 "end_datetime": (now + timedelta(days=2)).isoformat(),
                 "settings": {"vote_price": 9},
