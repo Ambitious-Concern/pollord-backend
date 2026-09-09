@@ -447,16 +447,12 @@ class UssdConversationService:
                 },
             )
             prompt = display_text or "Enter the OTP sent to your phone"
-            return (
-                f"{prompt} to confirm {amount_display} for {vote_label} for {candidate_name}:",
-                False,
-            )
+            return (f"{prompt}. Confirm {amount_display}, {vote_label} for {candidate_name}:", False)
 
         await self._clear_session(phone)
         instruction = display_text or f"Check your phone and approve the {provider_label} prompt"
         return (
-            f"{instruction} for {amount_display} ({vote_label} for {candidate_name}). "
-            "You'll get an SMS once it's confirmed.",
+            f"{instruction}. {amount_display}, {vote_label} for {candidate_name}. SMS on confirm.",
             True,
         )
 
@@ -488,8 +484,7 @@ class UssdConversationService:
 
         instruction = result.get("display_text") or "Payment submitted"
         return (
-            f"{instruction} for {vote_label} for {candidate_name}. "
-            "You'll get an SMS once it's confirmed.",
+            f"{instruction}. {vote_label} for {candidate_name}. SMS on confirm.",
             True,
         )
 

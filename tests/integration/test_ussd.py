@@ -360,6 +360,30 @@ class TestUssdPaidVoteFlow:
         assert "Payment submitted" in body["message"]
         assert submitted["otp"] == "123456"
 
+    async def test_long_paystack_display_text_gets_truncated(
+        self, client: AsyncClient, paid_election_with_candidate, monkeypatch
+    ):
+        election, category, candidate = paid_election_with_candidate
+        phone = "233241234574"
+
+        async def fake_charge(self, **kwargs):
+            return {
+                "status": "send_otp",
+                "display_text": "Please enter the One-Time-PIN sent to your "
+                "registered mobile number to authorize and complete this "
+                "mobile money transaction right away",
+            }
+
+        monkeypatch.setattr(PaystackService, "charge_mobile_money", fake_charge)
+
+        await self._dial_to_network_prompt(client, election, candidate, phone)
+        otp_prompt = await client.post(
+            f"{WEBHOOK_URL}?token={TOKEN}", json=_ussd_post("1", phone)
+        )
+        body = otp_prompt.json()
+        assert len(body["message"]) <= settings.USSD_MAX_MESSAGE_LENGTH
+        assert body["message"].endswith("…")
+
 
 @pytest.mark.asyncio
 class TestUssdCodeGeneration:

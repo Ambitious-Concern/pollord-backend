@@ -72,6 +72,17 @@ async def arkesel_callback(
         raise HTTPException(status_code=403, detail="Invalid token")
 
     def _reply(message: str, continue_session: bool) -> ArkeselUssdResponse:
+        # Last-resort safety net: every individual screen (ballot, network
+        # choice, OTP prompt, confirmation...) is expected to already fit,
+        # but a message built from Paystack's own free-text display_text
+        # can't be size-checked ahead of time - truncate rather than let a
+        # too-long message get silently mangled or dropped by a carrier.
+        if len(message) > settings.USSD_MAX_MESSAGE_LENGTH:
+            logger.warning(
+                "USSD message exceeded %d chars (%d), truncating: %r",
+                settings.USSD_MAX_MESSAGE_LENGTH, len(message), message,
+            )
+            message = message[: settings.USSD_MAX_MESSAGE_LENGTH - 1] + "…"
         return ArkeselUssdResponse(
             sessionID=data.sessionID,
             userID=data.userID,
