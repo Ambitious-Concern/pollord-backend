@@ -12,6 +12,7 @@ from app.core.config import settings
 from app.models.platform_setting import PlatformSetting
 from app.core.dependencies import get_current_active_user
 from app.core.security import generate_anonymous_voter_hash, generate_email_voter_hash
+from app.middleware.rate_limit import limiter
 from app.db.base import get_db
 from app.models.audit_log import AuditLog
 from app.models.election import Candidate, Category, Election, VoterOTP
@@ -108,6 +109,8 @@ async def _resolve_category_and_parent(db: AsyncSession, category_id: UUID):
 
 
 def _assert_open_for_voting(parent, parent_kind: str) -> None:
+    """Raise 400/403 unless this election/event is currently open to
+    public (unauthenticated) voting."""
     now = datetime.now(timezone.utc)
     if parent_kind == "election":
         if not (parent.visibility == "public" and not parent.require_verification):
@@ -137,12 +140,15 @@ def _assert_open_for_voting(parent, parent_kind: str) -> None:
 
 
 @router.post("/cast", response_model=VoteReceiptResponse, status_code=201)
+@limiter.limit(settings.RATE_LIMIT_VOTING)
 async def cast_vote(
     data: CastVote,
     request: Request,
     current_user: User = Depends(get_current_active_user),
     db: AsyncSession = Depends(get_db),
 ):
+    """Cast an authenticated vote (eligibility/voting-window enforced in
+    VotingService.cast_vote)."""
     service = _get_voting_service(db)
     return await service.cast_vote(
         user_id=current_user.user_id,
@@ -158,6 +164,7 @@ async def get_ballot(
     current_user: User = Depends(get_current_active_user),
     db: AsyncSession = Depends(get_db),
 ):
+    """Categories + candidates for an authenticated voter's ballot."""
     service = _get_voting_service(db)
     return await service.get_ballot(current_user.user_id, election_id)
 
@@ -168,6 +175,7 @@ async def get_receipt(
     current_user: User = Depends(get_current_active_user),
     db: AsyncSession = Depends(get_db),
 ):
+    """The signed-in voter's receipt for a vote already cast in this election."""
     service = _get_voting_service(db)
     return await service.get_receipt(current_user.user_id, election_id)
 
@@ -178,6 +186,7 @@ async def get_live_results(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_active_user),
 ):
+    """In-progress tallies for any election status."""
     service = _get_voting_service(db)
     return await service.get_live_results(election_id)
 
@@ -188,6 +197,7 @@ async def get_results(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_active_user),
 ):
+    """Final tallies — only available once the election has ended."""
     service = _get_voting_service(db)
     return await service.get_results(election_id)
 
@@ -233,6 +243,7 @@ async def get_public_event_ballot(
 
 
 @router.post("/public/cast", response_model=VoteReceiptResponse, status_code=201)
+@limiter.limit(settings.RATE_LIMIT_VOTING)
 async def cast_public_vote(
     data: CastVote,
     request: Request,
@@ -287,8 +298,10 @@ async def cast_public_vote(
 
 
 @router.post("/public/request-vote-otp", status_code=200)
+@limiter.limit(settings.RATE_LIMIT_VOTING)
 async def request_vote_otp(
     data: RequestVoteOTP,
+    request: Request,
     db: AsyncSession = Depends(get_db),
 ):
     """
@@ -339,8 +352,10 @@ async def request_vote_otp(
 
 
 @router.post("/public/verify-vote-otp-and-cast", response_model=VoteReceiptResponse, status_code=201)
+@limiter.limit(settings.RATE_LIMIT_VOTING)
 async def verify_vote_otp_and_cast(
     data: VerifyVoteOTPAndCast,
+    request: Request,
     db: AsyncSession = Depends(get_db),
 ):
     """Step 2 — verify the emailed code and cast the vote, hashed on the
@@ -404,6 +419,7 @@ async def verify_vote_otp_and_cast(
 
 
 @router.post("/public/initiate-payment", response_model=VotePaymentInitResponse, status_code=201)
+@limiter.limit(settings.RATE_LIMIT_VOTING)
 async def initiate_public_vote_payment(
     data: InitiateVotePaymentRequest,
     request: Request,
@@ -498,8 +514,10 @@ async def initiate_public_vote_payment(
 
 
 @router.post("/public/verify-and-cast", response_model=VoteReceiptResponse, status_code=201)
+@limiter.limit(settings.RATE_LIMIT_VOTING)
 async def verify_and_cast_public_vote(
     data: VerifyAndCastRequest,
+    request: Request,
     db: AsyncSession = Depends(get_db),
 ):
     """

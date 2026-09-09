@@ -10,6 +10,7 @@ celery_app = Celery(
         "app.tasks.email_tasks",
         "app.tasks.vote_tally_tasks",
         "app.tasks.ticket_tasks",
+        "app.tasks.auth_tasks",
     ],
 )
 
@@ -32,5 +33,9 @@ celery_app.conf.beat_schedule = {
     "check-expired-tickets": {
         "task": "app.tasks.ticket_tasks.check_expired_tickets",
         "schedule": 3600.0,
+    },
+    "prune-expired-refresh-tokens": {
+        "task": "app.tasks.auth_tasks.prune_expired_refresh_tokens",
+        "schedule": 86400.0,
     },
 }

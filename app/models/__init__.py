@@ -10,6 +10,7 @@ from app.models.transaction import Transaction
 from app.models.platform_setting import PlatformSetting
 from app.models.waitlist import WaitlistSubscriber
 from app.models.payout_request import PayoutRequest
+from app.models.refresh_token import RefreshToken
 
 __all__ = [
     "User",
@@ -33,4 +34,5 @@ __all__ = [
     "PlatformSetting",
     "WaitlistSubscriber",
     "PayoutRequest",
+    "RefreshToken",
 ]

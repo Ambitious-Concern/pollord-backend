@@ -75,6 +75,12 @@ async def db_session() -> AsyncGenerator[AsyncSession, None]:
 @pytest_asyncio.fixture
 async def client(db_session: AsyncSession) -> AsyncGenerator[AsyncClient, None]:
     from app.main import app
+    from app.middleware.rate_limit import limiter
+
+    # slowapi's storage is process-global and persists across tests since
+    # they all share one client IP (127.0.0.1) — without resetting, tests
+    # later in a file trip rate limits meant for real abusive traffic.
+    limiter.reset()
 
     async def override_get_db():
         try:

@@ -1,11 +1,11 @@
 import logging
-import random
-import string
+import secrets
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 from uuid import UUID
 
 from fastapi import HTTPException, status
+from sqlalchemy import select
 
 from app.core.config import settings
 from app.core.security import (
@@ -18,6 +18,7 @@ from app.core.security import (
     verify_password,
 )
 from app.models.audit_log import AuditLog
+from app.models.refresh_token import RefreshToken
 from app.models.user import User
 from app.repositories.audit_log_repository import AuditLogRepository
 from app.repositories.user_repository import UserRepository
@@ -27,16 +28,23 @@ from app.schemas.user import (
     UserLogin,
     UserResponse,
 )
-from app.services.email_service import send_email, welcome_email, otp_email, password_reset_email
+from app.services.email_service import welcome_email, otp_email
+from app.tasks.email_tasks import send_email_task, send_password_reset_email
 
 logger = logging.getLogger(__name__)
 
+MAX_FAILED_LOGIN_ATTEMPTS = 5
+LOCKOUT_DURATION = timedelta(minutes=15)
+
 
 def _generate_otp(length: int = 6) -> str:
-    return "".join(random.choices(string.digits, k=length))
+    return "".join(secrets.choice("0123456789") for _ in range(length))
 
 
 class AuthService:
+    """Registration, login/logout, password reset, and OTP email
+    verification — everything behind /api/v1/auth."""
+
     def __init__(
         self,
         user_repo: UserRepository,
@@ -45,12 +53,30 @@ class AuthService:
         self.user_repo = user_repo
         self.audit_repo = audit_repo
 
+    async def _issue_tokens(self, user: User) -> TokenResponse:
+        """Creates a fresh access+refresh pair and records the refresh
+        token's jti so refresh_token() can enforce single-use rotation."""
+        access_token = create_access_token(str(user.user_id), user.token_version)
+        refresh_token = create_refresh_token(str(user.user_id), user.token_version)
+        payload = decode_token(refresh_token)
+        self.user_repo.session.add(
+            RefreshToken(
+                jti=payload["jti"],
+                user_id=user.user_id,
+                expires_at=datetime.fromtimestamp(payload["exp"], tz=timezone.utc),
+            )
+        )
+        await self.user_repo.session.flush()
+        return TokenResponse(access_token=access_token, refresh_token=refresh_token)
+
     async def register(
         self,
         data: UserCreate,
         ip: Optional[str] = None,
         user_agent: Optional[str] = None,
     ) -> UserResponse:
+        """Create an account, send a verification OTP, and return the new
+        user (email_verified=False until verify_otp succeeds)."""
         existing = await self.user_repo.get_by_email(data.email)
         if existing:
             raise HTTPException(
@@ -71,7 +97,6 @@ class AuthService:
         # Election Administrator and Event Organizer are granted when the user creates an organization
         await self.user_repo.grant_roles_by_name(user.user_id, ["Voter", "Event Attendee"])
 
-        # Generate OTP for email verification
         otp = _generate_otp()
         user.otp_code = otp
         user.otp_expires_at = datetime.now(timezone.utc) + timedelta(
@@ -79,15 +104,13 @@ class AuthService:
         )
         await self.user_repo.session.flush()
 
-        # Send welcome email
+        # Async via Celery so registration doesn't block on SMTP.
         subject, html = welcome_email(data.full_name)
-        send_email(data.email, subject, html)
+        send_email_task.delay(data.email, subject, html)
 
-        # Send OTP email
         otp_subject, otp_html = otp_email(data.full_name, otp)
-        send_email(data.email, otp_subject, otp_html)
+        send_email_task.delay(data.email, otp_subject, otp_html)
 
-        # Audit log
         await self.audit_repo.log_action(
             action_type="REGISTER",
             entity_type="User",
@@ -97,7 +120,6 @@ class AuthService:
             user_agent=user_agent,
         )
 
-        # Reload user with roles
         user = await self.user_repo.get_with_roles(user.user_id)
         return self._to_response(user)
 
@@ -140,7 +162,7 @@ class AuthService:
         await self.user_repo.session.flush()
 
         subject, html = otp_email(user.full_name, otp)
-        send_email(email, subject, html)
+        send_email_task.delay(email, subject, html)
 
         return {"message": "OTP sent"}
 
@@ -150,8 +172,23 @@ class AuthService:
         ip: Optional[str] = None,
         user_agent: Optional[str] = None,
     ) -> TokenResponse:
+        """Verify credentials and issue an access+refresh pair. Locks the
+        account for LOCKOUT_DURATION after MAX_FAILED_LOGIN_ATTEMPTS
+        consecutive failures."""
         user = await self.user_repo.get_by_email(data.email)
+
+        if user and user.locked_until and user.locked_until > datetime.now(timezone.utc):
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Account temporarily locked due to repeated failed logins. Try again later.",
+            )
+
         if not user or not verify_password(data.password, user.password_hash):
+            if user:
+                user.failed_login_attempts += 1
+                if user.failed_login_attempts >= MAX_FAILED_LOGIN_ATTEMPTS:
+                    user.locked_until = datetime.now(timezone.utc) + LOCKOUT_DURATION
+                await self.user_repo.session.flush()
             await self.audit_repo.log_action(
                 action_type="LOGIN_FAILED",
                 entity_type="User",
@@ -176,8 +213,11 @@ class AuthService:
                 detail="Account is not active",
             )
 
-        access_token = create_access_token(str(user.user_id))
-        refresh_token = create_refresh_token(str(user.user_id))
+        user.failed_login_attempts = 0
+        user.locked_until = None
+        await self.user_repo.session.flush()
+
+        tokens = await self._issue_tokens(user)
 
         await self.user_repo.update_last_login(user.user_id)
 
@@ -190,12 +230,14 @@ class AuthService:
             user_agent=user_agent,
         )
 
-        return TokenResponse(
-            access_token=access_token,
-            refresh_token=refresh_token,
-        )
+        return tokens
 
     async def refresh_token(self, refresh_token: str) -> TokenResponse:
+        """Redeem a refresh token for a new access+refresh pair. Single-use:
+        the presented token is revoked here regardless of outcome, so
+        replaying it (e.g. a stolen copy used after the legitimate client
+        already rotated) is rejected and treated as a signal to kill every
+        session for the user."""
         payload = decode_token(refresh_token)
         if payload is None or payload.get("type") != "refresh":
             raise HTTPException(
@@ -211,15 +253,77 @@ class AuthService:
                 detail="Invalid refresh token",
             )
 
-        access_token = create_access_token(str(user.user_id))
-        new_refresh_token = create_refresh_token(str(user.user_id))
+        if payload.get("ver", 0) != user.token_version:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Invalid refresh token",
+            )
 
-        return TokenResponse(
-            access_token=access_token,
-            refresh_token=new_refresh_token,
-        )
+        jti = payload.get("jti")
+        if jti:
+            result = await self.user_repo.session.execute(
+                select(RefreshToken).where(RefreshToken.jti == jti)
+            )
+            token_row = result.scalar_one_or_none()
+
+            if token_row is None or token_row.revoked:
+                # Signature is valid but the token was never issued via this
+                # flow (pre-rotation token) or has already been rotated once
+                # before — a second use of an already-rotated token is a
+                # strong signal of theft/replay. Kill every session for this
+                # user rather than just denying this one request.
+                if token_row is not None:
+                    user.token_version += 1
+                    await self.user_repo.session.flush()
+                raise HTTPException(
+                    status_code=status.HTTP_401_UNAUTHORIZED,
+                    detail="Invalid refresh token",
+                )
+
+            if token_row.expires_at < datetime.now(timezone.utc):
+                raise HTTPException(
+                    status_code=status.HTTP_401_UNAUTHORIZED,
+                    detail="Invalid refresh token",
+                )
+
+            token_row.revoked = True
+            await self.user_repo.session.flush()
+
+        return await self._issue_tokens(user)
+
+    async def logout(self, refresh_token: str) -> None:
+        """Bumps token_version so every access/refresh token issued so far —
+        across every device, not just the caller's — stops validating.
+        There's no per-session table, so this is deliberately all-or-nothing."""
+        payload = decode_token(refresh_token)
+        if payload is None or payload.get("type") != "refresh":
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Invalid refresh token",
+            )
+
+        user_id = payload.get("sub")
+        user = await self.user_repo.get_by_id(UUID(user_id), id_field="user_id")
+        if not user:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Invalid refresh token",
+            )
+
+        jti = payload.get("jti")
+        if jti:
+            result = await self.user_repo.session.execute(
+                select(RefreshToken).where(RefreshToken.jti == jti)
+            )
+            token_row = result.scalar_one_or_none()
+            if token_row:
+                token_row.revoked = True
+
+        user.token_version += 1
+        await self.user_repo.session.flush()
 
     async def verify_email(self, token: str) -> None:
+        """Consume a create_email_verification_token link."""
         payload = decode_token(token)
         if payload is None or payload.get("type") != "email_verify":
             raise HTTPException(
@@ -236,14 +340,17 @@ class AuthService:
         await self.user_repo.session.flush()
 
     async def forgot_password(self, email: str) -> None:
+        """Silently no-ops for unknown emails (anti-enumeration) — the
+        caller always returns the same generic response either way."""
         user = await self.user_repo.get_by_email(email)
         if user:
             token = create_password_reset_token(str(user.user_id))
-            reset_link = f"{settings.FRONTEND_URL}/reset-password?token={token}"
-            subject, html = password_reset_email(user.full_name, reset_link)
-            send_email(email, subject, html)
+            send_password_reset_email.delay(email, token)
 
     async def reset_password(self, token: str, new_password: str) -> None:
+        """Consume a create_password_reset_token link. Bumps token_version
+        to kill every existing session, since a leaked old password is the
+        usual reason someone resets it."""
         payload = decode_token(token)
         if payload is None or payload.get("type") != "password_reset":
             raise HTTPException(
@@ -257,17 +364,21 @@ class AuthService:
             raise HTTPException(status_code=404, detail="User not found")
 
         user.password_hash = hash_password(new_password)
+        user.token_version += 1
         await self.user_repo.session.flush()
 
     async def change_password(
         self, user: User, current_password: str, new_password: str
     ) -> None:
+        """Authenticated password change; also bumps token_version (see
+        reset_password)."""
         if not verify_password(current_password, user.password_hash):
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail="Current password is incorrect",
             )
         user.password_hash = hash_password(new_password)
+        user.token_version += 1
         await self.user_repo.session.flush()
 
     @staticmethod

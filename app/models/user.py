@@ -2,7 +2,7 @@ import uuid
 from datetime import datetime
 from typing import TYPE_CHECKING, List, Optional
 
-from sqlalchemy import Boolean, DateTime, ForeignKey, JSON, String, func
+from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, JSON, String, func
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -17,6 +17,8 @@ if TYPE_CHECKING:
 
 
 class User(TimestampMixin, Base):
+    """An account. Roles are assigned via UserRole, not stored directly here."""
+
     __tablename__ = "users"
 
     user_id: Mapped[uuid.UUID] = mapped_column(
@@ -37,6 +39,15 @@ class User(TimestampMixin, Base):
     )
     otp_code: Mapped[Optional[str]] = mapped_column(String(6), nullable=True)
     otp_expires_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    # Bumped on logout/password-change/reset to invalidate every access &
+    # refresh token issued before the bump — checked against the token's
+    # "ver" claim on every authenticated request. All-or-nothing across
+    # devices since there's no per-session tracking table.
+    token_version: Mapped[int] = mapped_column(Integer, default=0, server_default="0", nullable=False)
+    failed_login_attempts: Mapped[int] = mapped_column(Integer, default=0, server_default="0", nullable=False)
+    locked_until: Mapped[Optional[datetime]] = mapped_column(
         DateTime(timezone=True), nullable=True
     )
 
@@ -70,6 +81,8 @@ class User(TimestampMixin, Base):
 
 
 class Role(TimestampMixin, Base):
+    """A named permission set (e.g. "System Administrator", "Voter")."""
+
     __tablename__ = "roles"
 
     role_id: Mapped[uuid.UUID] = mapped_column(
@@ -85,6 +98,8 @@ class Role(TimestampMixin, Base):
 
 
 class UserRole(Base):
+    """Join table granting a Role to a User."""
+
     __tablename__ = "user_roles"
 
     user_id: Mapped[uuid.UUID] = mapped_column(

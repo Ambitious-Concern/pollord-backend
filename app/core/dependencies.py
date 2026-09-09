@@ -17,6 +17,9 @@ async def get_current_user(
     credentials: HTTPAuthorizationCredentials = Depends(bearer_scheme),
     db: AsyncSession = Depends(get_db),
 ) -> User:
+    """FastAPI dependency: resolves the bearer token to a User, or raises
+    401. Any authenticated endpoint depends on this (directly or via
+    get_current_active_user / require_roles)."""
     token = credentials.credentials
     credentials_exception = HTTPException(
         status_code=status.HTTP_401_UNAUTHORIZED,
@@ -40,12 +43,18 @@ async def get_current_user(
     if user is None:
         raise credentials_exception
 
+    # Tokens issued before a logout/password change carry a stale "ver"
+    # claim and must be rejected even though the signature is still valid.
+    if payload.get("ver", 0) != user.token_version:
+        raise credentials_exception
+
     return user
 
 
 async def get_current_active_user(
     current_user: User = Depends(get_current_user),
 ) -> User:
+    """Same as get_current_user, plus rejects suspended/deactivated accounts."""
     if current_user.account_status != "active":
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
@@ -55,6 +64,9 @@ async def get_current_active_user(
 
 
 def require_roles(*roles: str):
+    """Dependency factory: require_roles("Admin", "Organizer") builds a
+    dependency that 403s unless the user has at least one of those roles."""
+
     async def role_checker(
         current_user: User = Depends(get_current_active_user),
     ) -> User:

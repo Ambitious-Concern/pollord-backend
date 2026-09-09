@@ -15,37 +15,60 @@ from app.core.config import settings
 
 # Password hashing (using bcrypt directly for Python 3.13 compatibility)
 def hash_password(password: str) -> str:
+    """Hash a plaintext password with a fresh bcrypt salt."""
     salt = _bcrypt.gensalt(rounds=settings.BCRYPT_ROUNDS)
     return _bcrypt.hashpw(password.encode(), salt).decode()
 
 
 def verify_password(plain_password: str, hashed_password: str) -> bool:
+    """Check a plaintext password against a bcrypt hash from hash_password."""
     return _bcrypt.checkpw(plain_password.encode(), hashed_password.encode())
 
 
 # JWT token management
 def create_access_token(
-    subject: str, expires_delta: Optional[timedelta] = None
+    subject: str, token_version: int = 0, expires_delta: Optional[timedelta] = None
 ) -> str:
+    """Short-lived token for authenticating requests. token_version must
+    match the user's current User.token_version (checked in
+    dependencies.get_current_user) or it's rejected even if unexpired —
+    that's what makes logout/password-change able to kill sessions."""
     if expires_delta:
         expire = datetime.now(timezone.utc) + expires_delta
     else:
         expire = datetime.now(timezone.utc) + timedelta(
             minutes=settings.ACCESS_TOKEN_EXPIRE_MINUTES
         )
-    to_encode = {"sub": subject, "exp": expire, "type": "access"}
+    to_encode = {
+        "sub": subject,
+        "exp": expire,
+        "type": "access",
+        "ver": token_version,
+        "jti": secrets.token_urlsafe(16),
+    }
     return jwt.encode(to_encode, settings.JWT_SECRET_KEY, algorithm=settings.JWT_ALGORITHM)
 
 
-def create_refresh_token(subject: str) -> str:
+def create_refresh_token(subject: str, token_version: int = 0) -> str:
+    """Long-lived token used only to mint new access tokens. Single-use in
+    practice — auth_service.refresh_token() revokes each one's jti (tracked
+    in the refresh_tokens table) as soon as it's redeemed."""
     expire = datetime.now(timezone.utc) + timedelta(
         days=settings.REFRESH_TOKEN_EXPIRE_DAYS
     )
-    to_encode = {"sub": subject, "exp": expire, "type": "refresh"}
+    to_encode = {
+        "sub": subject,
+        "exp": expire,
+        "type": "refresh",
+        "ver": token_version,
+        "jti": secrets.token_urlsafe(16),
+    }
     return jwt.encode(to_encode, settings.JWT_SECRET_KEY, algorithm=settings.JWT_ALGORITHM)
 
 
 def decode_token(token: str) -> dict:
+    """Verify signature + expiry and return the claims, or None if invalid
+    for any reason (expired, wrong signature, malformed)."""
     try:
         payload = jwt.decode(
             token, settings.JWT_SECRET_KEY, algorithms=[settings.JWT_ALGORITHM]
@@ -56,12 +79,14 @@ def decode_token(token: str) -> dict:
 
 
 def create_email_verification_token(user_id: str) -> str:
+    """Link-based email verification token, valid 24h."""
     expire = datetime.now(timezone.utc) + timedelta(hours=24)
     to_encode = {"sub": user_id, "exp": expire, "type": "email_verify"}
     return jwt.encode(to_encode, settings.JWT_SECRET_KEY, algorithm=settings.JWT_ALGORITHM)
 
 
 def create_password_reset_token(user_id: str) -> str:
+    """Password reset link token, valid 1h."""
     expire = datetime.now(timezone.utc) + timedelta(hours=1)
     to_encode = {"sub": user_id, "exp": expire, "type": "password_reset"}
     return jwt.encode(to_encode, settings.JWT_SECRET_KEY, algorithm=settings.JWT_ALGORITHM)
@@ -103,6 +128,8 @@ def create_ticket_scan_token(event_id: str, expire: datetime) -> str:
 
 # Vote encryption (AES-256-GCM)
 def _get_aes_key() -> bytes:
+    """Normalize AES_ENCRYPTION_KEY to 32 bytes regardless of whether it was
+    configured as a raw string, a 64-char hex string, or something shorter."""
     key = settings.AES_ENCRYPTION_KEY
     if len(key) < 32:
         key = hashlib.sha256(key.encode()).digest()
@@ -112,6 +139,7 @@ def _get_aes_key() -> bytes:
 
 
 def encrypt_vote(vote_data: dict) -> bytes:
+    """Encrypt a vote payload; output is nonce || ciphertext, ready to store."""
     key = _get_aes_key()
     aesgcm = AESGCM(key)
     nonce = secrets.token_bytes(12)
@@ -121,6 +149,7 @@ def encrypt_vote(vote_data: dict) -> bytes:
 
 
 def decrypt_vote(encrypted: bytes) -> dict:
+    """Inverse of encrypt_vote."""
     key = _get_aes_key()
     aesgcm = AESGCM(key)
     nonce = encrypted[:12]
@@ -134,6 +163,7 @@ def decrypt_vote(encrypted: bytes) -> dict:
 # category — the same person voting in two categories of the same election
 # produces two different hashes instead of colliding on uq_vote_per_category.
 def generate_voter_hash(user_id: UUID, category_id: UUID) -> str:
+    """Voter hash for authenticated (logged-in) voters."""
     message = f"{user_id}{category_id}"
     return hmac.new(
         settings.HMAC_SECRET_KEY.encode(),
@@ -187,6 +217,8 @@ def generate_ussd_voter_hash(phone: str, category_id: UUID) -> str:
 
 # Vote signing
 def sign_vote(vote_data: bytes, cast_at: str) -> str:
+    """HMAC over the encrypted vote + cast timestamp, so tampering with
+    either the stored ciphertext or its recorded time is detectable."""
     message = vote_data + cast_at.encode()
     return hmac.new(
         settings.HMAC_SECRET_KEY.encode(),
@@ -196,10 +228,12 @@ def sign_vote(vote_data: bytes, cast_at: str) -> str:
 
 
 def verify_vote_signature(vote_data: bytes, cast_at: str, signature: str) -> bool:
+    """Constant-time check of a signature produced by sign_vote."""
     expected = sign_vote(vote_data, cast_at)
     return hmac.compare_digest(expected, signature)
 
 
 # Secure token generation
 def generate_secure_token(length: int = 32) -> str:
+    """General-purpose random token (e.g. one-off secrets, IDs)."""
     return secrets.token_urlsafe(length)
