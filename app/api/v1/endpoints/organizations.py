@@ -9,12 +9,15 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
 from app.core.dependencies import get_current_active_user
+from app.core.security import hash_password
 from app.db.base import get_db
+from app.models.audit_log import AuditLog
 from app.models.election import Election
 from app.models.event import Event
 from app.models.organization import Organization, OrganizationMember
 from app.models.user import User
 from app.models.vote import Vote
+from app.repositories.audit_log_repository import AuditLogRepository
 from app.repositories.election_repository import ElectionRepository
 from app.repositories.event_repository import EventRepository
 from app.repositories.organization_repository import OrganizationRepository
@@ -22,6 +25,7 @@ from app.repositories.user_repository import UserRepository
 from app.repositories.vote_repository import VoteRepository
 from app.schemas.organization import (
     AcceptInvitationRequest,
+    AcceptInvitationSignupRequest,
     OrganizationCreate,
     OrganizationInvitationResponse,
     OrganizationMemberAdd,
@@ -30,7 +34,9 @@ from app.schemas.organization import (
     OrganizationResponse,
     OrganizationUpdate,
 )
+from app.schemas.user import TokenResponse
 from app.services import email_service
+from app.services.auth_service import AuthService
 from app.services.file_storage_service import file_storage_service
 
 # System roles granted to org owners and admins so they can create elections/events
@@ -497,6 +503,71 @@ async def get_invitation(
 
 
 # --- Accept invitation (requires auth — user must be logged in / just signed up) ---
+
+
+@router.post(
+    "/invitations/accept-with-signup",
+    response_model=TokenResponse,
+    status_code=201,
+)
+async def accept_invitation_with_signup(
+    data: AcceptInvitationSignupRequest,
+    db: AsyncSession = Depends(get_db),
+):
+    """Create an account from an invitation and join, in one step.
+
+    Unauthenticated by design: the invitation token is the credential. It was
+    emailed to the address it carries, so possession of it proves control of
+    that inbox — which is why the account is created email_verified and skips
+    the OTP the normal signup path uses. The invitee supplies only a name and
+    a password; the email comes from the invitation.
+    """
+    repo = OrganizationRepository(Organization, db)
+    inv = await repo.get_invitation_by_token(data.token)
+    if not inv:
+        raise HTTPException(status_code=404, detail="Invitation not found or already used")
+    if inv.status != "pending":
+        raise HTTPException(status_code=410, detail="Invitation has already been used or expired")
+    if inv.expires_at < datetime.now(timezone.utc):
+        raise HTTPException(status_code=410, detail="Invitation has expired")
+
+    user_repo = UserRepository(User, db)
+    if await user_repo.get_by_email(inv.email):
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "An account already exists for this email. Sign in, then open "
+                "the invitation link again to join."
+            ),
+        )
+
+    user = await user_repo.create(
+        {
+            "email": inv.email,
+            "password_hash": hash_password(data.password),
+            "full_name": data.full_name,
+            "email_verified": True,
+        }
+    )
+    await user_repo.grant_roles_by_name(
+        user.user_id, ["Voter", "Event Attendee", *ORG_MEMBER_SYSTEM_ROLES]
+    )
+
+    await repo.add_member(
+        org_id=inv.org_id,
+        user_id=user.user_id,
+        role=inv.role,
+        invited_by=inv.invited_by,
+    )
+    await repo.accept_invitation(inv.invitation_id)
+
+    # Reuse the login path's token issuing so the refresh token's jti is
+    # recorded and single-use rotation works the same as a normal sign-in.
+    auth_service = AuthService(
+        user_repo=user_repo,
+        audit_repo=AuditLogRepository(AuditLog, db),
+    )
+    return await auth_service._issue_tokens(user)
 
 
 @router.post("/invitations/accept", response_model=OrganizationMemberResponse)

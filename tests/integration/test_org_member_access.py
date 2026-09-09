@@ -361,3 +361,158 @@ class TestRoleChangesKeepViewAccess:
         )
 
         assert set(VIEW_ROLES) <= await _role_names(db_session, u["user"].user_id)
+
+
+@pytest.mark.asyncio
+class TestAcceptWithSignup:
+    """Joining from an invitation email needs a name and a password. Nothing else.
+
+    The old flow bounced the invitee to the full signup page with their email
+    pre-filled, so they retyped an address we already knew and verified it by
+    OTP, then came back to click Join. The token already proves control of
+    that inbox, so both steps are redundant.
+    """
+
+    async def test_creates_the_account_and_joins_in_one_call(
+        self, client: AsyncClient, db_session: AsyncSession, org_with_work
+    ):
+        email = f"new-{uuid4().hex[:6]}@example.com"
+        inv = await _invitation(
+            db_session, org_with_work["org"], email, "editor", org_with_work["owner"]
+        )
+
+        response = await client.post(
+            "/api/v1/organizations/invitations/accept-with-signup",
+            json={"token": inv.token, "full_name": "Ada Lovelace", "password": "Passw0rd!"},
+        )
+        assert response.status_code in (200, 201), response.text
+        body = response.json()
+
+        # Signed in immediately — no second login step.
+        assert body["access_token"]
+        assert body["refresh_token"]
+
+        result = await db_session.execute(select(User).where(User.email == email))
+        user = result.scalar_one()
+        assert user.full_name == "Ada Lovelace"
+        # The emailed link already proved they control this inbox.
+        assert user.email_verified is True
+
+    async def test_grants_membership_with_the_invited_role(
+        self, client: AsyncClient, db_session: AsyncSession, org_with_work
+    ):
+        email = f"ed-{uuid4().hex[:6]}@example.com"
+        inv = await _invitation(
+            db_session, org_with_work["org"], email, "editor", org_with_work["owner"]
+        )
+
+        await client.post(
+            "/api/v1/organizations/invitations/accept-with-signup",
+            json={"token": inv.token, "full_name": "Ed Member", "password": "Passw0rd!"},
+        )
+
+        user = (
+            await db_session.execute(select(User).where(User.email == email))
+        ).scalar_one()
+        member = (
+            await db_session.execute(
+                select(OrganizationMember).where(
+                    OrganizationMember.user_id == user.user_id
+                )
+            )
+        ).scalar_one()
+        assert member.role == "editor"
+        assert member.org_id == org_with_work["org"].org_id
+        assert set(VIEW_ROLES) <= await _role_names(db_session, user.user_id)
+
+    async def test_new_member_immediately_sees_existing_org_work(
+        self, client: AsyncClient, db_session: AsyncSession, org_with_work
+    ):
+        """The whole point: log in and the organization's work is already there."""
+        email = f"see-{uuid4().hex[:6]}@example.com"
+        inv = await _invitation(
+            db_session, org_with_work["org"], email, "member", org_with_work["owner"]
+        )
+
+        tokens = (
+            await client.post(
+                "/api/v1/organizations/invitations/accept-with-signup",
+                json={"token": inv.token, "full_name": "Seer", "password": "Passw0rd!"},
+            )
+        ).json()
+        headers = {"Authorization": f"Bearer {tokens['access_token']}"}
+
+        elections = await client.get("/api/v1/elections", headers=headers)
+        assert elections.status_code == 200, elections.text
+        assert "Existing Election" in [e["title"] for e in elections.json()]
+
+    async def test_token_cannot_be_reused(
+        self, client: AsyncClient, db_session: AsyncSession, org_with_work
+    ):
+        inv = await _invitation(
+            db_session, org_with_work["org"], f"once-{uuid4().hex[:6]}@example.com",
+            "member", org_with_work["owner"],
+        )
+        payload = {"token": inv.token, "full_name": "Once", "password": "Passw0rd!"}
+
+        first = await client.post(
+            "/api/v1/organizations/invitations/accept-with-signup", json=payload
+        )
+        assert first.status_code in (200, 201)
+
+        second = await client.post(
+            "/api/v1/organizations/invitations/accept-with-signup", json=payload
+        )
+        assert second.status_code == 410, second.text
+
+    async def test_unknown_token_is_rejected(self, client: AsyncClient):
+        response = await client.post(
+            "/api/v1/organizations/invitations/accept-with-signup",
+            json={"token": uuid4().hex, "full_name": "Nobody", "password": "Passw0rd!"},
+        )
+        assert response.status_code == 404, response.text
+
+    async def test_expired_invitation_is_rejected(
+        self, client: AsyncClient, db_session: AsyncSession, org_with_work
+    ):
+        inv = await _invitation(
+            db_session, org_with_work["org"], f"exp-{uuid4().hex[:6]}@example.com",
+            "member", org_with_work["owner"],
+        )
+        inv.expires_at = datetime.now(timezone.utc) - timedelta(days=1)
+        await db_session.flush()
+
+        response = await client.post(
+            "/api/v1/organizations/invitations/accept-with-signup",
+            json={"token": inv.token, "full_name": "Late", "password": "Passw0rd!"},
+        )
+        assert response.status_code == 410, response.text
+
+    async def test_existing_account_is_told_to_sign_in(
+        self, client: AsyncClient, db_session: AsyncSession, org_with_work
+    ):
+        """Signing up would clobber a real account, so refuse and say why."""
+        existing = await _make_user(db_session, f"dup-{uuid4().hex[:6]}@example.com")
+        inv = await _invitation(
+            db_session, org_with_work["org"], existing["user"].email,
+            "member", org_with_work["owner"],
+        )
+
+        response = await client.post(
+            "/api/v1/organizations/invitations/accept-with-signup",
+            json={"token": inv.token, "full_name": "Dupe", "password": "Passw0rd!"},
+        )
+        assert response.status_code == 409, response.text
+
+    async def test_weak_password_is_rejected(
+        self, client: AsyncClient, db_session: AsyncSession, org_with_work
+    ):
+        inv = await _invitation(
+            db_session, org_with_work["org"], f"weak-{uuid4().hex[:6]}@example.com",
+            "member", org_with_work["owner"],
+        )
+        response = await client.post(
+            "/api/v1/organizations/invitations/accept-with-signup",
+            json={"token": inv.token, "full_name": "Weak", "password": "abc"},
+        )
+        assert response.status_code == 422, response.text
