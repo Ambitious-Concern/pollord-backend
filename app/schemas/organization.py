@@ -2,7 +2,9 @@ from datetime import datetime
 from typing import List, Optional
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, EmailStr, field_validator
+from pydantic import BaseModel, ConfigDict, EmailStr, Field, field_validator
+
+from app.schemas.user import _validate_password_strength
 
 
 class OrganizationCreate(BaseModel):
@@ -102,3 +104,20 @@ class OrganizationInvitationResponse(BaseModel):
 
 class AcceptInvitationRequest(BaseModel):
     token: str
+
+
+class AcceptInvitationSignupRequest(BaseModel):
+    """Joining from an invitation email: name and password, nothing else.
+
+    The email is taken from the invitation, so the invitee never retypes an
+    address we already know and have proven they control.
+    """
+
+    token: str
+    full_name: str = Field(min_length=1, max_length=255)
+    password: str
+
+    @field_validator("password")
+    @classmethod
+    def validate_password(cls, v: str) -> str:
+        return _validate_password_strength(v)

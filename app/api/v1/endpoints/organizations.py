@@ -9,12 +9,15 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
 from app.core.dependencies import get_current_active_user
+from app.core.security import hash_password
 from app.db.base import get_db
+from app.models.audit_log import AuditLog
 from app.models.election import Election
 from app.models.event import Event
 from app.models.organization import Organization, OrganizationMember
 from app.models.user import User
 from app.models.vote import Vote
+from app.repositories.audit_log_repository import AuditLogRepository
 from app.repositories.election_repository import ElectionRepository
 from app.repositories.event_repository import EventRepository
 from app.repositories.organization_repository import OrganizationRepository
@@ -22,6 +25,7 @@ from app.repositories.user_repository import UserRepository
 from app.repositories.vote_repository import VoteRepository
 from app.schemas.organization import (
     AcceptInvitationRequest,
+    AcceptInvitationSignupRequest,
     OrganizationCreate,
     OrganizationInvitationResponse,
     OrganizationMemberAdd,
@@ -30,11 +34,16 @@ from app.schemas.organization import (
     OrganizationResponse,
     OrganizationUpdate,
 )
+from app.schemas.user import TokenResponse
 from app.services import email_service
+from app.services.auth_service import AuthService
 from app.services.file_storage_service import file_storage_service
 
 # System roles granted to org owners and admins so they can create elections/events
-ORG_ADMIN_SYSTEM_ROLES = ["Election Administrator", "Event Organizer"]
+# The organizer app gates its whole dashboard on these, so every member
+# needs them just to see the organization's work. Write access is a separate
+# question, answered by OrganizationRepository.MANAGING_ROLES.
+ORG_MEMBER_SYSTEM_ROLES = ["Election Administrator", "Event Organizer"]
 
 
 from pydantic import field_validator as _fv
@@ -148,7 +157,7 @@ async def create_organization(
 
     # Grant system roles so the owner can create elections and events
     user_repo = UserRepository(User, db)
-    await user_repo.grant_roles_by_name(current_user.user_id, ORG_ADMIN_SYSTEM_ROLES)
+    await user_repo.grant_roles_by_name(current_user.user_id, ORG_MEMBER_SYSTEM_ROLES)
 
     org = await repo.get_with_members(org.org_id)
     return _org_to_response(org)
@@ -355,10 +364,9 @@ async def add_member(
         invited_by=current_user.user_id,
     )
 
-    # Grant system roles to admins so they can create elections/events
-    if data.role == "admin":
-        user_repo = UserRepository(User, db)
-        await user_repo.grant_roles_by_name(data.user_id, ORG_ADMIN_SYSTEM_ROLES)
+    # Every member needs these to reach the organizer dashboard at all.
+    user_repo = UserRepository(User, db)
+    await user_repo.grant_roles_by_name(data.user_id, ORG_MEMBER_SYSTEM_ROLES)
 
     return OrganizationMemberResponse(
         member_id=new_member.member_id,
@@ -412,7 +420,7 @@ async def invite_member_by_email(
             invited_by=current_user.user_id,
         )
         if data.role == "admin":
-            await user_repo.grant_roles_by_name(target.user_id, ORG_ADMIN_SYSTEM_ROLES)
+            await user_repo.grant_roles_by_name(target.user_id, ORG_MEMBER_SYSTEM_ROLES)
 
         return {
             "type": "added",
@@ -497,6 +505,71 @@ async def get_invitation(
 # --- Accept invitation (requires auth — user must be logged in / just signed up) ---
 
 
+@router.post(
+    "/invitations/accept-with-signup",
+    response_model=TokenResponse,
+    status_code=201,
+)
+async def accept_invitation_with_signup(
+    data: AcceptInvitationSignupRequest,
+    db: AsyncSession = Depends(get_db),
+):
+    """Create an account from an invitation and join, in one step.
+
+    Unauthenticated by design: the invitation token is the credential. It was
+    emailed to the address it carries, so possession of it proves control of
+    that inbox — which is why the account is created email_verified and skips
+    the OTP the normal signup path uses. The invitee supplies only a name and
+    a password; the email comes from the invitation.
+    """
+    repo = OrganizationRepository(Organization, db)
+    inv = await repo.get_invitation_by_token(data.token)
+    if not inv:
+        raise HTTPException(status_code=404, detail="Invitation not found or already used")
+    if inv.status != "pending":
+        raise HTTPException(status_code=410, detail="Invitation has already been used or expired")
+    if inv.expires_at < datetime.now(timezone.utc):
+        raise HTTPException(status_code=410, detail="Invitation has expired")
+
+    user_repo = UserRepository(User, db)
+    if await user_repo.get_by_email(inv.email):
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "An account already exists for this email. Sign in, then open "
+                "the invitation link again to join."
+            ),
+        )
+
+    user = await user_repo.create(
+        {
+            "email": inv.email,
+            "password_hash": hash_password(data.password),
+            "full_name": data.full_name,
+            "email_verified": True,
+        }
+    )
+    await user_repo.grant_roles_by_name(
+        user.user_id, ["Voter", "Event Attendee", *ORG_MEMBER_SYSTEM_ROLES]
+    )
+
+    await repo.add_member(
+        org_id=inv.org_id,
+        user_id=user.user_id,
+        role=inv.role,
+        invited_by=inv.invited_by,
+    )
+    await repo.accept_invitation(inv.invitation_id)
+
+    # Reuse the login path's token issuing so the refresh token's jti is
+    # recorded and single-use rotation works the same as a normal sign-in.
+    auth_service = AuthService(
+        user_repo=user_repo,
+        audit_repo=AuditLogRepository(AuditLog, db),
+    )
+    return await auth_service._issue_tokens(user)
+
+
 @router.post("/invitations/accept", response_model=OrganizationMemberResponse)
 async def accept_invitation(
     data: AcceptInvitationRequest,
@@ -529,9 +602,10 @@ async def accept_invitation(
         invited_by=inv.invited_by,
     )
 
-    if inv.role == "admin":
-        user_repo = UserRepository(User, db)
-        await user_repo.grant_roles_by_name(current_user.user_id, ORG_ADMIN_SYSTEM_ROLES)
+    user_repo = UserRepository(User, db)
+    await user_repo.grant_roles_by_name(
+        current_user.user_id, ORG_MEMBER_SYSTEM_ROLES
+    )
 
     await repo.accept_invitation(inv.invitation_id)
 
@@ -583,14 +657,13 @@ async def update_member_role(
     if not updated:
         raise HTTPException(status_code=404, detail="Member not found")
 
-    # Sync system roles based on role change
+    # Every member keeps these for as long as they belong to the org: they are
+    # what lets the organizer dashboard load at all. A demotion must not blind
+    # someone who is still on the team — what they lose is write access, and
+    # that now follows from their membership role via
+    # OrganizationRepository.can_create rather than from these platform roles.
     user_repo = UserRepository(User, db)
-    if new_role == "admin" and previous_role != "admin":
-        # Promoted to admin — grant Election Administrator + Event Organizer
-        await user_repo.grant_roles_by_name(updated.user_id, ORG_ADMIN_SYSTEM_ROLES)
-    elif previous_role == "admin" and new_role != "admin":
-        # Demoted from admin — revoke those system roles so they lose create access
-        await user_repo.revoke_roles_by_name(updated.user_id, ORG_ADMIN_SYSTEM_ROLES)
+    await user_repo.grant_roles_by_name(updated.user_id, ORG_MEMBER_SYSTEM_ROLES)
 
     return OrganizationMemberResponse(
         member_id=updated.member_id,
@@ -630,12 +703,16 @@ async def remove_member(
     if target.role == "owner":
         raise HTTPException(status_code=400, detail="Cannot remove the organization owner")
 
-    # If removing an admin, revoke their org-granted system roles
-    if target.role == "admin":
-        user_repo = UserRepository(User, db)
-        await user_repo.revoke_roles_by_name(target.user_id, ORG_ADMIN_SYSTEM_ROLES)
-
+    removed_user_id = target.user_id
     await repo.remove_member(member_id)
+
+    # Revoke the org-granted platform roles only once they belong to no
+    # organization at all — someone on two teams must not lose access to the
+    # second by leaving the first. Checked after removal so the membership
+    # being deleted isn't counted.
+    if not await repo.get_user_organizations(removed_user_id):
+        user_repo = UserRepository(User, db)
+        await user_repo.revoke_roles_by_name(removed_user_id, ORG_MEMBER_SYSTEM_ROLES)
 
 
 # --- KYC document upload ---

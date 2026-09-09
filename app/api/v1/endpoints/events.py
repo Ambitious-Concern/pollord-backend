@@ -107,6 +107,17 @@ async def create_event(
     db: AsyncSession = Depends(get_db),
 ):
     """Create an event, auto-generating a slug and USSD code."""
+    if not await OrganizationRepository(Organization, db).can_create(
+        current_user.user_id
+    ):
+        raise HTTPException(
+            status_code=403,
+            detail=(
+                "Your organization role is view-only. Ask an owner or admin "
+                "to give you edit access."
+            ),
+        )
+
     event_repo = EventRepository(Event, db)
     audit_repo = AuditLogRepository(AuditLog, db)
 

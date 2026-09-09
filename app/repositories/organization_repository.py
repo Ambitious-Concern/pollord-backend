@@ -65,6 +65,27 @@ class OrganizationRepository(BaseRepository[Organization]):
         )
         return list({row[0] for row in result.all()} | {user_id})
 
+    async def can_create(self, user_id: UUID) -> bool:
+        """Whether the user may create new elections/events.
+
+        can_manage_with answers "may I change this existing thing?" by
+        comparing against its creator. Creation has no creator to compare
+        against, so it needs its own rule: someone in no organization is
+        their own organizer and may create freely, while someone in an
+        organization needs a managing role there. Without this, granting a
+        plain member the platform roles they need to *see* the org's work
+        would also let them add to it.
+        """
+        result = await self.session.execute(
+            select(OrganizationMember.role).where(
+                OrganizationMember.user_id == user_id
+            )
+        )
+        roles = [row[0] for row in result.all()]
+        if not roles:
+            return True
+        return any(r in self.MANAGING_ROLES for r in roles)
+
     async def can_manage_with(self, user_id: UUID, creator_id: UUID) -> bool:
         """Whether `user_id` may manage something created by `creator_id`.
 
