@@ -18,7 +18,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.v1.endpoints.admin import ADMIN_ROLE, _get_platform_setting
-from app.core.dependencies import require_roles
+from app.core.dependencies import CONSOLE_READ_ROLES, require_roles
 from app.db.base import get_db
 from app.models.audit_log import AuditLog
 from app.models.election import Candidate, Category, Election
@@ -94,7 +94,7 @@ class AdminEventDetailResponse(BaseModel):
 @router.get("/events/{event_id}", response_model=AdminEventDetailResponse)
 async def get_event_detail(
     event_id: UUID,
-    current_user: User = Depends(require_roles(ADMIN_ROLE)),
+    current_user: User = Depends(require_roles(*CONSOLE_READ_ROLES)),
     db: AsyncSession = Depends(get_db),
 ):
     """Everything about one event: its record, per-ticket-type sales, and
@@ -314,7 +314,7 @@ async def update_event_settings(
 @router.get("/elections/{election_id}", response_model=AdminElectionDetailResponse)
 async def get_election_detail(
     election_id: UUID,
-    current_user: User = Depends(require_roles(ADMIN_ROLE)),
+    current_user: User = Depends(require_roles(*CONSOLE_READ_ROLES)),
     db: AsyncSession = Depends(get_db),
     transaction_limit: int = 100,
 ):

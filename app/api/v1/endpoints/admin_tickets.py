@@ -12,7 +12,7 @@ from fastapi import APIRouter, Depends, Request
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
-from app.core.dependencies import require_roles
+from app.core.dependencies import CONSOLE_READ_ROLES, require_roles
 from app.db.base import get_db
 from app.models.audit_log import AuditLog
 from app.models.event import Event, TicketType
@@ -102,7 +102,7 @@ async def add_attendee_for_untracked_payment(
 
 @router.get("/ticket-purchases", response_model=AdminTicketPurchaseListResponse)
 async def list_ticket_purchases(
-    current_user: User = Depends(require_roles(ADMIN_ROLE)),
+    current_user: User = Depends(require_roles(*CONSOLE_READ_ROLES)),
     db: AsyncSession = Depends(get_db),
     skip: int = 0,
     limit: int = 50,

@@ -7,7 +7,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, field_validator
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.dependencies import require_roles
+from app.core.dependencies import CONSOLE_READ_ROLES, require_roles
 from app.core.pricing import validate_vote_price
 from app.db.base import get_db
 from app.models.audit_log import AuditLog
@@ -34,7 +34,7 @@ ADMIN_ROLE = "System Administrator"
 
 @router.get("/users", response_model=List[UserResponse])
 async def list_users(
-    current_user: User = Depends(require_roles(ADMIN_ROLE)),
+    current_user: User = Depends(require_roles(*CONSOLE_READ_ROLES)),
     db: AsyncSession = Depends(get_db),
     skip: int = 0,
     limit: int = 20,
@@ -142,7 +142,7 @@ async def assign_roles(
 
 @router.get("/roles", response_model=List[RoleResponse])
 async def list_roles(
-    current_user: User = Depends(require_roles(ADMIN_ROLE)),
+    current_user: User = Depends(require_roles(*CONSOLE_READ_ROLES)),
     db: AsyncSession = Depends(get_db),
 ):
     """Every role defined on the platform, for the role-assignment UI."""
@@ -153,7 +153,7 @@ async def list_roles(
 
 @router.get("/audit-logs", response_model=List[AuditLogResponse])
 async def list_audit_logs(
-    current_user: User = Depends(require_roles(ADMIN_ROLE)),
+    current_user: User = Depends(require_roles(*CONSOLE_READ_ROLES)),
     db: AsyncSession = Depends(get_db),
     skip: int = 0,
     limit: int = 50,
@@ -220,7 +220,7 @@ def _org_to_response(org: Organization) -> OrganizationResponse:
 
 @router.get("/organizations", response_model=List[OrganizationResponse])
 async def list_organizations(
-    current_user: User = Depends(require_roles(ADMIN_ROLE)),
+    current_user: User = Depends(require_roles(*CONSOLE_READ_ROLES)),
     db: AsyncSession = Depends(get_db),
     skip: int = 0,
     limit: int = 50,
@@ -413,7 +413,7 @@ async def _fetch_all_settings(db: AsyncSession) -> PlatformSettingsResponse:
 
 @router.get("/platform-settings", response_model=PlatformSettingsResponse)
 async def get_platform_settings(
-    current_user: User = Depends(require_roles(ADMIN_ROLE)),
+    current_user: User = Depends(require_roles(*CONSOLE_READ_ROLES)),
     db: AsyncSession = Depends(get_db),
 ):
     """Current platform-wide settings (vote price, feature flags, etc.)."""
@@ -588,7 +588,7 @@ class OrgAnalyticsResponse(BaseModel):
 @router.get("/organizations/{org_id}/analytics", response_model=OrgAnalyticsResponse)
 async def get_organization_analytics(
     org_id: UUID,
-    current_user: User = Depends(require_roles(ADMIN_ROLE)),
+    current_user: User = Depends(require_roles(*CONSOLE_READ_ROLES)),
     db: AsyncSession = Depends(get_db),
 ):
     """Admin-only deep-dive into one organization's elections, events,

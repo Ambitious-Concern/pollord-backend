@@ -63,6 +63,12 @@ async def get_current_active_user(
     return current_user
 
 
+# Roles that may READ the admin console. System Administrator can also write;
+# Platform Viewer cannot, so it is deliberately absent from every write guard.
+# Enforced here rather than by hiding buttons — a viewer can call the API.
+CONSOLE_READ_ROLES = ("System Administrator", "Platform Viewer")
+
+
 def require_roles(*roles: str):
     """Dependency factory: require_roles("Admin", "Organizer") builds a
     dependency that 403s unless the user has at least one of those roles."""
