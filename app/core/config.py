@@ -84,6 +84,10 @@ class Settings(BaseSettings):
     ARKESEL_SMS_SENDER_ID: str = "Pollord"
     ARKESEL_WEBHOOK_TOKEN: str = ""
     USSD_SESSION_TTL_SECONDS: int = 180   # matches Arkesel's own USSD session timeout
+    # Conservative single-screen budget — MTN Ghana's USSD gateway rejects/
+    # truncates longer messages. Tune down further if a specific network
+    # proves tighter than this in practice.
+    USSD_MAX_MESSAGE_LENGTH: int = 160
 
     # Rate Limiting
     RATE_LIMIT_DEFAULT: str = "100/minute"

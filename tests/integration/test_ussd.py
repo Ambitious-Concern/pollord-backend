@@ -7,6 +7,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 import app.core.redis as redis_module
 from app.core.config import settings
 from app.models.election import Candidate, Category, Election
+from app.services.paystack_service import PaystackService
 
 WEBHOOK_URL = "/api/v1/ussd/arkesel/callback"
 TOKEN = "test-ussd-token"
@@ -191,6 +192,118 @@ class TestUssdVotingFlow:
         )
         assert response.status_code == 200
         assert response.json()["continueSession"] is True
+
+
+@pytest.fixture
+async def paid_election_with_candidate(db_session: AsyncSession, admin_user):
+    now = datetime.now(timezone.utc)
+    election = Election(
+        title="USSD Paid Election",
+        ussd_code="713055",
+        start_datetime=now - timedelta(hours=1),
+        end_datetime=now + timedelta(hours=23),
+        status="active",
+        visibility="public",
+        require_verification=False,
+        vote_price=50,
+        created_by=admin_user["user"].user_id,
+    )
+    db_session.add(election)
+    await db_session.flush()
+
+    category = Category(
+        election_id=election.election_id,
+        name="President",
+        election_type="single_choice",
+        display_order=0,
+    )
+    db_session.add(category)
+    await db_session.flush()
+
+    candidate = Candidate(
+        category_id=category.category_id,
+        election_id=election.election_id,
+        name="Bea",
+        short_code="BEA1",
+        display_order=0,
+    )
+    db_session.add(candidate)
+    await db_session.flush()
+
+    return election, category, candidate
+
+
+@pytest.mark.asyncio
+class TestUssdPaidVoteFlow:
+    async def _dial_to_network_prompt(self, client, election, candidate, phone):
+        await client.post(
+            f"{WEBHOOK_URL}?token={TOKEN}",
+            json=_ussd_post("*928*928#", phone, new_session=True),
+        )
+        await client.post(
+            f"{WEBHOOK_URL}?token={TOKEN}", json=_ussd_post(election.ussd_code, phone)
+        )
+        return await client.post(
+            f"{WEBHOOK_URL}?token={TOKEN}", json=_ussd_post(candidate.short_code, phone)
+        )
+
+    async def test_pay_offline_ends_session_immediately(
+        self, client: AsyncClient, paid_election_with_candidate, monkeypatch
+    ):
+        election, category, candidate = paid_election_with_candidate
+        phone = "233241234570"
+
+        async def fake_charge(self, **kwargs):
+            return {"status": "pay_offline"}
+
+        monkeypatch.setattr(PaystackService, "charge_mobile_money", fake_charge)
+
+        network_prompt = await self._dial_to_network_prompt(
+            client, election, candidate, phone
+        )
+        assert "Bea" in network_prompt.json()["message"]
+
+        response = await client.post(
+            f"{WEBHOOK_URL}?token={TOKEN}", json=_ussd_post("1", phone)
+        )
+        body = response.json()
+        assert body["continueSession"] is False
+        assert "approve" in body["message"].lower()
+
+    async def test_send_otp_prompts_for_otp_then_submits_it(
+        self, client: AsyncClient, paid_election_with_candidate, monkeypatch
+    ):
+        election, category, candidate = paid_election_with_candidate
+        phone = "233241234571"
+        submitted = {}
+
+        async def fake_charge(self, **kwargs):
+            return {"status": "send_otp"}
+
+        async def fake_submit_otp(self, otp, reference):
+            submitted["otp"] = otp
+            submitted["reference"] = reference
+            return {"status": "success"}
+
+        monkeypatch.setattr(PaystackService, "charge_mobile_money", fake_charge)
+        monkeypatch.setattr(PaystackService, "submit_otp", fake_submit_otp)
+
+        await self._dial_to_network_prompt(client, election, candidate, phone)
+
+        otp_prompt = await client.post(
+            f"{WEBHOOK_URL}?token={TOKEN}", json=_ussd_post("1", phone)
+        )
+        body = otp_prompt.json()
+        assert body["continueSession"] is True
+        assert "OTP" in body["message"]
+
+        final = await client.post(
+            f"{WEBHOOK_URL}?token={TOKEN}", json=_ussd_post("123456", phone)
+        )
+        body = final.json()
+        assert body["continueSession"] is False
+        assert "Payment submitted" in body["message"]
+        assert submitted["otp"] == "123456"
 
 
 @pytest.mark.asyncio

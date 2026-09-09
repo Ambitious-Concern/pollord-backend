@@ -6,15 +6,20 @@ matches Arkesel's own ~180s session timeout):
   idle              → greet, ask for the election/event's USSD code
   awaiting_category → parent has >1 category with candidates, waiting for a number
   awaiting_vote     → ballot shown, waiting for one candidate short code
-  awaiting_network  → paid vote — waiting for a mobile money network choice
+  awaiting_network     → paid vote — waiting for a mobile money network choice
+  awaiting_payment_otp → some providers need Paystack's OTP relayed back via
+                         /charge/submit_otp before the debit completes; others
+                         ("pay_offline") need nothing further from us at all
 
 Voter identity: phone number is HMAC-hashed per category — never stored in
 plaintext, same convention as generate_whatsapp_voter_hash.
 
 Payment: unlike the web/WhatsApp redirect flow, USSD has no browser to send a
 link to — a direct Paystack mobile money charge is initiated against the same
-phone number that dialed in, and the session ends immediately with
-instructions to approve on-phone. Completion is always reported later via the
+phone number that dialed in. If the charge comes back "pay_offline", the
+session ends immediately with instructions to approve on-phone. If it comes
+back "send_otp" instead, the session stays open one more turn to collect and
+relay the OTP. Either way, final completion is always reported later via the
 Paystack webhook (payments.py), which sends the confirmation as an SMS
 through Arkesel instead of ending the (already-closed) USSD session.
 """
@@ -96,6 +101,8 @@ class UssdConversationService:
             return await self._handle_vote_input(phone, text, session)
         if state == "awaiting_network":
             return await self._handle_network_selection(phone, text, session)
+        if state == "awaiting_payment_otp":
+            return await self._handle_payment_otp(phone, text, session)
 
         return await self._handle_code_lookup(phone, text)
 
@@ -185,16 +192,30 @@ class UssdConversationService:
         candidates = sorted(category.candidates, key=lambda c: c.display_order)
         vote_price = await _get_effective_vote_price(parent, self.db)
 
-        lines = [f"{parent.title}: {category.name}", "Enter a candidate code:"]
-        for c in candidates:
-            if c.short_code:
-                lines.append(f"{c.short_code}: {c.name}")
-
+        header = f"{parent.title}: {category.name}"
+        price_line = None
         if vote_price > 0:
             symbol = _CURRENCY_SYMBOL.get(
                 settings.VOTE_CURRENCY, settings.VOTE_CURRENCY
             )
-            lines.append(f"Cost: {symbol}{vote_price / 100:.2f}")
+            price_line = f"Cost: {symbol}{vote_price / 100:.2f}"
+
+        full_lines = [header, "Enter a candidate code:"]
+        full_lines += [f"{c.short_code}: {c.name}" for c in candidates if c.short_code]
+        if price_line:
+            full_lines.append(price_line)
+        full_message = "\n".join(full_lines)
+
+        if len(full_message) <= settings.USSD_MAX_MESSAGE_LENGTH:
+            message = full_message
+        else:
+            # Too many nominees to list on one screen — ask for the code
+            # directly instead (organizers publish per-nominee codes on
+            # posters/social media for exactly this case).
+            lines = [header, "Enter your nominee's code:"]
+            if price_line:
+                lines.append(price_line)
+            message = "\n".join(lines)
 
         await self._set_session(
             phone,
@@ -206,7 +227,7 @@ class UssdConversationService:
                 "vote_price": vote_price,
             },
         )
-        return ("\n".join(lines), False)
+        return (message, False)
 
     async def _handle_vote_input(
         self, phone: str, text: str, session: dict
@@ -274,7 +295,7 @@ class UssdConversationService:
                 "vote_price": vote_price,
             },
         )
-        lines = [f"Vote for {candidate.name}. Choose payment network:"]
+        lines = [f"{candidate.name} ({category.name}). Choose payment network:"]
         for key, (_, label) in _NETWORKS.items():
             lines.append(f"{key}. {label}")
         return ("\n".join(lines), False)
@@ -324,7 +345,7 @@ class UssdConversationService:
 
         paystack = PaystackService(settings.PAYSTACK_SECRET_KEY)
         try:
-            await paystack.charge_mobile_money(
+            charge = await paystack.charge_mobile_money(
                 email=placeholder_email,
                 amount=vote_price,
                 reference=reference,
@@ -343,19 +364,63 @@ class UssdConversationService:
             await self._clear_session(phone)
             return (f"Payment could not be started: {exc.detail}", True)
 
-        # So the Paystack webhook (payments.py) knows to text this phone.
+        # So the Paystack webhook (payments.py) knows to text this phone,
+        # regardless of which branch below we take.
         await self.redis.setex(
             f"ussd:payment:{reference}",
             PAYMENT_TTL,
             json.dumps({"phone": phone}),
         )
-        await self._clear_session(phone)
 
         symbol = _CURRENCY_SYMBOL.get(settings.VOTE_CURRENCY, settings.VOTE_CURRENCY)
         amount_display = f"{symbol}{vote_price / 100:.2f}"
+
+        if charge.get("status") == "send_otp":
+            # This provider needs the OTP the customer just received relayed
+            # back to Paystack before the charge finishes — there's no
+            # native on-phone prompt to approve here, unlike "pay_offline".
+            await self._set_session(
+                phone,
+                {
+                    "state": "awaiting_payment_otp",
+                    "reference": reference,
+                    "candidate_name": candidate_name,
+                },
+            )
+            return (
+                f"Enter the OTP sent to your phone to confirm {amount_display} "
+                f"for {candidate_name}:",
+                False,
+            )
+
+        await self._clear_session(phone)
         return (
             f"Check your phone and approve the {provider_label} prompt for "
             f"{amount_display} to vote for {candidate_name}. "
+            "You'll get an SMS once it's confirmed.",
+            True,
+        )
+
+    async def _handle_payment_otp(
+        self, phone: str, text: str, session: dict
+    ) -> Tuple[str, bool]:
+        otp = "".join(ch for ch in text if ch.isdigit())
+        if not otp:
+            return ("Enter the numeric OTP sent to your phone:", False)
+
+        reference = session["reference"]
+        candidate_name = session.get("candidate_name", "")
+        await self._clear_session(phone)
+
+        paystack = PaystackService(settings.PAYSTACK_SECRET_KEY)
+        try:
+            await paystack.submit_otp(otp=otp, reference=reference)
+        except HTTPException as exc:
+            await self.txn_repo.update_status(reference, "failed")
+            return (f"Payment failed: {exc.detail}. Dial in again to retry.", True)
+
+        return (
+            f"Payment submitted for {candidate_name}. "
             "You'll get an SMS once it's confirmed.",
             True,
         )

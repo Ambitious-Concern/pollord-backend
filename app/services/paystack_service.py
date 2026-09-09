@@ -100,6 +100,28 @@ class PaystackService:
             )
         return body["data"]
 
+    async def submit_otp(self, otp: str, reference: str) -> dict:
+        """Completes a mobile money charge that came back with
+        `data.status == "send_otp"` — relays the OTP the customer received
+        back to Paystack so the debit can finish. Not every charge needs
+        this (some providers return "pay_offline" and need nothing further
+        from us), so callers must check the charge status first."""
+        async with httpx.AsyncClient() as client:
+            r = await client.post(
+                f"{self.BASE_URL}/charge/submit_otp",
+                headers=self._headers,
+                json={"otp": otp, "reference": reference},
+                timeout=30.0,
+            )
+
+        body = r.json()
+        if not body.get("status"):
+            raise HTTPException(
+                status_code=PAYSTACK_REJECTED,
+                detail=f"Paystack error: {body.get('message', 'Unknown error')}",
+            )
+        return body["data"]
+
     async def verify_transaction(self, reference: str) -> dict:
         """
         Verify a transaction by reference.
