@@ -1,4 +1,4 @@
-from decimal import Decimal
+from decimal import ROUND_HALF_UP, Decimal
 from typing import Optional
 from uuid import UUID
 
@@ -16,6 +16,15 @@ from app.repositories.event_repository import EventRepository
 from app.repositories.ticket_repository import TicketPurchaseRepository, TicketRepository
 from app.repositories.transaction_repository import TransactionRepository
 from app.repositories.vote_repository import VoteRepository
+
+
+def _to_cedis(amount: Decimal) -> Decimal:
+    """Quantize a cedi amount to whole pesewas.
+
+    ROUND_HALF_UP rather than Python's default banker's rounding, so a
+    displayed total matches what an accountant would write down.
+    """
+    return amount.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
 
 
 class AnalyticsService:
@@ -136,10 +145,10 @@ class AnalyticsService:
     async def get_system_stats(self) -> dict:
         """Platform-wide totals for the admin console dashboard.
 
-        Revenue arrives in two different units: votes are paid in pesewas
+        Revenue is stored in two different units: votes are paid in pesewas
         (Transaction.amount, an int) while tickets are priced in cedis
         (TicketPurchase.total_amount, Numeric(10, 2)). Both are reported in
-        pesewas so the caller never has to know which stream a figure came
+        cedis so the caller never has to know which stream a figure came
         from, and never has to add two different currencies itself.
         """
         total_users = await self.session.execute(
@@ -180,9 +189,15 @@ class AnalyticsService:
             )
         )
 
-        election_revenue_pesewas = int(election_revenue.scalar_one() or 0)
-        event_revenue_pesewas = int(
-            (event_revenue.scalar_one() or Decimal(0)) * 100
+        # Both streams are reported in cedis. Vote payments are stored in
+        # pesewas so they divide down; ticket sales are already in cedis.
+        # The arithmetic stays in Decimal and only rounds once, at the end,
+        # so a half-pesewa can't drift into the total.
+        election_revenue_ghs = _to_cedis(
+            Decimal(int(election_revenue.scalar_one() or 0)) / 100
+        )
+        event_revenue_ghs = _to_cedis(
+            Decimal(str(event_revenue.scalar_one() or 0))
         )
 
         return {
@@ -193,8 +208,7 @@ class AnalyticsService:
             "active_events": active_events.scalar_one(),
             "total_votes_cast": int(total_votes.scalar_one() or 0),
             "total_tickets_sold": tickets_sold.scalar_one(),
-            "total_election_revenue_pesewas": election_revenue_pesewas,
-            "total_event_revenue_pesewas": event_revenue_pesewas,
-            "total_revenue_pesewas": election_revenue_pesewas
-            + event_revenue_pesewas,
+            "total_election_revenue_ghs": float(election_revenue_ghs),
+            "total_event_revenue_ghs": float(event_revenue_ghs),
+            "total_revenue_ghs": float(election_revenue_ghs + event_revenue_ghs),
         }

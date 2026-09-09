@@ -15,8 +15,8 @@ router = APIRouter(prefix="/analytics", tags=["Analytics"])
 class SystemAnalyticsResponse(BaseModel):
     """Platform-wide dashboard totals.
 
-    Both revenue streams are reported in pesewas: vote payments are already
-    stored that way, ticket purchases are converted from cedis.
+    Both revenue streams are reported in cedis: ticket purchases are already
+    stored that way, vote payments are converted from pesewas.
     """
 
     total_users: int
@@ -26,9 +26,9 @@ class SystemAnalyticsResponse(BaseModel):
     active_events: int
     total_votes_cast: int
     total_tickets_sold: int
-    total_election_revenue_pesewas: int
-    total_event_revenue_pesewas: int
-    total_revenue_pesewas: int
+    total_election_revenue_ghs: float
+    total_event_revenue_ghs: float
+    total_revenue_ghs: float
 
 
 @router.get("/elections/{election_id}")
