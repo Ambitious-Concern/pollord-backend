@@ -13,6 +13,8 @@ from app.repositories.base import BaseRepository
 
 
 class TicketRepository(BaseRepository[Ticket]):
+    """Ticket queries: by code, by owner (user or guest), scan/mark-used."""
+
     def __init__(self, model, session: AsyncSession):
         super().__init__(model, session)
 
@@ -101,15 +103,15 @@ class TicketRepository(BaseRepository[Ticket]):
 
     async def count_by_event(self, event_id: UUID) -> int:
         result = await self.session.execute(
-            select(func.count()).select_from(Ticket).where(
-                Ticket.event_id == event_id
-            )
+            select(func.count()).select_from(Ticket).where(Ticket.event_id == event_id)
         )
         return result.scalar_one()
 
     async def count_used_by_event(self, event_id: UUID) -> int:
         result = await self.session.execute(
-            select(func.count()).select_from(Ticket).where(
+            select(func.count())
+            .select_from(Ticket)
+            .where(
                 Ticket.event_id == event_id,
                 Ticket.ticket_status == "used",
             )
@@ -120,7 +122,9 @@ class TicketRepository(BaseRepository[Ticket]):
         self, user_id: UUID, ticket_type_id: UUID
     ) -> int:
         result = await self.session.execute(
-            select(func.count()).select_from(Ticket).where(
+            select(func.count())
+            .select_from(Ticket)
+            .where(
                 Ticket.user_id == user_id,
                 Ticket.ticket_type_id == ticket_type_id,
                 Ticket.ticket_status != "cancelled",
@@ -132,7 +136,9 @@ class TicketRepository(BaseRepository[Ticket]):
         self, guest_email: str, ticket_type_id: UUID
     ) -> int:
         result = await self.session.execute(
-            select(func.count()).select_from(Ticket).where(
+            select(func.count())
+            .select_from(Ticket)
+            .where(
                 Ticket.guest_email == guest_email,
                 Ticket.ticket_type_id == ticket_type_id,
                 Ticket.ticket_status != "cancelled",
@@ -142,6 +148,8 @@ class TicketRepository(BaseRepository[Ticket]):
 
 
 class TicketPurchaseRepository(BaseRepository[TicketPurchase]):
+    """TicketPurchase queries: revenue totals, admin search/filtering."""
+
     def __init__(self, model, session: AsyncSession):
         super().__init__(model, session)
 
@@ -194,9 +202,7 @@ class TicketPurchaseRepository(BaseRepository[TicketPurchase]):
         if email_status == "unknown":
             conditions.append(TicketPurchase.confirmation_email_status.is_(None))
         elif email_status:
-            conditions.append(
-                TicketPurchase.confirmation_email_status == email_status
-            )
+            conditions.append(TicketPurchase.confirmation_email_status == email_status)
         if search:
             term = f"%{search.lower()}%"
             # Buyers arrive at support with any one of these — a guest email,

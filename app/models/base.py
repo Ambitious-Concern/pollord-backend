@@ -6,10 +6,14 @@ from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 
 class Base(DeclarativeBase):
+    """SQLAlchemy declarative base shared by every model."""
+
     pass
 
 
 class TimestampMixin:
+    """Adds created_at/updated_at, auto-managed by the DB and ORM."""
+
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         server_default=func.now(),

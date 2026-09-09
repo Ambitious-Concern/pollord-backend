@@ -10,6 +10,8 @@ logger = logging.getLogger(__name__)
 
 @celery_app.task
 def check_expired_tickets():
+    """Celery beat job (hourly): mark still-"valid" tickets as "expired"
+    once their event's date has passed."""
     from sqlalchemy import create_engine
     from sqlalchemy.orm import Session
 

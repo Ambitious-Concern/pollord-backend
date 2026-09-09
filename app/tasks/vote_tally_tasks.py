@@ -10,6 +10,9 @@ logger = logging.getLogger(__name__)
 
 @celery_app.task
 def check_election_status():
+    """Celery beat job (every 60s): auto-close any active election whose
+    end_datetime has passed. Without this, elections never expire on
+    their own — someone would have to notice and close them by hand."""
     from sqlalchemy import create_engine
     from sqlalchemy.orm import Session
 

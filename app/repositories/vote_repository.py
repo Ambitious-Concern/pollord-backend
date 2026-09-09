@@ -9,6 +9,8 @@ from app.repositories.base import BaseRepository
 
 
 class VoteRepository(BaseRepository[Vote]):
+    """Vote queries: dedup checks, tallies, timelines."""
+
     def __init__(self, model, session: AsyncSession):
         super().__init__(model, session)
 
@@ -58,6 +60,8 @@ class VoteRepository(BaseRepository[Vote]):
 
 
 class VoteReceiptRepository(BaseRepository[VoteReceipt]):
+    """VoteReceipt lookups by code or by (user, election)."""
+
     def __init__(self, model, session: AsyncSession):
         super().__init__(model, session)
 

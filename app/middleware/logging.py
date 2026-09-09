@@ -9,6 +9,8 @@ logger = logging.getLogger("pollard.access")
 
 
 class RequestLoggingMiddleware(BaseHTTPMiddleware):
+    """Logs one line per request: client IP, method, path, status, duration."""
+
     async def dispatch(self, request: Request, call_next) -> Response:
         start_time = time.time()
         client_ip = request.client.host if request.client else "unknown"

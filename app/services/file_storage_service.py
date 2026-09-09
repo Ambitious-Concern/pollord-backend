@@ -34,6 +34,9 @@ def is_data_uri(value: str | None) -> bool:
 
 
 class FileStorageService:
+    """Uploads/downloads files to the external file-storage service and
+    rewrites its URLs to our HTTPS proxy route (see to_public_url)."""
+
     def __init__(self, base_url: str | None = None):
         # Strip trailing slash so we can safely append paths.
         self._base_url = (base_url or settings.FILE_STORAGE_URL).rstrip("/")

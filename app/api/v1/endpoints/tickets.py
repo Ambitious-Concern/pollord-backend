@@ -92,6 +92,7 @@ async def purchase_tickets(
     current_user: User = Depends(get_current_active_user),
     db: AsyncSession = Depends(get_db),
 ):
+    """Free-ticket purchase for a signed-in user (rejects if any item is priced)."""
     service = _get_ticketing_service(db)
     return await service.purchase_tickets(
         user_id=current_user.user_id,
@@ -107,6 +108,8 @@ async def initiate_ticket_payment(
     current_user: User = Depends(get_current_active_user),
     db: AsyncSession = Depends(get_db),
 ):
+    """Step 1 of a paid ticket purchase: validates each item and initializes
+    a Paystack transaction. See verify_and_purchase_tickets for step 2."""
     from datetime import datetime, timezone
     from fastapi import HTTPException, status as http_status
 
@@ -199,6 +202,7 @@ async def verify_and_purchase_tickets(
     current_user: User = Depends(get_current_active_user),
     db: AsyncSession = Depends(get_db),
 ):
+    """Step 2: verifies the Paystack payment, then issues the tickets."""
     from fastapi import HTTPException, status as http_status
 
     txn_repo = TicketTransactionRepository(db)
@@ -517,6 +521,7 @@ async def get_my_tickets(
     skip: int = 0,
     limit: int = 20,
 ):
+    """The signed-in user's own tickets."""
     service = _get_ticketing_service(db)
     return await service.get_user_tickets(
         current_user.user_id, current_user.email, skip, limit
@@ -575,6 +580,7 @@ async def download_ticket(
     current_user: User = Depends(get_current_active_user),
     db: AsyncSession = Depends(get_db),
 ):
+    """Render and stream a ticket's PDF (QR code, event details, banner)."""
     from fastapi import HTTPException
     from io import BytesIO
 
@@ -583,10 +589,8 @@ async def download_ticket(
     if not ticket or not is_owned_by(ticket, current_user):
         raise HTTPException(status_code=404, detail="Ticket not found")
 
-    # Generate QR code
     qr_bytes = generate_qr_code(ticket.qr_code_data)
 
-    # Get event and ticket type info
     event_repo = EventRepository(Event, db)
     event = await event_repo.get_by_id(ticket.event_id, id_field="event_id")
     banner_bytes = await _fetch_image_bytes(event.banner_image_url if event else None)
@@ -624,6 +628,7 @@ async def validate_ticket(
     ),
     db: AsyncSession = Depends(get_db),
 ):
+    """Organizer-side scan/check-in by ticket code."""
     service = _get_ticketing_service(db)
     return await service.validate_ticket(
         ticket_code=data.ticket_code,
@@ -639,5 +644,6 @@ async def cancel_ticket(
     current_user: User = Depends(get_current_active_user),
     db: AsyncSession = Depends(get_db),
 ):
+    """Cancel the caller's own valid ticket."""
     service = _get_ticketing_service(db)
     return await service.cancel_ticket(ticket_id, current_user)

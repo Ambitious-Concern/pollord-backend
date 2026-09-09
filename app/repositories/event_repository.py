@@ -11,6 +11,8 @@ from app.repositories.base import BaseRepository
 
 
 class EventRepository(BaseRepository[Event]):
+    """Event queries: USSD/slug lookup, creator-scoped listing, published filtering."""
+
     def __init__(self, model, session: AsyncSession):
         super().__init__(model, session)
 
@@ -104,6 +106,8 @@ class EventRepository(BaseRepository[Event]):
 
 
 class TicketTypeRepository(BaseRepository[TicketType]):
+    """TicketType queries, including atomic stock decrement/increment."""
+
     def __init__(self, model, session: AsyncSession):
         super().__init__(model, session)
 

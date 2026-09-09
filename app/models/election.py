@@ -19,6 +19,9 @@ if TYPE_CHECKING:
 
 
 class Election(TimestampMixin, Base):
+    """A voting event with a fixed start/end window, made up of one or more
+    Categories, each with its own Candidates."""
+
     __tablename__ = "elections"
 
     election_id: Mapped[uuid.UUID] = mapped_column(
@@ -131,6 +134,8 @@ class Category(TimestampMixin, Base):
 
 
 class Candidate(TimestampMixin, Base):
+    """A nominee within one Category, votable by short_code or candidate_id."""
+
     __tablename__ = "candidates"
 
     candidate_id: Mapped[uuid.UUID] = mapped_column(
@@ -215,6 +220,8 @@ class VoterOTP(Base):
 
 
 class EligibleVoter(Base):
+    """Allow-list entry for a gated (non-open) election."""
+
     __tablename__ = "eligible_voters"
     __table_args__ = (
         UniqueConstraint("election_id", "user_id", name="uq_eligible_voter"),

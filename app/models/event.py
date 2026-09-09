@@ -19,6 +19,9 @@ if TYPE_CHECKING:
 
 
 class Event(TimestampMixin, Base):
+    """A ticketed happening, optionally with its own voting Categories
+    (e.g. a pageant sells tickets and runs "Best Dressed" voting)."""
+
     __tablename__ = "events"
 
     event_id: Mapped[uuid.UUID] = mapped_column(
@@ -89,6 +92,9 @@ class Event(TimestampMixin, Base):
 
 
 class TicketType(TimestampMixin, Base):
+    """A price tier for an event (e.g. "VIP", "Regular"), with its own
+    stock (quantity_available/quantity_sold) and sales window."""
+
     __tablename__ = "ticket_types"
 
     ticket_type_id: Mapped[uuid.UUID] = mapped_column(

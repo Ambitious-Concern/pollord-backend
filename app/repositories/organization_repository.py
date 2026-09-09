@@ -11,6 +11,9 @@ from app.repositories.base import BaseRepository
 
 
 class OrganizationRepository(BaseRepository[Organization]):
+    """Organization/membership queries: teammate resolution, ownership
+    checks, invitations."""
+
     def __init__(self, model, session: AsyncSession):
         super().__init__(model, session)
 

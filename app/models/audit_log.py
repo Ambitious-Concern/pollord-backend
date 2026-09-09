@@ -13,6 +13,9 @@ if TYPE_CHECKING:
 
 
 class AuditLog(Base):
+    """One row per notable action (login, vote cast, admin change, ...),
+    written via AuditLogRepository.log_action."""
+
     __tablename__ = "audit_logs"
     __table_args__ = (
         Index("idx_audit_entity", "entity_type", "entity_id"),

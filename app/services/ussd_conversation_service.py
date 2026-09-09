@@ -18,6 +18,7 @@ instructions to approve on-phone. Completion is always reported later via the
 Paystack webhook (payments.py), which sends the confirmation as an SMS
 through Arkesel instead of ending the (already-closed) USSD session.
 """
+
 import hashlib
 import json
 import logging
@@ -31,7 +32,10 @@ import redis.asyncio as aioredis
 from fastapi import HTTPException
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.v1.endpoints.voting import _assert_open_for_voting, _get_effective_vote_price
+from app.api.v1.endpoints.voting import (
+    _assert_open_for_voting,
+    _get_effective_vote_price,
+)
 from app.core.config import settings
 from app.core.security import generate_ussd_voter_hash
 from app.models.audit_log import AuditLog
@@ -79,6 +83,9 @@ class UssdConversationService:
     # ------------------------------------------------------------------
 
     async def handle(self, phone: str, text: str) -> Tuple[str, bool]:
+        """Entry point called once per USSD request: dispatches on the
+        caller's stored state to the right handler. Returns (message,
+        end_session)."""
         text = text.strip()
         session = await self._get_session(phone)
         state = session.get("state", "idle")
@@ -125,15 +132,20 @@ class UssdConversationService:
         for i, cat in enumerate(categories, start=1):
             lines.append(f"{i}. {cat.name}")
 
-        await self._set_session(phone, {
-            "state": "awaiting_category",
-            "parent_id": str(_parent_id(parent, parent_kind)),
-            "parent_kind": parent_kind,
-            "category_ids": [str(c.category_id) for c in categories],
-        })
+        await self._set_session(
+            phone,
+            {
+                "state": "awaiting_category",
+                "parent_id": str(_parent_id(parent, parent_kind)),
+                "parent_kind": parent_kind,
+                "category_ids": [str(c.category_id) for c in categories],
+            },
+        )
         return ("\n".join(lines), False)
 
-    async def _handle_category_selection(self, phone: str, text: str, session: dict) -> Tuple[str, bool]:
+    async def _handle_category_selection(
+        self, phone: str, text: str, session: dict
+    ) -> Tuple[str, bool]:
         category_ids = session.get("category_ids", [])
         choice = text.strip()
         if not choice.isdigit() or not (1 <= int(choice) <= len(category_ids)):
@@ -145,14 +157,18 @@ class UssdConversationService:
             return ("No longer available. Dial in again to retry.", True)
 
         category_id = UUID(category_ids[int(choice) - 1])
-        category = next((c for c in parent.categories if c.category_id == category_id), None)
+        category = next(
+            (c for c in parent.categories if c.category_id == category_id), None
+        )
         if not category:
             await self._clear_session(phone)
             return ("That category is no longer available.", True)
 
         return await self._present_ballot(phone, parent, parent_kind, category)
 
-    async def _present_ballot(self, phone: str, parent, parent_kind: str, category) -> Tuple[str, bool]:
+    async def _present_ballot(
+        self, phone: str, parent, parent_kind: str, category
+    ) -> Tuple[str, bool]:
         if category.election_type != "single_choice":
             return (
                 f"{category.name} needs a ranked ballot — please vote for it "
@@ -175,23 +191,30 @@ class UssdConversationService:
                 lines.append(f"{c.short_code}: {c.name}")
 
         if vote_price > 0:
-            symbol = _CURRENCY_SYMBOL.get(settings.VOTE_CURRENCY, settings.VOTE_CURRENCY)
+            symbol = _CURRENCY_SYMBOL.get(
+                settings.VOTE_CURRENCY, settings.VOTE_CURRENCY
+            )
             lines.append(f"Cost: {symbol}{vote_price / 100:.2f}")
 
-        await self._set_session(phone, {
-            "state": "awaiting_vote",
-            "parent_id": str(_parent_id(parent, parent_kind)),
-            "parent_kind": parent_kind,
-            "category_id": str(category.category_id),
-            "vote_price": vote_price,
-        })
+        await self._set_session(
+            phone,
+            {
+                "state": "awaiting_vote",
+                "parent_id": str(_parent_id(parent, parent_kind)),
+                "parent_kind": parent_kind,
+                "category_id": str(category.category_id),
+                "vote_price": vote_price,
+            },
+        )
         return ("\n".join(lines), False)
 
-    async def _handle_vote_input(self, phone: str, text: str, session: dict) -> Tuple[str, bool]:
+    async def _handle_vote_input(
+        self, phone: str, text: str, session: dict
+    ) -> Tuple[str, bool]:
         parent, parent_kind = await self._reload_parent(session)
         if not parent:
             await self._clear_session(phone)
-            return ("No longer available. Dial in again to retry.", True)
+            return "No longer available. Dial in again to retry.", True
 
         try:
             _assert_open_for_voting(parent, parent_kind)
@@ -200,7 +223,9 @@ class UssdConversationService:
             return (str(exc.detail), True)
 
         category_id = UUID(session["category_id"])
-        category = next((c for c in parent.categories if c.category_id == category_id), None)
+        category = next(
+            (c for c in parent.categories if c.category_id == category_id), None
+        )
         if not category:
             await self._clear_session(phone)
             return ("That category is no longer available.", True)
@@ -218,34 +243,45 @@ class UssdConversationService:
         allow_revoting = getattr(parent, "allow_revoting", False)
         base_hash = generate_ussd_voter_hash(phone, category_id)
         if allow_revoting:
-            voter_hash = hashlib.sha256(f"{base_hash}:{_uuid.uuid4().hex}".encode()).hexdigest()
+            voter_hash = hashlib.sha256(
+                f"{base_hash}:{_uuid.uuid4().hex}".encode()
+            ).hexdigest()
         else:
             voter_hash = base_hash
             if await self.vote_repo.has_voted(voter_hash, category_id):
                 await self._clear_session(phone)
                 return (f"You have already voted in {category.name}.", True)
 
-        candidate = next(c for c in category.candidates if c.candidate_id == candidate_ids[0])
+        candidate = next(
+            c for c in category.candidates if c.candidate_id == candidate_ids[0]
+        )
 
         if vote_price == 0:
-            return await self._cast_vote_directly(phone, parent, parent_kind, category, candidate, voter_hash)
+            return await self._cast_vote_directly(
+                phone, parent, parent_kind, category, candidate, voter_hash
+            )
 
-        await self._set_session(phone, {
-            "state": "awaiting_network",
-            "parent_id": str(_parent_id(parent, parent_kind)),
-            "parent_kind": parent_kind,
-            "category_id": str(category_id),
-            "candidate_id": str(candidate.candidate_id),
-            "candidate_name": candidate.name,
-            "voter_hash": voter_hash,
-            "vote_price": vote_price,
-        })
+        await self._set_session(
+            phone,
+            {
+                "state": "awaiting_network",
+                "parent_id": str(_parent_id(parent, parent_kind)),
+                "parent_kind": parent_kind,
+                "category_id": str(category_id),
+                "candidate_id": str(candidate.candidate_id),
+                "candidate_name": candidate.name,
+                "voter_hash": voter_hash,
+                "vote_price": vote_price,
+            },
+        )
         lines = [f"Vote for {candidate.name}. Choose payment network:"]
         for key, (_, label) in _NETWORKS.items():
             lines.append(f"{key}. {label}")
         return ("\n".join(lines), False)
 
-    async def _handle_network_selection(self, phone: str, text: str, session: dict) -> Tuple[str, bool]:
+    async def _handle_network_selection(
+        self, phone: str, text: str, session: dict
+    ) -> Tuple[str, bool]:
         choice = text.strip()
         network = _NETWORKS.get(choice)
         if not network:
@@ -267,18 +303,24 @@ class UssdConversationService:
         phone_hash = hashlib.sha256(phone.encode()).hexdigest()[:12]
         placeholder_email = f"ussd{phone_hash}@pollord.vote"
 
-        await self.txn_repo.create({
-            "reference": reference,
-            "election_id": UUID(session["parent_id"]) if parent_kind == "election" else None,
-            "event_id": UUID(session["parent_id"]) if parent_kind == "event" else None,
-            "category_id": category_id,
-            "voter_hash": voter_hash,
-            "email": placeholder_email,
-            "candidate_ids": [str(candidate_id)],
-            "amount": vote_price,
-            "currency": settings.VOTE_CURRENCY,
-            "status": "pending",
-        })
+        await self.txn_repo.create(
+            {
+                "reference": reference,
+                "election_id": (
+                    UUID(session["parent_id"]) if parent_kind == "election" else None
+                ),
+                "event_id": (
+                    UUID(session["parent_id"]) if parent_kind == "event" else None
+                ),
+                "category_id": category_id,
+                "voter_hash": voter_hash,
+                "email": placeholder_email,
+                "candidate_ids": [str(candidate_id)],
+                "amount": vote_price,
+                "currency": settings.VOTE_CURRENCY,
+                "status": "pending",
+            }
+        )
 
         paystack = PaystackService(settings.PAYSTACK_SECRET_KEY)
         try:
@@ -326,15 +368,19 @@ class UssdConversationService:
         cast_at = now.isoformat()
         signature = self.crypto.sign_vote(encrypted, cast_at)
 
-        await self.vote_repo.create({
-            "category_id": category.category_id,
-            "election_id": parent.election_id if parent_kind == "election" else None,
-            "event_id": parent.event_id if parent_kind == "event" else None,
-            "voter_hash": voter_hash,
-            "vote_data": encrypted,
-            "vote_signature": signature,
-            "count": 1,
-        })
+        await self.vote_repo.create(
+            {
+                "category_id": category.category_id,
+                "election_id": (
+                    parent.election_id if parent_kind == "election" else None
+                ),
+                "event_id": parent.event_id if parent_kind == "event" else None,
+                "voter_hash": voter_hash,
+                "vote_data": encrypted,
+                "vote_signature": signature,
+                "count": 1,
+            }
+        )
 
         receipt_code = self.crypto.generate_receipt_code()
 
@@ -374,7 +420,10 @@ class UssdConversationService:
         if not parent_id:
             return None, parent_kind
         if parent_kind == "election":
-            return await self.election_repo.get_with_categories(UUID(parent_id)), parent_kind
+            return (
+                await self.election_repo.get_with_categories(UUID(parent_id)),
+                parent_kind,
+            )
         return await self.event_repo.get_with_categories(UUID(parent_id)), parent_kind
 
     def _key(self, phone: str) -> str:

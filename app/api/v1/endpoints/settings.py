@@ -28,6 +28,8 @@ async def _get_setting_value(db: AsyncSession, key: str) -> str | None:
 
 @router.get("/launch", response_model=PublicLaunchStatus)
 async def get_launch_status(db: AsyncSession = Depends(get_db)):
+    """Public launch-gate status, falling back to the DEFAULT_* constants
+    above for any setting that hasn't been written to the DB yet."""
     gate_value = await _get_setting_value(db, "launch_gate_enabled")
     launch_at_value = await _get_setting_value(db, "launch_at")
     celebration_window_value = await _get_setting_value(db, "celebration_window_minutes")

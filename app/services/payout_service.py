@@ -35,6 +35,9 @@ def _cedis(value: float) -> Decimal:
 
 
 class PayoutService:
+    """Organizer payout requests (for both events and elections) and the
+    admin review/pay-out flow, including the real Paystack Transfer call."""
+
     def __init__(
         self,
         payout_repo: PayoutRequestRepository,
@@ -102,6 +105,7 @@ class PayoutService:
         return election
 
     async def get_available(self, event_id: UUID, user: User) -> PayoutAvailableResponse:
+        """Revenue collected minus what's already been requested/paid."""
         await self._require_event_and_ownership(event_id, user)
         gross = _cedis(await self.purchase_repo.get_revenue_by_event(event_id))
         already_requested = _cedis(await self.payout_repo.get_total_requested(event_id=event_id))
@@ -232,6 +236,9 @@ class PayoutService:
     async def review(
         self, payout_request_id: UUID, new_status: str, admin_notes: Optional[str], admin: User
     ) -> PayoutRequestResponse:
+        """Admin approve/reject without an automatic transfer — for
+        marking something paid manually. See initiate_transfer for the
+        actual Paystack payout path."""
         if new_status not in ("paid", "rejected"):
             raise HTTPException(status_code=400, detail="status must be 'paid' or 'rejected'")
         req = await self.payout_repo.mark_reviewed(

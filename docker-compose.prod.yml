@@ -1,4 +1,14 @@
 services:
+  # wal_archive is a plain named volume (owned by root by default); postgres
+  # runs as uid 70 inside the alpine image and needs write access to it for
+  # archive_command to succeed. One-off fixup, then it persists for the
+  # volume's lifetime.
+  wal_archive_init:
+    image: alpine:3
+    command: ["sh", "-c", "chown -R 70:70 /wal_archive"]
+    volumes:
+      - wal_archive:/wal_archive
+
   db:
     image: postgres:15-alpine
     container_name: pollord-db
@@ -9,13 +19,57 @@ services:
       POSTGRES_DB: ${POSTGRES_DB}
     volumes:
       - postgres_data:/var/lib/postgresql/data
+      - wal_archive:/wal_archive
+      - ./backup/pg_hba.conf:/etc/postgresql/pg_hba.conf:ro
+    command:
+      - postgres
+      - -c
+      - hba_file=/etc/postgresql/pg_hba.conf
+      - -c
+      - wal_level=replica
+      - -c
+      - archive_mode=on
+      - -c
+      - archive_command=test ! -f /wal_archive/%f && cp %p /wal_archive/%f
+      - -c
+      - archive_timeout=300
     networks:
       - pollord-network
+    depends_on:
+      wal_archive_init:
+        condition: service_completed_successfully
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
       interval: 10s
       timeout: 5s
       retries: 5
+
+  # Nightly pg_basebackup (02:00 UTC) + WAL-archive pruning (02:30 UTC), both
+  # keeping RETENTION_DAYS worth of history. See backup/RESTORE.md for the
+  # (tested) recovery procedure.
+  db_backup:
+    build: ./backup
+    container_name: pollord-db-backup
+    restart: unless-stopped
+    environment:
+      POSTGRES_HOST: db
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
+      RETENTION_DAYS: ${BACKUP_RETENTION_DAYS:-7}
+    volumes:
+      - wal_archive:/wal_archive
+      - db_backups:/backups
+    networks:
+      - pollord-network
+    depends_on:
+      db:
+        condition: service_healthy
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
 
   redis:
     image: redis:7-alpine
@@ -99,6 +153,8 @@ services:
 volumes:
   postgres_data:
   redis_data:
+  wal_archive:
+  db_backups:
 
 networks:
   pollord-network:

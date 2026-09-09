@@ -278,12 +278,12 @@ async def get_organization(
     current_user: User = Depends(get_current_active_user),
     db: AsyncSession = Depends(get_db),
 ):
+    """Full organization detail — caller must be a member."""
     repo = OrganizationRepository(Organization, db)
     org = await repo.get_with_members(org_id)
     if not org:
         raise HTTPException(status_code=404, detail="Organization not found")
 
-    # Check membership
     is_member = any(m.user_id == current_user.user_id for m in org.members)
     if not is_member:
         raise HTTPException(status_code=403, detail="Not a member of this organization")
@@ -301,12 +301,12 @@ async def update_organization(
     current_user: User = Depends(get_current_active_user),
     db: AsyncSession = Depends(get_db),
 ):
+    """Partial update, restricted to the org's owner/admin members."""
     repo = OrganizationRepository(Organization, db)
     org = await repo.get_with_members(org_id)
     if not org:
         raise HTTPException(status_code=404, detail="Organization not found")
 
-    # Only owner or admin can update
     member = next((m for m in org.members if m.user_id == current_user.user_id), None)
     if not member or member.role not in ("owner", "admin"):
         raise HTTPException(status_code=403, detail="Insufficient permissions")
@@ -333,17 +333,17 @@ async def add_member(
     current_user: User = Depends(get_current_active_user),
     db: AsyncSession = Depends(get_db),
 ):
+    """Add an existing user as a member directly (no invitation email —
+    see invite_member_by_email for that flow)."""
     repo = OrganizationRepository(Organization, db)
     org = await repo.get_with_members(org_id)
     if not org:
         raise HTTPException(status_code=404, detail="Organization not found")
 
-    # Only owner or admin can add members
     member = next((m for m in org.members if m.user_id == current_user.user_id), None)
     if not member or member.role not in ("owner", "admin"):
         raise HTTPException(status_code=403, detail="Insufficient permissions")
 
-    # Check if already a member
     existing = await repo.get_member(org_id, data.user_id)
     if existing:
         raise HTTPException(status_code=409, detail="User is already a member")
@@ -557,6 +557,8 @@ async def update_member_role(
     current_user: User = Depends(get_current_active_user),
     db: AsyncSession = Depends(get_db),
 ):
+    """Change a member's role. Owner-only; also syncs the org-admin system
+    roles (Election Administrator, Event Organizer) to match."""
     repo = OrganizationRepository(Organization, db)
     org = await repo.get_with_members(org_id)
     if not org:
@@ -609,6 +611,8 @@ async def remove_member(
     current_user: User = Depends(get_current_active_user),
     db: AsyncSession = Depends(get_db),
 ):
+    """Remove a member (not the owner). Revokes their org-admin system
+    roles first if they held admin."""
     repo = OrganizationRepository(Organization, db)
     org = await repo.get_with_members(org_id)
     if not org:

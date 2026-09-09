@@ -10,6 +10,9 @@ ModelType = TypeVar("ModelType", bound=Base)
 
 
 class BaseRepository(Generic[ModelType]):
+    """Generic get/create/update/delete for any model. Every other
+    repository subclasses this and adds model-specific queries."""
+
     def __init__(self, model: Type[ModelType], session: AsyncSession):
         self.model = model
         self.session = session

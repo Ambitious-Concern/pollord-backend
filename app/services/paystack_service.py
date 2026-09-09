@@ -13,6 +13,9 @@ PAYSTACK_REJECTED = 400
 
 
 class PaystackService:
+    """Thin client for the Paystack API: collecting payments (transactions,
+    mobile money charges) and paying organizers out (transfers)."""
+
     BASE_URL = "https://api.paystack.co"
 
     def __init__(self, secret_key: str):

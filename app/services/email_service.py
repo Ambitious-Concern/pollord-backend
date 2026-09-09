@@ -264,6 +264,7 @@ def waitlist_confirmation_email() -> tuple[str, str]:
 
 
 def ticket_confirmation_email(event_title: str, ticket_count: int) -> tuple[str, str]:
+    """Return (subject, html_body) for a logged-in user's ticket purchase."""
     subject = f"Ticket Confirmation: {event_title}"
     content = f"""
     <h2>Ticket Confirmation</h2>

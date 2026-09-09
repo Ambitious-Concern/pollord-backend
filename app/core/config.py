@@ -5,6 +5,10 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class Settings(BaseSettings):
+    """App-wide configuration, loaded from environment variables / .env.
+    Every field has a dev-safe default except secrets, which must be
+    overridden in production (see .env.example)."""
+
     model_config = SettingsConfigDict(env_file=".env", case_sensitive=False)
 
     # App

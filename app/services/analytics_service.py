@@ -19,11 +19,14 @@ from app.repositories.vote_repository import VoteRepository
 
 
 class AnalyticsService:
+    """Read-only aggregate stats for elections, events, and the platform as
+    a whole — used by the organizer dashboard and admin analytics views."""
+
     def __init__(self, session: AsyncSession):
         self.session = session
 
     async def get_election_stats(self, election_id: UUID) -> dict:
-        # Total eligible voters
+        """Turnout, revenue, and an hourly voting timeline for one election."""
         eligible_count = await self.session.execute(
             select(func.count()).select_from(EligibleVoter).where(
                 EligibleVoter.election_id == election_id
@@ -31,7 +34,6 @@ class AnalyticsService:
         )
         total_eligible = eligible_count.scalar_one()
 
-        # Total votes cast
         vote_count = await self.session.execute(
             select(func.count()).select_from(Vote).where(
                 Vote.election_id == election_id
@@ -39,10 +41,8 @@ class AnalyticsService:
         )
         total_votes = vote_count.scalar_one()
 
-        # Turnout
         turnout = (total_votes / total_eligible * 100) if total_eligible > 0 else 0
 
-        # Votes timeline
         timeline = await self.session.execute(
             select(
                 func.date_trunc("hour", Vote.cast_at).label("hour"),
@@ -73,7 +73,7 @@ class AnalyticsService:
         }
 
     async def get_event_stats(self, event_id: UUID) -> dict:
-        # Total tickets sold
+        """Ticket sales, attendance rate, and revenue for one event."""
         tickets_sold = await self.session.execute(
             select(func.count()).select_from(Ticket).where(
                 Ticket.event_id == event_id,
@@ -82,7 +82,6 @@ class AnalyticsService:
         )
         total_sold = tickets_sold.scalar_one()
 
-        # Tickets used (attended)
         tickets_used = await self.session.execute(
             select(func.count()).select_from(Ticket).where(
                 Ticket.event_id == event_id,
@@ -91,7 +90,6 @@ class AnalyticsService:
         )
         total_used = tickets_used.scalar_one()
 
-        # Revenue
         revenue = await self.session.execute(
             select(func.sum(TicketPurchase.total_amount)).where(
                 TicketPurchase.event_id == event_id,
@@ -100,7 +98,6 @@ class AnalyticsService:
         )
         total_revenue = float(revenue.scalar_one() or 0)
 
-        # Sales by type
         type_stats = await self.session.execute(
             select(
                 TicketType.type_name,
@@ -110,7 +107,6 @@ class AnalyticsService:
             ).where(TicketType.event_id == event_id)
         )
 
-        # Event capacity
         event = await self.session.execute(
             select(Event.capacity).where(Event.event_id == event_id)
         )

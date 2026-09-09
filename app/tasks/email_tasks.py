@@ -7,6 +7,8 @@ logger = logging.getLogger(__name__)
 
 @celery_app.task(bind=True, max_retries=3, default_retry_delay=60)
 def send_email_task(self, to: str, subject: str, html_body: str):
+    """Send one email via SMTP, retrying up to 3 times (60s apart) on
+    failure. Every other task in this module ultimately calls this one."""
     try:
         from app.services.email_service import send_email
         success = send_email(to, subject, html_body)

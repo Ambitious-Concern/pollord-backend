@@ -9,6 +9,8 @@ from app.repositories.base import BaseRepository
 
 
 class TicketTransactionRepository(BaseRepository[TicketTransaction]):
+    """TicketTransaction queries, keyed by Paystack reference."""
+
     def __init__(self, session: AsyncSession):
         super().__init__(TicketTransaction, session)
 

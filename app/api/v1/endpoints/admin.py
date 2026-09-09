@@ -39,6 +39,7 @@ async def list_users(
     limit: int = 20,
     search: Optional[str] = None,
 ):
+    """Every user on the platform, optionally filtered by name/email search."""
     user_repo = UserRepository(User, db)
     if search:
         users = await user_repo.search_users(search, skip, limit)
@@ -75,6 +76,7 @@ async def update_user_status(
     current_user: User = Depends(require_roles(ADMIN_ROLE)),
     db: AsyncSession = Depends(get_db),
 ):
+    """Suspend/reactivate/deactivate an account."""
     user_repo = UserRepository(User, db)
     user = await user_repo.update_account_status(user_id, data.status)
     if not user:
@@ -110,12 +112,12 @@ async def assign_roles(
     current_user: User = Depends(require_roles(ADMIN_ROLE)),
     db: AsyncSession = Depends(get_db),
 ):
+    """Replace a user's roles wholesale with the given role_ids."""
     user_repo = UserRepository(User, db)
     user = await user_repo.get_by_id(user_id, id_field="user_id")
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
 
-    # Remove existing roles and assign new ones
     await user_repo.remove_user_roles(user_id)
     for role_id in data.role_ids:
         await user_repo.assign_role(
@@ -138,6 +140,7 @@ async def list_roles(
     current_user: User = Depends(require_roles(ADMIN_ROLE)),
     db: AsyncSession = Depends(get_db),
 ):
+    """Every role defined on the platform, for the role-assignment UI."""
     user_repo = UserRepository(User, db)
     roles = await user_repo.get_all_roles()
     return [RoleResponse.model_validate(r) for r in roles]
@@ -151,9 +154,9 @@ async def list_audit_logs(
     limit: int = 50,
     entity_type: Optional[str] = None,
 ):
+    """Platform-wide audit trail, optionally filtered by entity type."""
     audit_repo = AuditLogRepository(AuditLog, db)
     if entity_type:
-        # Filter by entity type via raw query
         from sqlalchemy import select
         result = await db.execute(
             select(AuditLog)
@@ -218,6 +221,8 @@ async def list_organizations(
     limit: int = 50,
     verified: Optional[bool] = None,
 ):
+    """Every organization on the platform, optionally filtered to
+    verified/unverified only."""
     from sqlalchemy import select
     from sqlalchemy.orm import selectinload
     from app.models.organization import OrganizationMember
@@ -244,6 +249,7 @@ async def verify_organization(
     current_user: User = Depends(require_roles(ADMIN_ROLE)),
     db: AsyncSession = Depends(get_db),
 ):
+    """Approve or reject an organization's KYC, emailing the owner either way."""
     repo = OrganizationRepository(Organization, db)
     org = await repo.get_with_members(org_id)
     if not org:
@@ -259,7 +265,6 @@ async def verify_organization(
         changes={"is_verified": data.is_verified},
     )
 
-    # Notify organization owner
     if org.owner and org.owner.email:
         from app.services.email_service import _base_template, send_email
         from app.core.config import settings
@@ -360,6 +365,7 @@ class PlatformSettingsUpdate(BaseModel):
 
 
 async def _get_platform_setting(db: AsyncSession, key: str) -> str:
+    """Read one setting, falling back to PLATFORM_SETTING_DEFAULTS."""
     from sqlalchemy import select
     result = await db.execute(select(PlatformSetting).where(PlatformSetting.key == key))
     row = result.scalar_one_or_none()
@@ -367,6 +373,7 @@ async def _get_platform_setting(db: AsyncSession, key: str) -> str:
 
 
 async def _set_platform_setting(db: AsyncSession, key: str, value: str, user_id) -> None:
+    """Upsert one setting row."""
     from sqlalchemy import select
     from datetime import datetime, timezone
     result = await db.execute(select(PlatformSetting).where(PlatformSetting.key == key))
@@ -385,6 +392,8 @@ def _to_bool(value: str) -> bool:
 
 
 async def _fetch_all_settings(db: AsyncSession) -> PlatformSettingsResponse:
+    """Assemble the full settings response, one _get_platform_setting call
+    per field (defaults fill in anything never written to the DB)."""
     return PlatformSettingsResponse(
         vote_price=int(await _get_platform_setting(db, "vote_price")),
         allow_user_registration=_to_bool(await _get_platform_setting(db, "allow_user_registration")),
@@ -408,6 +417,7 @@ async def get_platform_settings(
     current_user: User = Depends(require_roles(ADMIN_ROLE)),
     db: AsyncSession = Depends(get_db),
 ):
+    """Current platform-wide settings (vote price, feature flags, etc.)."""
     return await _fetch_all_settings(db)
 
 
@@ -417,6 +427,8 @@ async def update_platform_settings(
     current_user: User = Depends(require_roles(ADMIN_ROLE)),
     db: AsyncSession = Depends(get_db),
 ):
+    """Partial update of platform settings — only fields present in the
+    request body are changed."""
     updates: dict[str, str] = {}
     if data.vote_price is not None:
         updates["vote_price"] = str(data.vote_price)
@@ -496,6 +508,8 @@ async def override_election_vote_price(
     current_user: User = Depends(require_roles(ADMIN_ROLE)),
     db: AsyncSession = Depends(get_db),
 ):
+    """Set (or clear, with vote_price=None) a per-election vote price
+    override, distinct from the global default."""
     from sqlalchemy import select
     from app.models.election import Election
 
@@ -571,6 +585,8 @@ async def get_organization_analytics(
     current_user: User = Depends(require_roles(ADMIN_ROLE)),
     db: AsyncSession = Depends(get_db),
 ):
+    """Admin-only deep-dive into one organization's elections, events,
+    votes, and revenue."""
     from sqlalchemy import select, func as sqlfunc
     from sqlalchemy.orm import selectinload
     from app.models.organization import Organization, OrganizationMember

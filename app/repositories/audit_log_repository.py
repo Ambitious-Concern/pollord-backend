@@ -9,6 +9,8 @@ from app.repositories.base import BaseRepository
 
 
 class AuditLogRepository(BaseRepository[AuditLog]):
+    """Writes and queries AuditLog rows."""
+
     def __init__(self, model, session: AsyncSession):
         super().__init__(model, session)
 

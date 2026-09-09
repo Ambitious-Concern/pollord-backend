@@ -61,6 +61,8 @@ async def _owns_election(election, current_user: User, db: AsyncSession) -> bool
 
 
 async def _require_ownership(election, current_user: User, db: AsyncSession) -> None:
+    """Raise 403 unless the caller created this election, is a teammate in
+    its organization, or is a System Administrator."""
     if not await _owns_election(election, current_user, db):
         raise HTTPException(status_code=403, detail="You do not have access to this election")
 
@@ -102,6 +104,7 @@ def _extract_settings(data) -> dict:
 
 
 async def _get_global_vote_price(db: AsyncSession) -> int:
+    """Platform-wide vote price setting, falling back to settings.VOTE_PRICE."""
     from sqlalchemy import select
     result = await db.execute(
         select(PlatformSetting).where(PlatformSetting.key == "vote_price")
@@ -246,6 +249,7 @@ async def create_election(
     current_user: User = Depends(require_roles(*ADMIN_ROLES)),
     db: AsyncSession = Depends(get_db),
 ):
+    """Create an election, auto-generating a slug and USSD code."""
     election_repo = ElectionRepository(Election, db)
     audit_repo = AuditLogRepository(AuditLog, db)
 
@@ -310,6 +314,8 @@ async def get_election(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(require_roles(*ADMIN_ROLES)),
 ):
+    """Full election detail including categories/candidates, for the
+    organizer dashboard."""
     election_repo = ElectionRepository(Election, db)
     election = await election_repo.get_with_categories(election_id)
     if not election:
@@ -326,6 +332,9 @@ async def update_election(
     current_user: User = Depends(require_roles(*ADMIN_ROLES)),
     db: AsyncSession = Depends(get_db),
 ):
+    """Partial update. Once active, only SAFE_FIELDS_WHILE_ACTIVE /
+    SAFE_SETTINGS_WHILE_ACTIVE may change — the rest of the ballot is
+    locked so results stay trustworthy."""
     election_repo = ElectionRepository(Election, db)
     election = await election_repo.get_by_id(election_id, id_field="election_id")
     if not election:
@@ -370,6 +379,7 @@ async def delete_election(
     current_user: User = Depends(require_roles(*ADMIN_ROLES)),
     db: AsyncSession = Depends(get_db),
 ):
+    """Delete a draft election."""
     election_repo = ElectionRepository(Election, db)
     election = await election_repo.get_by_id(election_id, id_field="election_id")
     if not election:
@@ -517,6 +527,8 @@ async def add_candidate(
     current_user: User = Depends(require_roles(*ADMIN_ROLES)),
     db: AsyncSession = Depends(get_db),
 ):
+    """Add a candidate before voting starts, emailing them a nomination
+    notice (with a results-tracking link) if an email was given."""
     election_repo = ElectionRepository(Election, db)
     election = await election_repo.get_by_id(election_id, id_field="election_id")
     if not election:
@@ -546,9 +558,7 @@ async def add_candidate(
         }
     )
 
-    # Send nomination email if an address was provided
     if candidate.email:
-        # Resolve org name for a nicer email
         org_repo = OrganizationRepository(Organization, db)
         org_list = await org_repo.get_by_owner(current_user.user_id)
         org_name = org_list[0].name if org_list else current_user.full_name
@@ -650,6 +660,7 @@ async def list_candidates(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_active_user),
 ):
+    """All candidates across an election's categories."""
     candidate_repo = CandidateRepository(Candidate, db)
     candidates = await candidate_repo.get_by_election(election_id)
     return [CandidateResponse.model_validate(c) for c in candidates]
@@ -662,6 +673,7 @@ async def remove_candidate(
     current_user: User = Depends(require_roles(*ADMIN_ROLES)),
     db: AsyncSession = Depends(get_db),
 ):
+    """Remove a candidate from an election."""
     election_repo = ElectionRepository(Election, db)
     election = await election_repo.get_by_id(election_id, id_field="election_id")
     if not election:
@@ -687,6 +699,7 @@ async def update_candidate(
     current_user: User = Depends(require_roles(*ADMIN_ROLES)),
     db: AsyncSession = Depends(get_db),
 ):
+    """Partial update of a candidate before voting starts."""
     election_repo = ElectionRepository(Election, db)
     election = await election_repo.get_by_id(election_id, id_field="election_id")
     if not election:
@@ -722,6 +735,7 @@ async def add_category(
     current_user: User = Depends(require_roles(*ADMIN_ROLES)),
     db: AsyncSession = Depends(get_db),
 ):
+    """Add a category (position/prize) before voting starts."""
     election_repo = ElectionRepository(Election, db)
     election = await election_repo.get_by_id(election_id, id_field="election_id")
     if not election:
@@ -747,6 +761,7 @@ async def list_categories(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_active_user),
 ):
+    """All categories (with their candidates) for an election."""
     category_repo = CategoryRepository(Category, db)
     categories = await category_repo.get_by_election(election_id)
     return [CategoryWithCandidates.model_validate(c) for c in categories]
@@ -759,6 +774,7 @@ async def get_category(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_active_user),
 ):
+    """One election category with its candidates."""
     category_repo = CategoryRepository(Category, db)
     category = await category_repo.get_with_candidates(category_id)
     if not category or category.election_id != election_id:
@@ -774,6 +790,7 @@ async def update_category(
     current_user: User = Depends(require_roles(*ADMIN_ROLES)),
     db: AsyncSession = Depends(get_db),
 ):
+    """Partial update of a category before voting starts."""
     election_repo = ElectionRepository(Election, db)
     election = await election_repo.get_by_id(election_id, id_field="election_id")
     if not election:
@@ -803,6 +820,7 @@ async def delete_category(
     current_user: User = Depends(require_roles(*ADMIN_ROLES)),
     db: AsyncSession = Depends(get_db),
 ):
+    """Delete a category before voting starts."""
     election_repo = ElectionRepository(Election, db)
     election = await election_repo.get_by_id(election_id, id_field="election_id")
     if not election:
@@ -835,6 +853,7 @@ async def add_eligible_voters(
     current_user: User = Depends(require_roles(*ADMIN_ROLES)),
     db: AsyncSession = Depends(get_db),
 ):
+    """Add users to the eligibility list of a gated (non-open) election."""
     election_repo = ElectionRepository(Election, db)
     election = await election_repo.get_by_id(election_id, id_field="election_id")
     if not election:
@@ -854,6 +873,7 @@ async def list_eligible_voters(
     current_user: User = Depends(require_roles(*ADMIN_ROLES)),
     db: AsyncSession = Depends(get_db),
 ):
+    """The eligibility list for a gated election."""
     election_repo = ElectionRepository(Election, db)
     election = await election_repo.get_by_id(election_id, id_field="election_id")
     if not election:

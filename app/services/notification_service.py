@@ -6,6 +6,11 @@ logger = logging.getLogger(__name__)
 
 
 class NotificationService:
+    """Thin wrapper composing email_service's templates + send_email into
+    one call per notification type. Superseded for new code by the Celery
+    tasks in app.tasks.email_tasks (async dispatch); kept for existing
+    call sites that still send synchronously."""
+
     async def send_verification_email(self, email: str, token: str) -> None:
         from app.core.config import settings
         link = f"{settings.FRONTEND_URL}/verify-email?token={token}"

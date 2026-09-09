@@ -11,6 +11,10 @@ from app.models.base import Base
 
 
 class TicketTransaction(Base):
+    """Tracks a Paystack payment for a ticket purchase from initiation
+    through webhook confirmation, independent of the TicketPurchase it
+    ultimately creates (which only exists once payment succeeds)."""
+
     __tablename__ = "ticket_transactions"
     __table_args__ = (
         CheckConstraint(

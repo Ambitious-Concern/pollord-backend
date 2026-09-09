@@ -39,6 +39,7 @@ async def subscribe(
     request: Request,
     db: AsyncSession = Depends(get_db),
 ):
+    """Join the waitlist; idempotent for an already-subscribed email."""
     email = data.email.strip().lower()
 
     result = await db.execute(

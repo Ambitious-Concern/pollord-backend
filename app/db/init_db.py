@@ -54,6 +54,9 @@ DEFAULT_ROLES = [
 
 
 async def init_db() -> None:
+    """Idempotent startup seed: creates the fixed set of roles in
+    DEFAULT_ROLES and a default admin account, skipping anything that
+    already exists. Runs on every app startup, not just first deploy."""
     async with async_session_maker() as session:
         for role_data in DEFAULT_ROLES:
             result = await session.execute(

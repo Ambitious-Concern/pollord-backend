@@ -14,6 +14,9 @@ if TYPE_CHECKING:
 
 
 class Organization(TimestampMixin, Base):
+    """A KYC-verified account that owns elections/events; created_by/owner_id
+    is the user who ran KYC, with other users joining as OrganizationMembers."""
+
     __tablename__ = "organizations"
 
     org_id: Mapped[uuid.UUID] = mapped_column(
@@ -44,6 +47,9 @@ class Organization(TimestampMixin, Base):
 
 
 class OrganizationMember(Base):
+    """A user's membership in an Organization, with a role (owner/admin/
+    editor/member) that controls what they can manage."""
+
     __tablename__ = "organization_members"
 
     member_id: Mapped[uuid.UUID] = mapped_column(

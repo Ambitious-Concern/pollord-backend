@@ -60,6 +60,7 @@ async def get_profile(
     current_user: User = Depends(get_current_active_user),
     db: AsyncSession = Depends(get_db),
 ):
+    """The signed-in user's own profile."""
     return await _user_response(current_user, db)
 
 
@@ -69,6 +70,7 @@ async def update_profile(
     current_user: User = Depends(get_current_active_user),
     db: AsyncSession = Depends(get_db),
 ):
+    """Partial update of the signed-in user's own profile fields."""
     user_repo = UserRepository(User, db)
     update_data = data.model_dump(exclude_unset=True)
     if update_data:
@@ -109,7 +111,6 @@ async def search_users(
         return []
     user_repo = UserRepository(User, db)
     users = await user_repo.search_users(q, skip=0, limit=limit)
-    # Exclude the searching user from results
     return [
         UserSearchResult(user_id=str(u.user_id), full_name=u.full_name, email=u.email)
         for u in users
@@ -124,6 +125,7 @@ async def get_activity(
     skip: int = 0,
     limit: int = 20,
 ):
+    """The signed-in user's own audit trail (logins, votes cast, etc.)."""
     audit_repo = AuditLogRepository(AuditLog, db)
     logs = await audit_repo.get_by_user(current_user.user_id, skip, limit)
     return [AuditLogResponse.model_validate(log) for log in logs]

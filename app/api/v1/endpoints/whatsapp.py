@@ -33,6 +33,7 @@ async def verify_webhook(
     hub_verify_token: str = Query(alias="hub.verify_token", default=""),
     hub_challenge: str = Query(alias="hub.challenge", default=""),
 ):
+    """Meta's one-time webhook verification handshake."""
     if hub_mode == "subscribe" and hub_verify_token == settings.WHATSAPP_VERIFY_TOKEN:
         return int(hub_challenge)
     raise HTTPException(status_code=403, detail="Verification failed")
@@ -47,6 +48,8 @@ async def receive_webhook(
     request: Request,
     db: AsyncSession = Depends(get_db),
 ):
+    """Verify the signature, then route each text message through the
+    conversation state machine and reply."""
     body = await request.body()
 
     # Verify Meta webhook signature when app secret is configured

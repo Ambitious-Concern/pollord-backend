@@ -11,6 +11,9 @@ from app.repositories.base import BaseRepository
 
 
 class PayoutRequestRepository(BaseRepository[PayoutRequest]):
+    """PayoutRequest queries: pending checks, totals requested, transfer
+    result recording."""
+
     def __init__(self, model, session: AsyncSession):
         super().__init__(model, session)
 

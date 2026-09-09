@@ -40,6 +40,9 @@ logger = logging.getLogger(__name__)
 
 
 class TicketingService:
+    """Ticket purchase (free + paid), scanning/check-in, and the admin-side
+    manual-issue and resend-email flows for events."""
+
     def __init__(
         self,
         event_repo: EventRepository,
@@ -66,7 +69,10 @@ class TicketingService:
         guest_email: Optional[str] = None,
         guest_phone: Optional[str] = None,
     ) -> TicketPurchaseResponse:
-        # 1. Verify event
+        """Free-ticket purchase path (rejects if any item is priced — see
+        POST /tickets/initiate-payment for paid tickets). Validates each
+        item, atomically decrements stock, then issues tickets and emails
+        a confirmation."""
         event = await self.event_repo.get_with_ticket_types(data.event_id)
         if not event:
             raise HTTPException(
@@ -744,6 +750,9 @@ class TicketingService:
     async def fulfill_paid_purchase(
         self, reference: str, paystack_data: dict, txn_repo: "TicketTransactionRepository"
     ) -> TicketPurchaseResponse:
+        """Called from the Paystack webhook once a payment succeeds: issues
+        the tickets for a paid purchase, or flags needs_refund if stock/sales
+        window changed out from under the payment while it was in flight."""
         txn = await txn_repo.get_by_reference(reference)
         if not txn:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Transaction not found")
@@ -870,6 +879,8 @@ class TicketingService:
         user_agent: Optional[str] = None,
         expected_event_id: Optional[UUID] = None,
     ) -> TicketValidationResponse:
+        """Scan-and-check-in a ticket by code. Shared by the public scan
+        link and the signed-in organizer scanner."""
         ticket = await self.ticket_repo.get_by_ticket_code(ticket_code)
         if not ticket:
             return TicketValidationResponse(
@@ -919,12 +930,10 @@ class TicketingService:
                 message="Ticket has been cancelled",
             )
 
-        # Mark as used
         updated = await self.ticket_repo.mark_as_used(
             ticket.ticket_id, scanned_by
         )
 
-        # Audit log
         await self.audit_repo.log_action(
             action_type="TICKET_SCANNED",
             entity_type="Ticket",

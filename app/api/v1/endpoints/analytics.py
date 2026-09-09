@@ -39,6 +39,7 @@ async def election_analytics(
     ),
     db: AsyncSession = Depends(get_db),
 ):
+    """Turnout, revenue, and voting timeline for one election."""
     service = AnalyticsService(db)
     return await service.get_election_stats(election_id)
 
@@ -51,6 +52,7 @@ async def event_analytics(
     ),
     db: AsyncSession = Depends(get_db),
 ):
+    """Ticket sales, attendance, and revenue for one event."""
     service = AnalyticsService(db)
     return await service.get_event_stats(event_id)
 
@@ -60,5 +62,6 @@ async def system_analytics(
     current_user: User = Depends(require_roles("System Administrator")),
     db: AsyncSession = Depends(get_db),
 ):
+    """Platform-wide totals for the admin dashboard."""
     service = AnalyticsService(db)
     return await service.get_system_stats()

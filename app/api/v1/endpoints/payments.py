@@ -44,6 +44,8 @@ _crypto = CryptographyService()
 
 
 async def _resolve_vote_price(parent, db: AsyncSession) -> int:
+    """Per-election/event override, else the platform-wide setting, else
+    the hardcoded settings.VOTE_PRICE default."""
     if getattr(parent, "vote_price", None) is not None:
         return parent.vote_price
     result = await db.execute(
@@ -63,9 +65,11 @@ async def paystack_webhook(
     request: Request,
     db: AsyncSession = Depends(get_db),
 ):
+    """Paystack webhook for vote payments — verifies the signature, then
+    routes charge.success/failed to the matching handler by reference
+    prefix (ticket_ vs. vote references share this one endpoint)."""
     body = await request.body()
 
-    # Verify Paystack signature (HMAC-SHA512)
     sig = request.headers.get("x-paystack-signature", "")
     expected = hmac.new(
         settings.PAYSTACK_SECRET_KEY.encode(),
@@ -90,7 +94,6 @@ async def paystack_webhook(
             return await _handle_ticket_charge_failed(reference, data, db)
         return {"status": "ignored"}
 
-    # Route to the correct handler
     if event == "charge.success":
         return await _handle_charge_success(reference, data, db)
     if event in ("charge.failed", "charge.abandoned"):
@@ -142,6 +145,10 @@ async def _notify_ussd(reference: str, body: str) -> None:
 
 
 async def _handle_charge_success(reference: str, data: dict, db: AsyncSession) -> dict:
+    """Cast the vote for a successful paid-vote transaction: re-checks the
+    amount and that the election/event is still open (either could have
+    changed between payment initiation and this webhook landing), then
+    inserts the vote and notifies the voter over WhatsApp/USSD SMS."""
     txn_repo = TransactionRepository(db)
     txn = await txn_repo.get_by_reference(reference)
 
@@ -256,6 +263,7 @@ async def _handle_charge_success(reference: str, data: dict, db: AsyncSession) -
 
 
 async def _handle_charge_failed(reference: str, data: dict, db: AsyncSession) -> dict:
+    """Mark a pending vote-payment transaction failed and notify the voter."""
     txn_repo = TransactionRepository(db)
     txn = await txn_repo.get_by_reference(reference)
 
@@ -280,6 +288,8 @@ async def _handle_charge_failed(reference: str, data: dict, db: AsyncSession) ->
 
 
 async def _handle_ticket_charge_success(reference: str, data: dict, db: AsyncSession) -> dict:
+    """Ticket-purchase counterpart of _handle_charge_success — delegates to
+    TicketingService.fulfill_paid_purchase for the actual issuance."""
     txn_repo = TicketTransactionRepository(db)
     txn = await txn_repo.get_by_reference(reference)
     if not txn:
@@ -298,6 +308,7 @@ async def _handle_ticket_charge_success(reference: str, data: dict, db: AsyncSes
 
 
 async def _handle_ticket_charge_failed(reference: str, data: dict, db: AsyncSession) -> dict:
+    """Ticket-purchase counterpart of _handle_charge_failed."""
     txn_repo = TicketTransactionRepository(db)
     txn = await txn_repo.get_by_reference(reference)
     if not txn:

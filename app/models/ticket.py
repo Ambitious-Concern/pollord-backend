@@ -25,6 +25,9 @@ if TYPE_CHECKING:
 
 
 class Ticket(Base):
+    """One issued ticket (one per attendee) belonging to a TicketPurchase —
+    a purchase of quantity>1 produces that many Ticket rows."""
+
     __tablename__ = "tickets"
     __table_args__ = (
         CheckConstraint(
@@ -84,6 +87,9 @@ class Ticket(Base):
 
 
 class TicketPurchase(Base):
+    """One checkout — free or paid, by a user or a guest — that produced
+    one or more Ticket rows."""
+
     __tablename__ = "ticket_purchases"
     __table_args__ = (
         CheckConstraint(

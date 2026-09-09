@@ -11,6 +11,8 @@ from app.repositories.base import BaseRepository
 
 
 class ElectionRepository(BaseRepository[Election]):
+    """Election queries: eligibility, USSD/slug lookup, creator-scoped listing."""
+
     def __init__(self, model, session: AsyncSession):
         super().__init__(model, session)
 
@@ -147,6 +149,8 @@ class ElectionRepository(BaseRepository[Election]):
 
 
 class CategoryRepository(BaseRepository[Category]):
+    """Category queries, scoped by election or event parent."""
+
     def __init__(self, model, session: AsyncSession):
         super().__init__(model, session)
 
@@ -178,6 +182,8 @@ class CategoryRepository(BaseRepository[Category]):
 
 
 class CandidateRepository(BaseRepository[Candidate]):
+    """Candidate queries, scoped by election, event, or category."""
+
     def __init__(self, model, session: AsyncSession):
         super().__init__(model, session)
 

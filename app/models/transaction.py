@@ -10,6 +10,9 @@ from app.models.base import Base
 
 
 class Transaction(Base):
+    """A Paystack payment for one or more paid votes — the vote-side
+    counterpart of TicketTransaction."""
+
     __tablename__ = "transactions"
 
     transaction_id: Mapped[uuid.UUID] = mapped_column(

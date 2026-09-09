@@ -9,6 +9,8 @@ from app.repositories.base import BaseRepository
 
 
 class TransactionRepository(BaseRepository[Transaction]):
+    """Transaction (paid-vote payment) queries, keyed by Paystack reference."""
+
     def __init__(self, session: AsyncSession):
         super().__init__(Transaction, session)
 

@@ -11,6 +11,10 @@ from app.core.security import (
 
 
 class CryptographyService:
+    """Thin OO wrapper around app.core.security's crypto functions, so
+    services that need voting crypto can take one injectable dependency
+    instead of importing free functions directly."""
+
     def encrypt_vote_data(self, candidate_ids: list[str]) -> bytes:
         return encrypt_vote({"candidate_ids": candidate_ids})
 

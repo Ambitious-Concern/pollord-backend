@@ -88,6 +88,7 @@ async def list_event_payout_requests(
     current_user: User = Depends(require_roles(*ORGANIZER_ROLES)),
     db: AsyncSession = Depends(get_db),
 ):
+    """This event's payout request history."""
     return await _get_service(db).list_for_event(event_id, current_user)
 
 
@@ -120,6 +121,7 @@ async def list_election_payout_requests(
     current_user: User = Depends(require_roles(*ELECTION_ROLES)),
     db: AsyncSession = Depends(get_db),
 ):
+    """This election's payout request history."""
     return await _get_service(db).list_for_election(election_id, current_user)
 
 
@@ -130,6 +132,7 @@ async def list_my_payout_requests(
     ),
     db: AsyncSession = Depends(get_db),
 ):
+    """All payout requests made by the signed-in organizer."""
     return await _get_service(db).list_mine(current_user.user_id)
 
 

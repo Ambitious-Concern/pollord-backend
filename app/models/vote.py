@@ -18,6 +18,11 @@ if TYPE_CHECKING:
 
 
 class Vote(Base):
+    """One encrypted, signed ballot for a category. uq_vote_per_category
+    is what actually enforces one-vote-per-voter-per-category — see
+    app.core.security's voter-hash functions for how voter_hash is derived
+    per channel (web/WhatsApp/USSD/email-OTP)."""
+
     __tablename__ = "votes"
     __table_args__ = (
         UniqueConstraint("category_id", "voter_hash", name="uq_vote_per_category"),
@@ -61,6 +66,8 @@ class Vote(Base):
 
 
 class VoteReceipt(Base):
+    """Proof-of-vote code issued to an authenticated voter after casting."""
+
     __tablename__ = "vote_receipts"
 
     receipt_id: Mapped[uuid.UUID] = mapped_column(
