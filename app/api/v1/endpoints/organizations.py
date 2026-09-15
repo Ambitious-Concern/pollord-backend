@@ -249,17 +249,21 @@ async def get_organization_stats(
     org_id: UUID,
     db: AsyncSession = Depends(get_db),
 ):
-    """Aggregate elections/events run and total votes cast, scoped to the org's
-    owner (same scoping the public org page already uses for its listings)."""
+    """Aggregate elections/events run and total votes cast, scoped to everyone
+    on the org's team — elections/events carry no org_id, only created_by, so
+    "the organization's data" means anything created by any teammate, not
+    just the literal owner account (same scoping list_elections/list_events
+    already use for the authenticated dashboard)."""
     repo = OrganizationRepository(Organization, db)
     org = await repo.get_with_members(org_id)
     if not org:
         raise HTTPException(status_code=404, detail="Organization not found")
 
+    teammate_ids = await repo.get_teammate_ids(org.owner_id)
     election_repo = ElectionRepository(Election, db)
     event_repo = EventRepository(Event, db)
-    elections = await election_repo.get_elections_by_creator(org.owner_id, limit=10_000)
-    events = await event_repo.get_events_by_creator(org.owner_id, limit=10_000)
+    elections = await election_repo.get_elections_by_creators(teammate_ids, limit=10_000)
+    events = await event_repo.get_events_by_creators(teammate_ids, limit=10_000)
 
     vote_repo = VoteRepository(Vote, db)
     total_votes = 0
