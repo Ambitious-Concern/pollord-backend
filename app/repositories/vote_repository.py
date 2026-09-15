@@ -39,8 +39,13 @@ class VoteRepository(BaseRepository[Vote]):
         return list(result.scalars().all())
 
     async def count_by_election(self, election_id: UUID) -> int:
+        """Total votes cast, not total vote rows — a single row can represent
+        many votes at once (a paid multi-vote purchase sets Vote.count > 1),
+        same weighting VotingService.get_live_results already applies via
+        sum(v.count for v in votes). A plain COUNT(*) here undercounts
+        whenever any vote was bought in bulk."""
         result = await self.session.execute(
-            select(func.count()).select_from(Vote).where(
+            select(func.coalesce(func.sum(Vote.count), 0)).where(
                 Vote.election_id == election_id
             )
         )
