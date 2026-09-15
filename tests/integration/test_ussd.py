@@ -152,7 +152,7 @@ class TestUssdVotingFlow:
         assert r2.status_code == 200
         body2 = r2.json()
         assert body2["continueSession"] is True
-        assert candidate.short_code in body2["message"]
+        assert "nominee's code" in body2["message"].lower()
 
         r3 = await client.post(
             f"{WEBHOOK_URL}?token={TOKEN}", json=_ussd_post(candidate.short_code)
@@ -184,8 +184,15 @@ class TestUssdVotingFlow:
             f"{WEBHOOK_URL}?token={TOKEN}",
             json=_ussd_post("*928*928#", phone, new_session=True),
         )
-        second = await client.post(
+        await client.post(
             f"{WEBHOOK_URL}?token={TOKEN}", json=_ussd_post(election.ussd_code, phone)
+        )
+        # The category isn't known until a nominee code comes in (no category
+        # picker anymore), so "already voted" can only be reported here, one
+        # step later than when a single-category election used to shortcut
+        # straight to its one ballot and check upfront.
+        second = await client.post(
+            f"{WEBHOOK_URL}?token={TOKEN}", json=_ussd_post(candidate.short_code, phone)
         )
         body2 = second.json()
         assert body2["continueSession"] is False

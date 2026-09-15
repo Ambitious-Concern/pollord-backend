@@ -4,8 +4,13 @@ USSD conversation state machine (Arkesel gateway).
 States (stored per phone number in Redis, TTL = USSD_SESSION_TTL_SECONDS —
 matches Arkesel's own ~180s session timeout):
   idle              → greet, ask for the election/event's USSD code
-  awaiting_category → parent has >1 category with candidates, waiting for a number
-  awaiting_vote     → ballot shown, waiting for one candidate short code
+  awaiting_vote     → straight from the access code to "enter a nominee's
+                      code" — no category picker and no candidate listing;
+                      too much for a USSD screen. The category itself is
+                      inferred from whichever nominee code comes back
+                      (see _find_candidate_by_code), then shown back to the
+                      voter as confirmation (name + category) alongside the
+                      vote-count/price prompt.
   awaiting_vote_count  → paid vote — waiting for how many votes to buy (charge
                          is vote_price * count; free votes skip this entirely)
   awaiting_network     → paid vote — waiting for a mobile money network choice
@@ -60,7 +65,6 @@ from app.repositories.transaction_repository import TransactionRepository
 from app.repositories.vote_repository import VoteRepository
 from app.services.cryptography_service import CryptographyService
 from app.services.paystack_service import PaystackService
-from app.services.voting_service import resolve_candidate_selection
 
 logger = logging.getLogger(__name__)
 
@@ -142,8 +146,6 @@ class UssdConversationService:
         session = await self._get_session(phone)
         state = session.get("state", "idle")
 
-        if state == "awaiting_category":
-            return await self._handle_category_selection(phone, text, session)
         if state == "awaiting_vote":
             return await self._handle_vote_input(phone, text, session)
         if state == "awaiting_vote_count":
@@ -176,95 +178,18 @@ class UssdConversationService:
         except HTTPException as exc:
             return (str(exc.detail), True)
 
-        categories = sorted(parent.categories, key=lambda c: c.display_order)
-        categories = [c for c in categories if c.candidates]
-        if not categories:
+        has_candidates = any(c.candidates for c in parent.categories)
+        if not has_candidates:
             return (f"{parent.title} has no candidates yet.", True)
 
-        if len(categories) == 1:
-            return await self._present_ballot(phone, parent, parent_kind, categories[0])
-
-        lines = [f"{parent.title}", "Pick a category:"]
-        for i, cat in enumerate(categories, start=1):
-            lines.append(f"{i}. {cat.name}")
-
-        await self._set_session(
-            phone,
-            {
-                "state": "awaiting_category",
-                "parent_id": str(_parent_id(parent, parent_kind)),
-                "parent_kind": parent_kind,
-                "category_ids": [str(c.category_id) for c in categories],
-            },
-        )
-        return ("\n".join(lines), False)
-
-    async def _handle_category_selection(
-        self, phone: str, text: str, session: dict
-    ) -> Tuple[str, bool]:
-        category_ids = session.get("category_ids", [])
-        choice = text.strip()
-        if not choice.isdigit() or not (1 <= int(choice) <= len(category_ids)):
-            return (f"Reply with a number from 1 to {len(category_ids)}:", False)
-
-        parent, parent_kind = await self._reload_parent(session)
-        if not parent:
-            await self._clear_session(phone)
-            return ("No longer available. Dial in again to retry.", True)
-
-        category_id = UUID(category_ids[int(choice) - 1])
-        category = next(
-            (c for c in parent.categories if c.category_id == category_id), None
-        )
-        if not category:
-            await self._clear_session(phone)
-            return ("That category is no longer available.", True)
-
-        return await self._present_ballot(phone, parent, parent_kind, category)
-
-    async def _present_ballot(
-        self, phone: str, parent, parent_kind: str, category
-    ) -> Tuple[str, bool]:
-        if category.election_type != "single_choice":
-            return (
-                f"{category.name} needs a ranked ballot — please vote for it "
-                "on the website or via WhatsApp instead.",
-                True,
-            )
-
-        allow_revoting = getattr(parent, "allow_revoting", False)
-        if not allow_revoting:
-            voter_hash = generate_ussd_voter_hash(phone, category.category_id)
-            if await self.vote_repo.has_voted(voter_hash, category.category_id):
-                return (f"You have already voted in {category.name}.", True)
-
-        candidates = sorted(category.candidates, key=lambda c: c.display_order)
+        # Straight to a nominee code — no category menu, no candidate list.
+        # Which category it belongs to is worked out later from the code
+        # itself (_find_candidate_by_code), once one comes back.
         vote_price = await _get_effective_vote_price(parent, self.db)
-
-        header = f"{parent.title}: {category.name}"
-        price_line = None
+        lines = [parent.title, "Enter your nominee's code:"]
         if vote_price > 0:
-            symbol = _CURRENCY_SYMBOL.get(
-                settings.VOTE_CURRENCY, settings.VOTE_CURRENCY
-            )
-            price_line = f"Cost: {symbol}{vote_price / 100:.2f}/vote"
-
-        full_lines = [header, "Enter a candidate code:"]
-        full_lines += [f"{c.short_code}: {c.name}" for c in candidates if c.short_code]
-        if price_line:
-            full_lines.append(price_line)
-        full_message = "\n".join(full_lines)
-
-        if len(full_message) <= settings.USSD_MAX_MESSAGE_LENGTH:
-            message = full_message
-        else:
-            # Too many nominees to list on one screen — ask for the code
-            # directly instead (organizers publish per-nominee codes on
-            # posters/social media for exactly this case).
-            lines = [header, "Enter your nominee's code:"]
-            if price_line:
-                lines.append(price_line)
-            message = "\n".join(lines)
+            symbol = _CURRENCY_SYMBOL.get(settings.VOTE_CURRENCY, settings.VOTE_CURRENCY)
+            lines.append(f"Cost: {symbol}{vote_price / 100:.2f}/vote")
 
         await self._set_session(
             phone,
@@ -272,11 +197,10 @@ class UssdConversationService:
                 "state": "awaiting_vote",
                 "parent_id": str(_parent_id(parent, parent_kind)),
                 "parent_kind": parent_kind,
-                "category_id": str(category.category_id),
                 "vote_price": vote_price,
             },
         )
-        return (message, False)
+        return ("\n".join(lines), False)
 
     async def _handle_vote_input(
         self, phone: str, text: str, session: dict
@@ -292,39 +216,34 @@ class UssdConversationService:
             await self._clear_session(phone)
             return (str(exc.detail), True)
 
-        category_id = UUID(session["category_id"])
-        category = next(
-            (c for c in parent.categories if c.category_id == category_id), None
-        )
-        if not category:
-            await self._clear_session(phone)
-            return ("That category is no longer available.", True)
-
         code = text.strip().upper()
         if not code:
-            return ("Please enter a candidate code:", False)
+            return ("Please enter your nominee's code:", False)
 
-        try:
-            candidate_ids = resolve_candidate_selection(category, None, [code])
-        except HTTPException as exc:
-            return (f"{exc.detail}\nTry again or dial in fresh to restart.", False)
+        category, candidate = _find_candidate_by_code(parent, code)
+        if not candidate:
+            return (f"Unknown nominee code: {code}. Try again:", False)
+
+        if category.election_type != "single_choice":
+            await self._clear_session(phone)
+            return (
+                f"{category.name} needs a ranked ballot — please vote for it "
+                "on the website or via WhatsApp instead.",
+                True,
+            )
 
         vote_price = session.get("vote_price", 0)
         allow_revoting = getattr(parent, "allow_revoting", False)
-        base_hash = generate_ussd_voter_hash(phone, category_id)
+        base_hash = generate_ussd_voter_hash(phone, category.category_id)
         if allow_revoting:
             voter_hash = hashlib.sha256(
                 f"{base_hash}:{_uuid.uuid4().hex}".encode()
             ).hexdigest()
         else:
             voter_hash = base_hash
-            if await self.vote_repo.has_voted(voter_hash, category_id):
+            if await self.vote_repo.has_voted(voter_hash, category.category_id):
                 await self._clear_session(phone)
                 return (f"You have already voted in {category.name}.", True)
-
-        candidate = next(
-            c for c in category.candidates if c.candidate_id == candidate_ids[0]
-        )
 
         if vote_price == 0:
             return await self._cast_vote_directly(
@@ -337,7 +256,7 @@ class UssdConversationService:
                 "state": "awaiting_vote_count",
                 "parent_id": str(_parent_id(parent, parent_kind)),
                 "parent_kind": parent_kind,
-                "category_id": str(category_id),
+                "category_id": str(category.category_id),
                 "candidate_id": str(candidate.candidate_id),
                 "candidate_name": candidate.name,
                 "voter_hash": voter_hash,
@@ -460,7 +379,9 @@ class UssdConversationService:
         except HTTPException as exc:
             logger.error(
                 "USSD charge_mobile_money rejected ref=%s provider=%s: %s",
-                reference, provider, exc.detail,
+                reference,
+                provider,
+                exc.detail,
             )
             await self.txn_repo.update_status(reference, "failed")
             await self._clear_session(phone)
@@ -468,7 +389,10 @@ class UssdConversationService:
 
         logger.info(
             "USSD charge_mobile_money ref=%s provider=%s status=%s display_text=%s",
-            reference, provider, charge.get("status"), charge.get("display_text"),
+            reference,
+            provider,
+            charge.get("status"),
+            charge.get("display_text"),
         )
 
         # So the Paystack webhook (payments.py) knows to text this phone,
@@ -505,13 +429,16 @@ class UssdConversationService:
             prompt = display_text or "Enter the OTP sent to your phone"
             return (
                 _join_sentence(
-                    prompt, f"Confirm {amount_display}, {vote_label} for {candidate_name}:"
+                    prompt,
+                    f"Confirm {amount_display}, {vote_label} for {candidate_name}:",
                 ),
                 False,
             )
 
         await self._clear_session(phone)
-        instruction = display_text or f"Check your phone and approve the {provider_label} prompt"
+        instruction = (
+            display_text or f"Check your phone and approve the {provider_label} prompt"
+        )
         return (
             _join_sentence(
                 instruction,
@@ -543,12 +470,16 @@ class UssdConversationService:
 
         logger.info(
             "USSD submit_otp ref=%s status=%s display_text=%s",
-            reference, result.get("status"), result.get("display_text"),
+            reference,
+            result.get("status"),
+            result.get("display_text"),
         )
 
         instruction = result.get("display_text") or "Payment submitted"
         return (
-            _join_sentence(instruction, f"{vote_label} for {candidate_name}. SMS on confirm."),
+            _join_sentence(
+                instruction, f"{vote_label} for {candidate_name}. SMS on confirm."
+            ),
             True,
         )
 
@@ -636,3 +567,18 @@ class UssdConversationService:
 
 def _parent_id(parent, parent_kind: str) -> Optional[UUID]:
     return parent.election_id if parent_kind == "election" else parent.event_id
+
+
+def _find_candidate_by_code(parent, code: str):
+    """Looks up a nominee by short code across every category on this
+    election/event, so the voter never has to pick a category first — the
+    category is just wherever the code turns up. Codes are meant to be
+    unique per election/event (organizers hand them out on one poster for
+    the whole thing), so the first match wins; returns (None, None) if
+    nothing matches."""
+    code = code.upper()
+    for category in sorted(parent.categories, key=lambda c: c.display_order):
+        for candidate in category.candidates:
+            if candidate.short_code and candidate.short_code.upper() == code:
+                return category, candidate
+    return None, None
