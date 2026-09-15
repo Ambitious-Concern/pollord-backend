@@ -17,6 +17,10 @@ matches Arkesel's own ~180s session timeout):
                          (only reached if the dialing number's prefix isn't a
                          recognized network block — otherwise skipped, see
                          _detect_network)
+  awaiting_checkout_confirm → paid vote — total + network are both known, one
+                         last "Proceed to checkout? 1. Proceed 2. Cancel"
+                         before we actually hand off to Paystack. Nothing has
+                         been charged yet at this point.
   awaiting_payment_otp → some providers need Paystack's OTP relayed back via
                          /charge/submit_otp before the debit completes; others
                          ("pay_offline") need nothing further from us at all
@@ -152,6 +156,8 @@ class UssdConversationService:
             return await self._handle_vote_count(phone, text, session)
         if state == "awaiting_network":
             return await self._handle_network_selection(phone, text, session)
+        if state == "awaiting_checkout_confirm":
+            return await self._handle_checkout_confirm(phone, text, session)
         if state == "awaiting_payment_otp":
             return await self._handle_payment_otp(phone, text, session)
 
@@ -297,7 +303,7 @@ class UssdConversationService:
         detected = _detect_network(phone)
         if detected:
             provider, provider_label = detected
-            return await self._charge_and_respond(
+            return await self._start_checkout_confirm(
                 phone, updated_session, provider, provider_label
             )
 
@@ -320,6 +326,47 @@ class UssdConversationService:
             return ("Reply 1 for MTN, 2 for Vodafone, or 3 for AirtelTigo:", False)
 
         provider, provider_label = network
+        return await self._start_checkout_confirm(phone, session, provider, provider_label)
+
+    async def _start_checkout_confirm(
+        self, phone: str, session: dict, provider: str, provider_label: str
+    ) -> Tuple[str, bool]:
+        """Last stop before we actually hand off to Paystack — nothing's been
+        charged yet. A plain proceed/cancel here (rather than walking the
+        voter through Paystack's own OTP/authorization language up front)
+        keeps this screen simple; whatever Paystack actually needs next
+        (OTP relay, on-phone approval) only comes up once they've said yes."""
+        await self._set_session(
+            phone,
+            {
+                **session,
+                "state": "awaiting_checkout_confirm",
+                "provider": provider,
+                "provider_label": provider_label,
+            },
+        )
+        symbol = _CURRENCY_SYMBOL.get(settings.VOTE_CURRENCY, settings.VOTE_CURRENCY)
+        vote_count = session.get("vote_count", 1)
+        candidate_name = session.get("candidate_name", "")
+        amount = session.get("amount", 0)
+        return (
+            f"{vote_count} vote(s) for {candidate_name}: {symbol}{amount / 100:.2f}.\n"
+            "Proceed to checkout?\n1. Proceed\n2. Cancel",
+            False,
+        )
+
+    async def _handle_checkout_confirm(
+        self, phone: str, text: str, session: dict
+    ) -> Tuple[str, bool]:
+        choice = text.strip()
+        if choice == "2":
+            await self._clear_session(phone)
+            return ("Vote cancelled.", True)
+        if choice != "1":
+            return ("Reply 1 to proceed or 2 to cancel:", False)
+
+        provider = session.get("provider", "")
+        provider_label = session.get("provider_label", "")
         return await self._charge_and_respond(phone, session, provider, provider_label)
 
     async def _charge_and_respond(

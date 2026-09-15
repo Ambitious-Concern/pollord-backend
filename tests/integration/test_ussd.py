@@ -315,6 +315,11 @@ class TestUssdPaidVoteFlow:
         body = network_prompt.json()
         assert "5 vote" in body["message"]
 
+        confirm = await client.post(
+            f"{WEBHOOK_URL}?token={TOKEN}", json=_ussd_post("1", phone)
+        )
+        assert "proceed to checkout" in confirm.json()["message"].lower()
+
         await client.post(f"{WEBHOOK_URL}?token={TOKEN}", json=_ussd_post("1", phone))
         assert charged["amount"] == 250  # 5 votes * 50 pesewas
 
@@ -347,8 +352,16 @@ class TestUssdPaidVoteFlow:
 
         response = await self._dial_to_network_prompt(client, election, candidate, phone)
         body = response.json()
-        assert body["continueSession"] is False
+        # Network is auto-detected, so the network menu is skipped, but the
+        # checkout confirmation still shows before anything is charged.
+        assert body["continueSession"] is True
         assert "Choose payment network" not in body["message"]
+        assert "proceed to checkout" in body["message"].lower()
+
+        final = await client.post(
+            f"{WEBHOOK_URL}?token={TOKEN}", json=_ussd_post("1", phone)
+        )
+        assert final.json()["continueSession"] is False
         assert charged["provider"] == "mtn"
 
     async def test_pay_offline_ends_session_immediately(
@@ -366,6 +379,11 @@ class TestUssdPaidVoteFlow:
             client, election, candidate, phone
         )
         assert "Bea" in network_prompt.json()["message"]
+
+        confirm = await client.post(
+            f"{WEBHOOK_URL}?token={TOKEN}", json=_ussd_post("1", phone)
+        )
+        assert "proceed to checkout" in confirm.json()["message"].lower()
 
         response = await client.post(
             f"{WEBHOOK_URL}?token={TOKEN}", json=_ussd_post("1", phone)
@@ -394,6 +412,11 @@ class TestUssdPaidVoteFlow:
 
         await self._dial_to_network_prompt(client, election, candidate, phone)
 
+        confirm = await client.post(
+            f"{WEBHOOK_URL}?token={TOKEN}", json=_ussd_post("1", phone)
+        )
+        assert "proceed to checkout" in confirm.json()["message"].lower()
+
         otp_prompt = await client.post(
             f"{WEBHOOK_URL}?token={TOKEN}", json=_ussd_post("1", phone)
         )
@@ -408,6 +431,30 @@ class TestUssdPaidVoteFlow:
         assert body["continueSession"] is False
         assert "Payment submitted" in body["message"]
         assert submitted["otp"] == "123456"
+
+    async def test_checkout_confirm_cancel_ends_session(
+        self, client: AsyncClient, paid_election_with_candidate, monkeypatch
+    ):
+        election, category, candidate = paid_election_with_candidate
+        phone = "233241234597"  # 024 -> MTN, network auto-detected
+        charged = {}
+
+        async def fake_charge(self, **kwargs):
+            charged["called"] = True
+            return {"status": "pay_offline"}
+
+        monkeypatch.setattr(PaystackService, "charge_mobile_money", fake_charge)
+
+        confirm = await self._dial_to_network_prompt(client, election, candidate, phone)
+        assert "proceed to checkout" in confirm.json()["message"].lower()
+
+        response = await client.post(
+            f"{WEBHOOK_URL}?token={TOKEN}", json=_ussd_post("2", phone)
+        )
+        body = response.json()
+        assert body["continueSession"] is False
+        assert "cancelled" in body["message"].lower()
+        assert "called" not in charged
 
     async def test_long_paystack_display_text_gets_truncated(
         self, client: AsyncClient, paid_election_with_candidate, monkeypatch
@@ -426,6 +473,7 @@ class TestUssdPaidVoteFlow:
         monkeypatch.setattr(PaystackService, "charge_mobile_money", fake_charge)
 
         await self._dial_to_network_prompt(client, election, candidate, phone)
+        await client.post(f"{WEBHOOK_URL}?token={TOKEN}", json=_ussd_post("1", phone))
         otp_prompt = await client.post(
             f"{WEBHOOK_URL}?token={TOKEN}", json=_ussd_post("1", phone)
         )
