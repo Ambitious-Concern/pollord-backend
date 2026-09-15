@@ -414,6 +414,11 @@ class UssdConversationService:
         # of guessing our own generic instruction.
         display_text = charge.get("display_text")
 
+        # The total is what the voter actually cares about confirming before
+        # anything momo-related happens, so it leads every message here
+        # instead of trailing after the instruction.
+        amount_sentence = f"{amount_display}, {vote_label} for {candidate_name}"
+
         if charge.get("status") == "send_otp":
             # This provider needs the OTP the customer just received relayed
             # back to Paystack before the charge finishes.
@@ -428,10 +433,7 @@ class UssdConversationService:
             )
             prompt = display_text or "Enter the OTP sent to your phone"
             return (
-                _join_sentence(
-                    prompt,
-                    f"Confirm {amount_display}, {vote_label} for {candidate_name}:",
-                ),
+                _join_sentence(amount_sentence, prompt.rstrip(". ") + ":"),
                 False,
             )
 
@@ -439,10 +441,18 @@ class UssdConversationService:
         instruction = (
             display_text or f"Check your phone and approve the {provider_label} prompt"
         )
+        # MTN's push prompt is the least reliable of the three to actually
+        # arrive - *170# is the standard manual fallback everyone already
+        # knows, so it's worth spelling out here rather than leaving them
+        # stuck waiting on a prompt that may never show up.
+        mtn_fallback = (
+            " If you don't see it after a few seconds, dial *170# to complete payment."
+            if provider == "mtn"
+            else ""
+        )
         return (
             _join_sentence(
-                instruction,
-                f"{amount_display}, {vote_label} for {candidate_name}. SMS on confirm.",
+                amount_sentence, f"{instruction.rstrip('. ')}.{mtn_fallback} SMS on confirm."
             ),
             True,
         )
