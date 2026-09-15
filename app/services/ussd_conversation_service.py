@@ -485,22 +485,28 @@ class UssdConversationService:
             )
 
         await self._clear_session(phone)
-        instruction = (
-            display_text or f"Check your phone and approve the {provider_label} prompt"
-        )
-        # MTN's push prompt is the least reliable of the three to actually
-        # arrive - *170# is the standard manual fallback everyone already
-        # knows, so it's worth spelling out here rather than leaving them
-        # stuck waiting on a prompt that may never show up.
-        mtn_fallback = (
-            " If you don't see it after a few seconds, dial *170# to complete payment."
-            if provider == "mtn"
-            else ""
-        )
+        # Paystack's own MTN display_text ("...inputting your PIN on your
+        # mobile device") reads, on a plain USSD screen, like an invitation
+        # to type the PIN right back into THIS menu — but this menu is
+        # closing right now; the real approval is a separate MTN-triggered
+        # prompt (or *170# manually) that never touches our webhook at all.
+        # Typing anything back here after this point just starts a brand
+        # new session, which is why voters were landing on "Code not found".
+        # Our own short, unambiguous text avoids that trap for MTN
+        # specifically, where the *170# fallback matters most; other
+        # providers don't share this exact confusion, so their display_text
+        # is still relayed verbatim.
+        if provider == "mtn":
+            instruction = (
+                "Approve the MTN prompt on your phone or dial *170#. "
+                "This menu has closed"
+            )
+        else:
+            instruction = (
+                display_text or f"Check your phone and approve the {provider_label} prompt"
+            )
         return (
-            _join_sentence(
-                amount_sentence, f"{instruction.rstrip('. ')}.{mtn_fallback} SMS on confirm."
-            ),
+            _join_sentence(amount_sentence, f"{instruction.rstrip('. ')}. SMS on confirm."),
             True,
         )
 
