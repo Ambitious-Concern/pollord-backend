@@ -1,0 +1,39 @@
+name: Backfill member platform roles
+
+# Manual only. This mutates production data, so it never runs on a push.
+on:
+  workflow_dispatch:
+    inputs:
+      confirm:
+        description: 'Type "run" to confirm you want to grant roles in production'
+        required: true
+        default: ''
+
+permissions:
+  contents: read
+
+jobs:
+  backfill:
+    if: inputs.confirm == 'run'
+    runs-on: ubuntu-latest
+    environment: production
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure SSH
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.SSH_PRIVATE_KEY }}" > ~/.ssh/id_rsa
+          chmod 600 ~/.ssh/id_rsa
+          ssh-keyscan -H ${{ secrets.SERVER_HOST }} >> ~/.ssh/known_hosts
+
+      # Idempotent: only members missing a role are touched, so a re-run is a
+      # no-op. Output lists every user changed.
+      - name: Run backfill
+        run: |
+          ssh pollord@${{ secrets.SERVER_HOST }} "
+            cd /opt/pollord-backend
+            docker compose -f docker-compose.prod.yml exec -T app \
+              python scripts/backfill_member_platform_roles.py
+          "
