@@ -63,21 +63,33 @@ jobs:
           echo "${{ secrets.SSH_PRIVATE_KEY }}" > ~/.ssh/id_rsa
           chmod 600 ~/.ssh/id_rsa
           ssh-keyscan -H ${{ secrets.SERVER_HOST }} >> ~/.ssh/known_hosts
-      - name: Copy compose file
+      - name: Copy compose and nginx config
         run: |
-          scp docker-compose.prod.yml pollord@${{ secrets.SERVER_HOST }}:/opt/pollord-backend/
+          # nginx.conf is bind-mounted by the nginx service, so it has to ship
+          # with the compose file -- otherwise the entry point cannot start and
+          # the API is unreachable even though the app containers are healthy.
+          scp docker-compose.prod.yml nginx.conf pollord@${{ secrets.SERVER_HOST }}:/opt/pollord-backend/
       - name: Deploy
         run: |
           IMAGE_NAME_LOWER=$(echo "${{ env.IMAGE_NAME }}" | tr '[:upper:]' '[:lower:]')
           ssh pollord@${{ secrets.SERVER_HOST }} "
+            set -e
             cd /opt/pollord-backend
             echo '${{ secrets.GITHUB_TOKEN }}' | docker login ghcr.io -u ${{ github.actor }} --password-stdin
             export REGISTRY=ghcr.io
             export IMAGE_NAME=${IMAGE_NAME_LOWER}
             export IMAGE_TAG=latest
+
             docker compose -f docker-compose.prod.yml pull
+
+            # Migrate BEFORE swapping the running containers, using a throwaway
+            # container rather than 'exec'. A schema-breaking release cannot
+            # migrate itself the other way round: the new image refuses to start
+            # against the old schema, so there is no running container to exec
+            # into, and the migration never runs. 'run --rm' only needs the
+            # database to be up.
+            docker compose -f docker-compose.prod.yml run --rm app alembic upgrade head
+
             docker compose -f docker-compose.prod.yml up -d --force-recreate --remove-orphans
-            sleep 5
-            docker compose -f docker-compose.prod.yml exec -T app alembic upgrade head
             docker image prune -f
           "
