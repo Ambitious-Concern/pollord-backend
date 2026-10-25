@@ -286,6 +286,16 @@ class CategoryRepository(BaseRepository[Category]):
         )
         return list(result.scalars().all())
 
+    async def get_by_events(self, event_ids: List[UUID]) -> List[Category]:
+        if not event_ids:
+            return []
+        result = await self.session.execute(
+            select(Category)
+            .where(Category.event_id.in_(event_ids))
+            .order_by(Category.display_order)
+        )
+        return list(result.scalars().all())
+
     async def get_with_candidates(self, category_id: UUID) -> Optional[Category]:
         result = await self.session.execute(
             select(Category)

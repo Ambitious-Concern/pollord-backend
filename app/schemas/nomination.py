@@ -54,18 +54,26 @@ class NominationFormResponse(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
     form_id: UUID
-    election_id: UUID
+    election_id: Optional[UUID] = None
+    event_id: Optional[UUID] = None
     title: str
     description: Optional[str] = None
     visibility: Visibility
     slug: str
     url: str = ""
-    # Populated only by the cross-election aggregate list — a single-election
-    # list already has this from context, so it's left blank there.
+    # Populated by the aggregate list endpoints for display convenience.
     election_title: str = ""
     fields: List[NominationFormFieldResponse] = []
     created_at: datetime
     updated_at: datetime
+
+
+class NominationFormSlugResponse(BaseModel):
+    """Minimal public response used by the listing detail page to decide
+    whether to show a Nominate button."""
+
+    slug: str
+    title: str
 
 
 class PublicNominationFormResponse(BaseModel):
@@ -78,6 +86,7 @@ class PublicNominationFormResponse(BaseModel):
     description: Optional[str] = None
     category_options: List[Dict[str, str]] = []  # [{category_id, name}]
     fields: List[NominationFormFieldResponse] = []
+    listing_slug: Optional[str] = None
 
 
 class NominationSubmissionCreate(BaseModel):
@@ -92,11 +101,12 @@ class ManualNominationCreate(BaseModel):
 
 
 class NominationGroupResponse(BaseModel):
-    """A GROUP BY (election_id, category_id, nominee_name) view over
+    """A GROUP BY (election_id/event_id, category_id, nominee_name) view over
     submissions — the unit the review queue actually acts on, not a raw
     submission list."""
 
-    election_id: UUID
+    election_id: Optional[UUID] = None
+    event_id: Optional[UUID] = None
     election_title: str
     category_id: UUID
     category_name: str

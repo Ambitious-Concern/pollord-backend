@@ -7,6 +7,7 @@ service responds with a public ``downloadUrl`` that we persist in the database
 
 import base64
 import binascii
+import logging
 import mimetypes
 import re
 import uuid
@@ -17,6 +18,8 @@ from fastapi import HTTPException
 
 from app.core.config import settings
 from app.core.security import encrypt_file_bytes
+
+logger = logging.getLogger(__name__)
 
 # data:[<mediatype>][;base64],<data>
 _DATA_URI_RE = re.compile(r"^data:(?P<mime>[^;,]+)?(?P<b64>;base64)?,(?P<data>.*)$", re.DOTALL)
@@ -276,6 +279,35 @@ class FileStorageService:
             filename=f"{filename_hint}.{ext}",
             content_type=mime,
         )
+
+    def extract_path_parts(self, public_url: str) -> tuple[str, str] | None:
+        """Extract ``(ext, file_id)`` from a public proxy URL, or None if not recognised."""
+        prefix = f"{settings.PUBLIC_BASE_URL.rstrip('/')}/api/v1/files/"
+        if not public_url.startswith(prefix):
+            return None
+        rest = public_url[len(prefix):]
+        parts = rest.split("/")
+        if len(parts) != 2 or not parts[0] or not parts[1]:
+            return None
+        return parts[0], parts[1]
+
+    async def delete(self, ext: str, file_id: str) -> None:
+        """Delete a stored file. Logs but does not raise on remote errors."""
+        root = self._local_dir
+        if root is not None:
+            path = self._local_path(root, ext, file_id)
+            try:
+                if path.is_file():
+                    path.unlink()
+            except OSError:
+                logger.warning("Could not delete local file %s/%s", ext, file_id, exc_info=True)
+            return
+
+        try:
+            async with httpx.AsyncClient() as client:
+                await client.delete(f"{self._base_url}/{ext}/{file_id}", timeout=15.0)
+        except Exception:
+            logger.warning("Could not delete %s/%s from storage service", ext, file_id, exc_info=True)
 
     async def resolve(self, value: str | None, filename_hint: str = "upload") -> str | None:
         """Return an HTTP URL for ``value``.

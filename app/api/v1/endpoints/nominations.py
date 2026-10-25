@@ -4,7 +4,7 @@ logic — this file is just request wiring."""
 from typing import List
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, File, HTTPException, Request, UploadFile
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
@@ -14,16 +14,19 @@ from app.db.base import get_db
 from app.db.tenant import get_tenant_db
 from app.middleware.rate_limit import limiter
 from app.models.election import Candidate, Category, Election
+from app.models.event import Event
 from app.models.nomination import NominationForm, NominationSubmission
 from app.models.organization import Organization
 from app.models.user import User
 from app.repositories.election_repository import CandidateRepository, CategoryRepository, ElectionRepository
+from app.repositories.event_repository import EventRepository
 from app.repositories.nomination_repository import NominationFormRepository, NominationSubmissionRepository
 from app.repositories.organization_repository import OrganizationRepository
 from app.schemas.nomination import (
     ManualNominationCreate,
     NominationFormCreate,
     NominationFormResponse,
+    NominationFormSlugResponse,
     NominationFormUpdate,
     NominationGroupResponse,
     NominationGroupReview,
@@ -31,7 +34,9 @@ from app.schemas.nomination import (
     NominationSubmissionResponse,
     PublicNominationFormResponse,
 )
+from app.services.file_storage_service import file_storage_service
 from app.services.nomination_service import NominationService
+from app.utils.nomination_image import CONTENT_TYPE_EXT, validate_and_sanitise
 
 router = APIRouter(tags=["Nominations"])
 
@@ -46,6 +51,7 @@ def _get_service(db: AsyncSession) -> NominationService:
         election_repo=ElectionRepository(Election, db),
         category_repo=CategoryRepository(Category, db),
         candidate_repo=CandidateRepository(Candidate, db),
+        event_repo=EventRepository(Event, db),
     )
 
 
@@ -123,7 +129,57 @@ async def delete_nomination_form(
     await _get_service(db).delete_form(form_id, current_user)
 
 
+# --- Organizer: event nomination forms -------------------------------------
+
+
+@router.post(
+    "/events/{event_id}/nomination-forms",
+    response_model=NominationFormResponse,
+    status_code=201,
+)
+async def create_event_nomination_form(
+    event_id: UUID,
+    data: NominationFormCreate,
+    request: Request,
+    current_user: User = Depends(require_roles(*ADMIN_ROLES)),
+    db: AsyncSession = Depends(get_tenant_db),
+):
+    return await _get_service(db).create_form_for_event(event_id, current_user, data, str(request.base_url))
+
+
+@router.get(
+    "/events/{event_id}/nomination-forms",
+    response_model=List[NominationFormResponse],
+)
+async def list_event_nomination_forms(
+    event_id: UUID,
+    request: Request,
+    current_user: User = Depends(require_roles(*ADMIN_ROLES)),
+    db: AsyncSession = Depends(get_tenant_db),
+):
+    return await _get_service(db).list_forms_for_event(event_id, current_user, str(request.base_url))
+
+
 # --- Public: view + submit -------------------------------------------------
+
+
+@router.get(
+    "/public/listings/{listing_type}/{listing_id}/nomination-form",
+    response_model=NominationFormSlugResponse,
+    responses={404: {"description": "No public nomination form for this listing"}},
+)
+async def get_listing_nomination_form(
+    listing_type: str,
+    listing_id: UUID,
+    db: AsyncSession = Depends(get_db),
+):
+    """Used by the listing detail page to decide whether to show a Nominate button."""
+    if listing_type not in ("election", "event"):
+        raise HTTPException(status_code=400, detail="listing_type must be 'election' or 'event'")
+    result = await _get_service(db).get_form_for_listing(listing_type, listing_id)
+    if result is None:
+        raise HTTPException(status_code=404, detail="No public nomination form for this listing")
+    return result
 
 
 @router.get("/public/nomination-forms/{slug}", response_model=PublicNominationFormResponse)
@@ -149,6 +205,37 @@ async def submit_nomination(
         user_agent=request.headers.get("user-agent"),
     )
     return {"message": "Thanks — your nomination has been submitted for review.", "submission_id": str(submission.submission_id)}
+
+
+@router.post("/public/nomination-forms/{slug}/upload-photo", status_code=201)
+@limiter.limit(settings.RATE_LIMIT_VOTING)
+async def upload_nomination_photo(
+    slug: str,
+    request: Request,
+    file: UploadFile = File(...),
+    db: AsyncSession = Depends(get_db),
+):
+    """Upload a nominee photo for a public nomination form.
+
+    Rate-limited and public (no auth — nominators are anonymous). The file is
+    security-scanned (magic bytes + Pillow re-encode to strip EXIF) before
+    being stored. Returns ``{ url }`` to store as the photo answer value.
+    """
+    svc = _get_service(db)
+    form = await svc.form_repo.get_by_slug(slug)
+    if not form:
+        raise HTTPException(status_code=404, detail="Form not found")
+
+    content = await file.read()
+    clean_content, content_type = validate_and_sanitise(content, file.content_type)
+    ext = CONTENT_TYPE_EXT[content_type]
+
+    url = await file_storage_service.upload(
+        content=clean_content,
+        filename=f"nomination_{slug}.{ext}",
+        content_type=content_type,
+    )
+    return {"url": url}
 
 
 # --- Organizer: cross-election review queue --------------------------------

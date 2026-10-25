@@ -3,7 +3,7 @@ from datetime import datetime
 from typing import TYPE_CHECKING, List, Optional
 
 from sqlalchemy import (
-    Boolean, DateTime, ForeignKey, Integer, String, Text, func,
+    Boolean, CheckConstraint, DateTime, ForeignKey, Integer, String, Text, func,
 )
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
@@ -12,6 +12,7 @@ from app.models.base import Base, TimestampMixin
 
 if TYPE_CHECKING:
     from app.models.election import Category, Election
+    from app.models.event import Event
     from app.models.user import User
 
 FIELD_TYPES = ("short-text", "paragraph", "multiple-choice", "photo")
@@ -21,33 +22,43 @@ SUBMISSION_STATUSES = ("pending", "approved", "rejected")
 
 class NominationForm(TimestampMixin, Base):
     """A shareable form nominators fill in to suggest someone for an
-    election's categories. Always scoped to exactly one election — the
-    category question on the live form is generated from that election's
-    real categories, never hand-maintained (see NominationFormField, which
-    only stores the *custom* questions an organizer adds)."""
+    election's or event's categories. Scoped to exactly one election OR
+    one event — the category question on the live form is generated from
+    that election/event's real categories, never hand-maintained."""
 
     __tablename__ = "nomination_forms"
+    __table_args__ = (
+        # Exactly one of election_id/event_id must be set.
+        CheckConstraint(
+            "(election_id IS NOT NULL) != (event_id IS NOT NULL)",
+            name="nomination_forms_election_or_event",
+        ),
+    )
 
     form_id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
     )
-    election_id: Mapped[uuid.UUID] = mapped_column(
+    election_id: Mapped[Optional[uuid.UUID]] = mapped_column(
         UUID(as_uuid=True), ForeignKey("elections.election_id", ondelete="CASCADE"),
-        nullable=False, index=True,
+        nullable=True, index=True,
+    )
+    event_id: Mapped[Optional[uuid.UUID]] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("events.event_id", ondelete="CASCADE"),
+        nullable=True, index=True,
     )
     title: Mapped[str] = mapped_column(String(255), nullable=False)
     description: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     # "public" = anyone with the link; "private" = same link, but a
     # submission through it is tagged accordingly for the review queue's
-    # public/private/manual split — enforcement of "private" access is a
-    # frontend/future concern, not modeled here yet.
+    # public/private/manual split.
     visibility: Mapped[str] = mapped_column(String(10), default="public", nullable=False)
     slug: Mapped[str] = mapped_column(String(255), unique=True, index=True, nullable=False)
     created_by: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), ForeignKey("users.user_id"), nullable=False
     )
 
-    election: Mapped["Election"] = relationship(lazy="select")
+    election: Mapped[Optional["Election"]] = relationship(lazy="select", foreign_keys="[NominationForm.election_id]")
+    event: Mapped[Optional["Event"]] = relationship(lazy="select", foreign_keys="[NominationForm.event_id]")
     fields: Mapped[List["NominationFormField"]] = relationship(
         back_populates="form", order_by="NominationFormField.display_order",
         cascade="all, delete-orphan",
@@ -87,6 +98,12 @@ class NominationSubmission(Base):
     in directly, with no form involved at all."""
 
     __tablename__ = "nomination_submissions"
+    __table_args__ = (
+        CheckConstraint(
+            "(election_id IS NOT NULL) != (event_id IS NOT NULL)",
+            name="nomination_submissions_election_or_event",
+        ),
+    )
 
     submission_id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
@@ -95,13 +112,16 @@ class NominationSubmission(Base):
         UUID(as_uuid=True), ForeignKey("nomination_forms.form_id", ondelete="SET NULL"),
         nullable=True,
     )
-    # Denormalized (also reachable via form_id -> election_id) so manual
-    # submissions — which have no form — still carry it directly, and so
-    # RLS can scope this table the same simple way as any other
-    # election-child table.
-    election_id: Mapped[uuid.UUID] = mapped_column(
+    # Denormalized so manual submissions — which have no form — still carry
+    # the parent directly, and RLS can scope this table the same simple way.
+    # Exactly one of election_id/event_id is non-null (enforced by CHECK).
+    election_id: Mapped[Optional[uuid.UUID]] = mapped_column(
         UUID(as_uuid=True), ForeignKey("elections.election_id", ondelete="CASCADE"),
-        nullable=False, index=True,
+        nullable=True, index=True,
+    )
+    event_id: Mapped[Optional[uuid.UUID]] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("events.event_id", ondelete="CASCADE"),
+        nullable=True, index=True,
     )
     category_id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), ForeignKey("categories.category_id", ondelete="CASCADE"),
@@ -119,5 +139,6 @@ class NominationSubmission(Base):
         DateTime(timezone=True), server_default=func.now()
     )
 
-    election: Mapped["Election"] = relationship(lazy="select")
+    election: Mapped[Optional["Election"]] = relationship(lazy="select", foreign_keys="[NominationSubmission.election_id]")
+    event: Mapped[Optional["Event"]] = relationship(lazy="select", foreign_keys="[NominationSubmission.event_id]")
     category: Mapped["Category"] = relationship(lazy="select")
