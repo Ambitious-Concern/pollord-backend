@@ -63,6 +63,17 @@ jobs:
           echo "${{ secrets.SSH_PRIVATE_KEY }}" > ~/.ssh/id_rsa
           chmod 600 ~/.ssh/id_rsa
           ssh-keyscan -H ${{ secrets.SERVER_HOST }} >> ~/.ssh/known_hosts
+      - name: Patch prod environment
+        run: |
+          ssh pollord@${{ secrets.SERVER_HOST }} "
+            set -e
+            cd /opt/pollord-backend
+            sed -i 's/^DEBUG=.*/DEBUG=false/' .env
+            grep -q '^FILE_STORAGE_BACKEND=' .env \
+              && sed -i 's/^FILE_STORAGE_BACKEND=.*/FILE_STORAGE_BACKEND=remote/' .env \
+              || echo 'FILE_STORAGE_BACKEND=remote' >> .env
+            mkdir -p backups
+          "
       - name: Copy compose and nginx config
         run: |
           # nginx.conf is bind-mounted by the nginx service, so it has to ship

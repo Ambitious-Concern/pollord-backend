@@ -1,4 +1,5 @@
 from celery import Celery
+from celery.schedules import crontab
 
 from app.core.config import settings
 
@@ -13,6 +14,7 @@ celery_app = Celery(
         "app.tasks.auth_tasks",
         "app.tasks.support_chat_tasks",
         "app.tasks.report_export_tasks",
+        "app.tasks.backup_tasks",
     ],
 )
 
@@ -47,5 +49,10 @@ celery_app.conf.beat_schedule = {
     "purge-closed-chats": {
         "task": "app.tasks.support_chat_tasks.purge_closed_chats",
         "schedule": 86400.0,
+    },
+    "backup-database": {
+        "task": "app.tasks.backup_tasks.backup_database",
+        # 2 AM UTC daily — quiet period between election activity peaks.
+        "schedule": crontab(hour=2, minute=0),
     },
 }

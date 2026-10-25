@@ -137,6 +137,11 @@ services:
       redis:
         condition: service_healthy
     command: celery -A app.tasks.celery_app worker --loglevel=info
+    volumes:
+      # Docker socket so backup_tasks can exec into the db container.
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      # Backup dumps land here; host path survives container rebuilds.
+      - /opt/pollord-backend/backups:/opt/pollord-backend/backups
     networks:
       - pollord-network
     logging:
