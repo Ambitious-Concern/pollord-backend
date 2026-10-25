@@ -7,7 +7,7 @@ from uuid import UUID
 
 from fastapi import HTTPException, status
 
-from app.core.security import create_ticket_download_token, generate_secure_token
+from app.core.security import create_ticket_download_token, generate_secure_token, generate_ticket_code
 from app.models.event import Event, TicketType
 from app.models.notification import Notification
 from app.models.org_activity_log import OrgActivityLog
@@ -39,6 +39,8 @@ from app.schemas.ticket import (
     TicketSaleResponse,
     TicketValidationResponse,
 )
+from app.utils.pdf_generator import generate_ticket_pdf
+from app.utils.qr_code import generate_qr_code
 from app.services.email_service import (
     guest_ticket_confirmation_email,
     send_email,
@@ -179,7 +181,7 @@ class TicketingService:
         tickets = []
         for ticket_type, quantity in ticket_items:
             for _ in range(quantity):
-                ticket_code = generate_secure_token(16)
+                ticket_code = generate_ticket_code()
                 qr_data = json.dumps(
                     {
                         "ticket_code": ticket_code,
@@ -323,7 +325,7 @@ class TicketingService:
         now = datetime.now(timezone.utc)
         tickets = []
         for i in range(quantity):
-            ticket_code = generate_secure_token(16)
+            ticket_code = generate_ticket_code()
             qr_data = json.dumps(
                 {
                     "ticket_code": ticket_code,
@@ -407,7 +409,7 @@ class TicketingService:
             }
         )
 
-        ticket_code = generate_secure_token(16)
+        ticket_code = generate_ticket_code()
         qr_data = json.dumps(
             {
                 "ticket_code": ticket_code,
@@ -499,6 +501,53 @@ class TicketingService:
 
         return None
 
+    async def _build_ticket_pdfs(
+        self,
+        tickets: List[Ticket],
+        attendee_name: str,
+        event_title: str,
+    ) -> list[tuple[str, bytes]]:
+        """Generate one PDF per ticket for email attachment. Best-effort — never raises."""
+        if not tickets:
+            return []
+        event = await self.event_repo.get_by_id(tickets[0].event_id, id_field="event_id")
+        if not event:
+            return []
+
+        banner_bytes: Optional[bytes] = None
+        if event.banner_image_url:
+            try:
+                import httpx
+                async with httpx.AsyncClient(timeout=5.0) as client:
+                    res = await client.get(event.banner_image_url)
+                    res.raise_for_status()
+                    banner_bytes = res.content
+            except Exception:
+                pass
+
+        from datetime import date, time as dtime
+        attachments: list[tuple[str, bytes]] = []
+        for ticket in tickets:
+            try:
+                qr_bytes = generate_qr_code(ticket.qr_code_data)
+                ticket_type_name = ticket.ticket_type.type_name if ticket.ticket_type else ""
+                pdf = generate_ticket_pdf(
+                    event_title=event_title,
+                    event_date=event.event_date or date.today(),
+                    event_time=event.event_time or dtime(0, 0),
+                    location=event.location or "",
+                    ticket_type=ticket_type_name,
+                    ticket_code=ticket.ticket_code,
+                    attendee_name=attendee_name,
+                    purchase_date=ticket.purchase_date,
+                    qr_bytes=qr_bytes,
+                    banner_image_bytes=banner_bytes,
+                )
+                attachments.append((f"ticket-{ticket.ticket_code}.pdf", pdf))
+            except Exception:
+                logger.exception("PDF generation failed for ticket %s", ticket.ticket_id)
+        return attachments
+
     @staticmethod
     def _record_email_attempt(
         purchase: Optional[TicketPurchase], recipient: Optional[str], sent: bool
@@ -531,7 +580,18 @@ class TicketingService:
             return False
 
         recipient, subject, html = message
-        sent = send_email(recipient, subject, html)
+
+        # Resolve attendee name for the PDF label
+        if user_id is not None:
+            buyer = await self.user_repo.get_by_id(user_id, id_field="user_id")
+            attendee_name = buyer.full_name if buyer else "Guest"
+        else:
+            attendee_name = (
+                tickets[0].guest_name if tickets and tickets[0].guest_name else "Guest"
+            )
+
+        attachments = await self._build_ticket_pdfs(tickets, attendee_name, event_title)
+        sent = send_email(recipient, subject, html, attachments=attachments or None)
         self._record_email_attempt(purchase, recipient, sent)
         return sent
 
@@ -677,7 +737,7 @@ class TicketingService:
 
         tickets = []
         for _ in range(data.quantity):
-            ticket_code = generate_secure_token(16)
+            ticket_code = generate_ticket_code()
             qr_data = json.dumps(
                 {
                     "ticket_code": ticket_code,
@@ -1070,7 +1130,7 @@ class TicketingService:
         tickets = []
         for ticket_type, quantity in ticket_items:
             for _ in range(quantity):
-                ticket_code = generate_secure_token(16)
+                ticket_code = generate_ticket_code()
                 qr_data = json.dumps({
                     "ticket_code": ticket_code,
                     "event_id": str(txn_event_id),

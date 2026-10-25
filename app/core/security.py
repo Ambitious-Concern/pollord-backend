@@ -329,3 +329,13 @@ def verify_data_signature(data: bytes, signature: str) -> bool:
 def generate_secure_token(length: int = 32) -> str:
     """General-purpose random token (e.g. one-off secrets, IDs)."""
     return secrets.token_urlsafe(length)
+
+
+# Unambiguous uppercase alphanumeric — no 0/O/1/I/L
+_TICKET_ALPHABET = "ACDEFGHJKMNPQRTUVWXY23456789"
+
+
+def generate_ticket_code() -> str:
+    """Human-speakable ticket code in XXXX-XXXX format (e.g. NKP3-7NWM)."""
+    part = lambda: "".join(secrets.choice(_TICKET_ALPHABET) for _ in range(4))
+    return f"{part()}-{part()}"

@@ -1,137 +1,80 @@
+"""Ticket PDF generator — dark cinema-ticket design matching TicketPreviewModal.
+
+Left  42%: banner photo tint + white QR card on dark bg
+Right 58%: blurred-banner backdrop + dark overlay, mirrors the JSX glass panel
+           EVENT NAME → LOCATION → DATE & TIME → separator → GUEST | TYPE
+"""
 from datetime import date, datetime, time
 from importlib import resources
 from io import BytesIO
+from typing import Optional
 
+from PIL import Image, ImageFilter
 from reportlab.lib.utils import ImageReader
 from reportlab.pdfgen import canvas
 
 _POLLORD_LOGO_BYTES = (resources.files("app.assets") / "pollord-logo.png").read_bytes()
 _POLLORD_LOGO = ImageReader(BytesIO(_POLLORD_LOGO_BYTES))
 
-PAGE_W, PAGE_H = 320, 660
-MARGIN = 20
-CARD_RADIUS = 22
-GAP = 20  # perforated strip between the two card halves
-NOTCH_R = 22  # > GAP/2 so the notch actually bites into both cards, not just the gap
-TOP_CARD_H = 300
-BOTTOM_CARD_H = 300
+PAGE_W, PAGE_H = 595, 200
 
-BG_COLOR = (0.30, 0.30, 0.30)
-CARD_COLOR = (0.925, 0.925, 0.925)
-IMAGE_PLACEHOLDER_COLOR = (0.35, 0.35, 0.35)
-LABEL_COLOR = (0.45, 0.45, 0.45)
-TEXT_COLOR = (0.05, 0.05, 0.05)
-BRAND_COLOR = (0.3, 0.35, 0.85)
+_DARK  = (0.07, 0.07, 0.09)
+_WHITE = (1.00, 1.00, 1.00)
+_DIM   = (0.55, 0.55, 0.60)
 
 
-def _wrap_text(c: canvas.Canvas, text: str, font: str, size: int, max_width: float) -> list[str]:
+def _fit(w: float, h: float, max_w: float, max_h: float) -> tuple[float, float]:
+    scale = min(max_w / w, max_h / h)
+    return w * scale, h * scale
+
+
+def _wrap(c: canvas.Canvas, text: str, font: str, size: int, max_w: float) -> list[str]:
     words = text.split()
     lines: list[str] = []
-    current = ""
+    cur = ""
     for word in words:
-        candidate = f"{current} {word}".strip()
-        if c.stringWidth(candidate, font, size) <= max_width:
-            current = candidate
+        candidate = f"{cur} {word}".strip()
+        if c.stringWidth(candidate, font, size) <= max_w:
+            cur = candidate
         else:
-            if current:
-                lines.append(current)
-            current = word
-    if current:
-        lines.append(current)
+            if cur:
+                lines.append(cur)
+            cur = word
+    if cur:
+        lines.append(cur)
     return lines or [""]
 
 
-def _draw_field(c: canvas.Canvas, x: float, y: float, label: str, value: str, max_width: float) -> float:
-    """Draws label+value with (x, y) as the label's baseline. Returns the y
-    of the last value line's baseline, so callers can stack the next field
-    below whatever this one actually rendered (including wrapped values)
-    instead of guessing a fixed offset."""
-    c.setFillColorRGB(*LABEL_COLOR)
-    c.setFont("Helvetica", 9)
-    c.drawString(x, y, label)
-    c.setFillColorRGB(*TEXT_COLOR)
-    c.setFont("Helvetica-Bold", 12)
-    lines = _wrap_text(c, value, "Helvetica-Bold", 12, max_width)
-    for i, line in enumerate(lines):
-        c.drawString(x, y - 16 - (i * 14), line)
-    return y - 16 - ((len(lines) - 1) * 14)
+def _make_left_bg(banner: Optional[Image.Image], split_x: int) -> bytes:
+    """Dark bg with banner bleed at low opacity for the left half."""
+    dark = Image.new("RGB", (split_x, PAGE_H), (18, 18, 23))
+    if banner:
+        scaled = banner.resize((PAGE_W, PAGE_H), Image.LANCZOS).crop((0, 0, split_x, PAGE_H))
+        scaled = scaled.convert("RGB")
+        # blend at 20% opacity onto dark
+        dark = Image.blend(dark, scaled, alpha=0.20)
+    buf = BytesIO()
+    dark.save(buf, "PNG")
+    buf.seek(0)
+    return buf.read()
 
 
-def _draw_image_box(
-    c: canvas.Canvas, x: float, y: float, size: float, radius: float, image_bytes: bytes | None
-) -> None:
-    if not image_bytes:
-        c.setFillColorRGB(*IMAGE_PLACEHOLDER_COLOR)
-        c.roundRect(x, y, size, size, radius, stroke=0, fill=1)
-        return
+def _make_right_bg(banner: Optional[Image.Image], split_x: int) -> bytes:
+    """Blurred banner + heavy dark overlay — approximates backdrop-blur + bg-black/20."""
+    rw = PAGE_W - split_x
+    if banner:
+        crop = banner.resize((PAGE_W, PAGE_H), Image.LANCZOS).crop((split_x, 0, PAGE_W, PAGE_H))
+        blurred = crop.filter(ImageFilter.GaussianBlur(radius=10)).convert("RGBA")
+    else:
+        blurred = Image.new("RGBA", (rw, PAGE_H), (18, 18, 23, 255))
 
-    try:
-        image = ImageReader(BytesIO(image_bytes))
-        img_w, img_h = image.getSize()
-    except Exception:
-        c.setFillColorRGB(*IMAGE_PLACEHOLDER_COLOR)
-        c.roundRect(x, y, size, size, radius, stroke=0, fill=1)
-        return
-
-    c.saveState()
-    clip = c.beginPath()
-    clip.roundRect(x, y, size, size, radius)
-    c.clipPath(clip, stroke=0, fill=0)
-
-    # Center-crop to a square: scale so the shorter side fills the box, then
-    # shift the overflowing side back by half so the crop stays centered.
-    scale = max(size / img_w, size / img_h)
-    draw_w, draw_h = img_w * scale, img_h * scale
-    draw_x = x - (draw_w - size) / 2
-    draw_y = y - (draw_h - size) / 2
-    c.drawImage(image, draw_x, draw_y, width=draw_w, height=draw_h, mask="auto")
-    c.restoreState()
-
-
-def _fit(img_w: float, img_h: float, max_size: float) -> tuple[float, float]:
-    """Scale (img_w, img_h) down to fit within a max_size square, preserving aspect."""
-    scale = min(max_size / img_w, max_size / img_h)
-    return img_w * scale, img_h * scale
-
-
-def _draw_footer(c: canvas.Canvas, baseline_y: float, org_logo_bytes: bytes | None) -> None:
-    """'[org logo] Powered by [Pollord logo]', centered as one row."""
-    org_logo_image = None
-    org_logo_w = org_logo_h = 0.0
-    if org_logo_bytes:
-        try:
-            org_logo_image = ImageReader(BytesIO(org_logo_bytes))
-            org_logo_w, org_logo_h = _fit(*org_logo_image.getSize(), 18)
-        except Exception:
-            org_logo_image = None
-
-    pollord_w, pollord_h = _fit(*_POLLORD_LOGO.getSize(), 15)
-
-    font, font_size = "Helvetica-Bold", 8
-    text = "Powered by"
-    text_w = c.stringWidth(text, font, font_size)
-
-    gap = 6
-    org_block_w = (org_logo_w + gap) if org_logo_image else 0
-    total_w = org_block_w + text_w + gap + pollord_w
-    x = PAGE_W / 2 - total_w / 2
-
-    if org_logo_image:
-        c.drawImage(
-            org_logo_image, x, baseline_y - 2, width=org_logo_w, height=org_logo_h,
-            preserveAspectRatio=True, mask="auto",
-        )
-        x += org_block_w
-
-    c.setFillColorRGB(*BRAND_COLOR)
-    c.setFont(font, font_size)
-    c.drawString(x, baseline_y, text)
-    x += text_w + gap
-
-    c.drawImage(
-        _POLLORD_LOGO, x, baseline_y - 2, width=pollord_w, height=pollord_h,
-        preserveAspectRatio=True, mask="auto",
-    )
+    # 82% dark overlay mimics the preview's gradient + bg-black/20
+    overlay = Image.new("RGBA", (rw, PAGE_H), (18, 18, 23, int(0.82 * 255)))
+    result = Image.alpha_composite(blurred, overlay)
+    buf = BytesIO()
+    result.convert("RGB").save(buf, "PNG")
+    buf.seek(0)
+    return buf.read()
 
 
 def generate_ticket_pdf(
@@ -143,101 +86,153 @@ def generate_ticket_pdf(
     ticket_code: str,
     attendee_name: str,
     purchase_date: datetime,
-    qr_bytes: bytes | None = None,
-    banner_image_bytes: bytes | None = None,
-    org_logo_bytes: bytes | None = None,
+    qr_bytes: Optional[bytes] = None,
+    banner_image_bytes: Optional[bytes] = None,
+    org_logo_bytes: Optional[bytes] = None,
 ) -> bytes:
-    buffer = BytesIO()
-    c = canvas.Canvas(buffer, pagesize=(PAGE_W, PAGE_H))
+    split_x = int(PAGE_W * 0.42)
 
-    # Page background
-    c.setFillColorRGB(*BG_COLOR)
-    c.rect(0, 0, PAGE_W, PAGE_H, stroke=0, fill=1)
+    banner_pil: Optional[Image.Image] = None
+    if banner_image_bytes:
+        try:
+            banner_pil = Image.open(BytesIO(banner_image_bytes)).convert("RGBA")
+        except Exception:
+            pass
 
-    card_x = MARGIN
-    card_w = PAGE_W - 2 * MARGIN
-    top_card_h = TOP_CARD_H
-    top_card_y = PAGE_H - MARGIN - top_card_h
-    bottom_card_h = BOTTOM_CARD_H
-    bottom_card_y = top_card_y - GAP - bottom_card_h
+    left_bg_bytes  = _make_left_bg(banner_pil, split_x)
+    right_bg_bytes = _make_right_bg(banner_pil, split_x)
 
-    # --- Top card ---
-    c.setFillColorRGB(*CARD_COLOR)
-    c.roundRect(card_x, top_card_y, card_w, top_card_h, CARD_RADIUS, stroke=0, fill=1)
+    buf = BytesIO()
+    c = canvas.Canvas(buf, pagesize=(PAGE_W, PAGE_H))
 
-    pad = 18
-    image_size = 110
-    image_x = card_x + pad
-    image_y = top_card_y + top_card_h - pad - image_size
-    _draw_image_box(c, image_x, image_y, image_size, 12, banner_image_bytes)
+    # ── Background panels ─────────────────────────────────────────────────
+    c.drawImage(ImageReader(BytesIO(left_bg_bytes)),  0,       0, split_x,          PAGE_H)
+    c.drawImage(ImageReader(BytesIO(right_bg_bytes)), split_x, 0, PAGE_W - split_x, PAGE_H)
 
-    title_x = image_x + image_size + 16
-    title_max_w = card_x + card_w - pad - title_x
-    c.setFillColorRGB(*TEXT_COLOR)
-    title_lines = _wrap_text(c, event_title or "Event", "Helvetica-Bold", 20, title_max_w)[:2]
-    title_top_y = top_card_y + top_card_h - pad - 20
-    for i, line in enumerate(title_lines):
-        c.setFont("Helvetica-Bold", 20)
-        c.drawString(title_x, title_top_y - (i * 24), line)
+    pad = 16
 
-    event_dt_label = f"{event_date.strftime('%a')}, {event_time.strftime('%I:%M%p').lower()}"
-    text_y = title_top_y - ((len(title_lines) - 1) * 24) - 24
-    text_y = _draw_field(c, title_x, text_y, "Attendee:", attendee_name or "Guest", title_max_w) - 28
-    text_y = _draw_field(c, title_x, text_y, "Event Time:", event_dt_label, title_max_w)
+    # ── White QR card ─────────────────────────────────────────────────────
+    qr_card_size = min(PAGE_H - 2 * pad - 20, split_x - 2 * pad)
+    qr_card_x = (split_x - qr_card_size) / 2
+    qr_card_y = PAGE_H / 2 - qr_card_size / 2
+    c.setFillColorRGB(*_WHITE)
+    c.roundRect(qr_card_x, qr_card_y, qr_card_size, qr_card_size, 8, stroke=0, fill=1)
+    if qr_bytes:
+        qr_img = ImageReader(BytesIO(qr_bytes))
+        inner = qr_card_size - 12
+        c.drawImage(qr_img, qr_card_x + 6, qr_card_y + 6, inner, inner)
 
-    col_w = (card_w - 2 * pad) / 2
-    col1_x = card_x + pad
-    col2_x = card_x + pad + col_w
-    # Whichever is taller — the image or the (variable-height, depending on
-    # how much the title/attendee/event-time text wrapped) text stack next
-    # to it — the info grid below must clear both, or long titles overlap
-    # "Event Time" with "Date of Booking"/"Event Venue".
-    header_bottom_y = min(image_y, text_y)
-    row1_y = header_bottom_y - 30
-    row2_y = row1_y - 60
-
-    booking_date = purchase_date.strftime("%b %d, %Y")
-    booking_time = purchase_date.strftime("%I:%M%p").lower() + " GMT"
-
-    _draw_field(c, col1_x, row1_y, "Date of Booking", booking_date, col_w - 8)
-    _draw_field(c, col2_x, row1_y, "Event Venue:", location or "TBA", col_w - 8)
-    _draw_field(c, col1_x, row2_y, "Time of Booking:", booking_time, col_w - 8)
-    _draw_field(c, col2_x, row2_y, "Ticket Type:", ticket_type or "General", col_w - 8)
-
-    # --- Bottom card (drawn before the seam so the notches punch through both cards) ---
-    c.setFillColorRGB(*CARD_COLOR)
-    c.roundRect(card_x, bottom_card_y, card_w, bottom_card_h, CARD_RADIUS, stroke=0, fill=1)
-
-    # --- Perforated seam ---
-    # Notches sit right on the card's own side edges (not the page edges), sized
-    # bigger than the gap itself so they visibly bite into both cards.
-    seam_y = top_card_y - GAP / 2
-    c.setFillColorRGB(*BG_COLOR)
-    c.circle(card_x, seam_y, NOTCH_R, stroke=0, fill=1)
-    c.circle(card_x + card_w, seam_y, NOTCH_R, stroke=0, fill=1)
-    c.setStrokeColorRGB(0.6, 0.6, 0.6)
-    c.setDash(3, 4)
+    # ── Perforated seam ───────────────────────────────────────────────────
+    notch_r = 14
+    c.setFillColorRGB(*_DARK)
+    c.circle(split_x, 0,       notch_r, stroke=0, fill=1)
+    c.circle(split_x, PAGE_H,  notch_r, stroke=0, fill=1)
+    c.setStrokeColorRGB(0.30, 0.30, 0.35)
+    c.setDash(3, 5)
     c.setLineWidth(1)
-    c.line(card_x + NOTCH_R, seam_y, card_x + card_w - NOTCH_R, seam_y)
+    c.line(split_x, notch_r, split_x, PAGE_H - notch_r)
     c.setDash()
 
-    qr_size = 180
-    qr_x = card_x + (card_w - qr_size) / 2
-    qr_y = bottom_card_y + bottom_card_h - pad - qr_size
-    if qr_bytes:
-        qr_image = ImageReader(BytesIO(qr_bytes))
-        c.drawImage(qr_image, qr_x, qr_y, width=qr_size, height=qr_size)
+    # ── Right panel text ──────────────────────────────────────────────────
+    rx = split_x + pad
+    rw = PAGE_W - split_x - 2 * pad
 
-    c.setFillColorRGB(*LABEL_COLOR)
-    c.setFont("Helvetica", 8)
-    c.drawCentredString(PAGE_W / 2, qr_y - 24, "TICKET CODE")
-    c.setFillColorRGB(*TEXT_COLOR)
-    c.setFont("Courier-Bold", 14)
-    c.drawCentredString(PAGE_W / 2, qr_y - 42, ticket_code)
+    y = PAGE_H - pad  # top cursor
 
-    _draw_footer(c, bottom_card_y + 24, org_logo_bytes)
+    # EVENT NAME
+    c.setFillColorRGB(*_DIM)
+    c.setFont("Helvetica", 6.5)
+    c.drawString(rx, y - 8, "EVENT NAME")
+    y -= 25  # extra breathing room between label and title
+    title_lines = _wrap(c, (event_title or "Event").upper(), "Helvetica-Bold", 14, rw)[:2]
+    c.setFillColorRGB(*_WHITE)
+    c.setFont("Helvetica-Bold", 14)
+    for i, line in enumerate(title_lines):
+        c.drawString(rx, y - i * 16, line)
+    y -= (len(title_lines) - 1) * 16 + 14
+
+    # LOCATION
+    y -= 10
+    c.setFillColorRGB(*_DIM)
+    c.setFont("Helvetica", 6.5)
+    c.drawString(rx, y, "LOCATION")
+    y -= 16  # extra breathing room between label and value
+    loc_lines = _wrap(c, location or "Not set", "Helvetica-Bold", 11, rw)[:2]
+    c.setFillColorRGB(*_WHITE)
+    c.setFont("Helvetica-Bold", 11)
+    for i, line in enumerate(loc_lines):
+        c.drawString(rx, y - i * 13, line)
+    y -= (len(loc_lines) - 1) * 13 + 11
+
+    # DATE & TIME
+    y -= 10
+    c.setFillColorRGB(*_DIM)
+    c.setFont("Helvetica", 6.5)
+    c.drawString(rx, y, "DATE & TIME")
+    y -= 16  # extra breathing room between label and value
+    date_str = (
+        f"{event_date.strftime('%a, %b %d')} · {event_time.strftime('%I:%M %p')}"
+    )
+    c.setFillColorRGB(*_WHITE)
+    c.setFont("Helvetica-Bold", 11)
+    c.drawString(rx, y, date_str)
+
+    # ── Bottom: separator → GUEST | TYPE → Powered-by ────────────────────
+    sep_y      = pad + 42   # separator
+    guest_lbl_y = sep_y - 10
+    guest_y    = guest_lbl_y - 13
+    footer_y   = pad - 2
+
+    c.setStrokeColorRGB(0.22, 0.22, 0.28)
+    c.setLineWidth(0.5)
+    c.line(rx, sep_y, rx + rw, sep_y)
+
+    # GUEST (left)
+    c.setFillColorRGB(*_DIM)
+    c.setFont("Helvetica", 6.5)
+    c.drawString(rx, guest_lbl_y, "GUEST")
+    c.setFillColorRGB(*_WHITE)
+    c.setFont("Helvetica-Bold", 11)
+    c.drawString(rx, guest_y, attendee_name or "Guest")
+
+    # TYPE (right-aligned, italic)
+    type_val = ticket_type or "General"
+    c.setFillColorRGB(*_DIM)
+    c.setFont("Helvetica", 6.5)
+    type_lbl_w = c.stringWidth("TYPE", "Helvetica", 6.5)
+    c.drawString(rx + rw - type_lbl_w, guest_lbl_y, "TYPE")
+    c.setFillColorRGB(*_WHITE)
+    c.setFont("Helvetica-BoldOblique", 11)
+    type_val_w = c.stringWidth(type_val, "Helvetica-BoldOblique", 11)
+    c.drawString(rx + rw - type_val_w, guest_y, type_val)
+
+    # Powered by footer
+    fw, fh = _fit(*_POLLORD_LOGO.getSize(), 40, 12)
+    c.setFillColorRGB(*_DIM)
+    c.setFont("Helvetica", 6)
+    powered_w = c.stringWidth("Powered by ", "Helvetica", 6)
+
+    org_img = None
+    org_w = org_h = 0.0
+    if org_logo_bytes:
+        try:
+            org_img = ImageReader(BytesIO(org_logo_bytes))
+            org_w, org_h = _fit(*org_img.getSize(), 30, 12)
+        except Exception:
+            org_img = None
+
+    total_footer = (org_w + 4 if org_img else 0) + powered_w + fw
+    fx = PAGE_W - pad - total_footer
+    if org_img:
+        c.drawImage(org_img, fx, footer_y - 2, org_w, org_h, mask="auto",
+                    preserveAspectRatio=True)
+        fx += org_w + 4
+    c.drawString(fx, footer_y, "Powered by ")
+    fx += powered_w
+    c.drawImage(_POLLORD_LOGO, fx, footer_y - 2, fw, fh, mask="auto",
+                preserveAspectRatio=True)
 
     c.showPage()
     c.save()
-    buffer.seek(0)
-    return buffer.getvalue()
+    buf.seek(0)
+    return buf.getvalue()

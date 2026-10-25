@@ -346,43 +346,57 @@ def waitlist_confirmation_email() -> tuple[str, str]:
 
 
 def ticket_confirmation_email(event_title: str, ticket_count: int) -> tuple[str, str]:
-    """Return (subject, html_body) for a logged-in user's ticket purchase."""
-    subject = f"Ticket Confirmation: {event_title}"
-    content = f"""
-    <h2>Ticket Confirmation</h2>
-    <p>You have successfully purchased <strong>{ticket_count} ticket(s)</strong> for:</p>
-    <div class="otp-box">
-      <div style="color:#fff; font-size:20px; font-weight:800;">{event_title}</div>
-    </div>
-    <p>Your tickets are available in <a href="{{FRONTEND_URL}}/tickets/my-tickets" style="color:#6C63FF;">My Tickets</a>.</p>
+    """Return (subject, html) for a logged-in user's ticket purchase.
+
+    The PDF is attached by the caller — this template is intentionally terse
+    so the attachment is the focus, not a wall of text.
     """
+    subject = f"Your ticket{'s' if ticket_count != 1 else ''} for {event_title}"
+    plural = f"{ticket_count} tickets" if ticket_count != 1 else "1 ticket"
     from app.core.config import settings
-    content = content.replace("{FRONTEND_URL}", settings.FRONTEND_URL)
-    html = _base_template(content, f"{ticket_count} ticket(s) confirmed for {event_title}")
+    content = f"""
+    <h2 style="margin-bottom:8px;">You're in! 🎉</h2>
+    <p style="margin-top:0;">Your {plural} for <strong>{event_title}</strong> are confirmed.
+    The ticket PDF{'s are' if ticket_count != 1 else ' is'} attached to this email — save or
+    print the QR code to check in at the door.</p>
+    <p style="text-align:center; margin:32px 0;">
+      <a href="{settings.FRONTEND_URL}/tickets/my-tickets" class="btn">View my tickets</a>
+    </p>
+    <p style="font-size:12px; color:rgba(255,255,255,0.45); margin-top:32px;">
+      Need help? Reply to this email or visit our support page.
+    </p>
+    """
+    html = _base_template(content, f"Your ticket for {event_title}")
     return subject, html
 
 
 def guest_ticket_confirmation_email(
     event_title: str, ticket_count: int, download_links: list[str]
 ) -> tuple[str, str]:
-    """Confirmation for a guest (no account) purchase — links straight to each
-    ticket's PDF instead of a My Tickets page they can't sign in to see."""
-    subject = f"Ticket Confirmation: {event_title}"
-    buttons = "".join(
-        f'<p style="text-align:center; margin:12px 0;">'
-        f'<a href="{link}" class="btn">Download Ticket {i + 1}</a></p>'
+    """Confirmation for a guest (no account) purchase.
+
+    The PDF(s) are attached by the caller. Download links are kept in the
+    body as a backup in case the attachment is stripped by a mail client.
+    """
+    subject = f"Your ticket{'s' if ticket_count != 1 else ''} for {event_title}"
+    plural = f"{ticket_count} tickets" if ticket_count != 1 else "1 ticket"
+    link_html = "".join(
+        f'<p style="text-align:center; margin:10px 0;">'
+        f'<a href="{link}" class="btn" style="font-size:13px; padding:10px 24px;">'
+        f'Download ticket {i + 1}</a></p>'
         for i, link in enumerate(download_links)
     )
     content = f"""
-    <h2>Ticket Confirmation</h2>
-    <p>You have successfully purchased <strong>{ticket_count} ticket(s)</strong> for:</p>
-    <div class="otp-box">
-      <div style="color:#fff; font-size:20px; font-weight:800;">{event_title}</div>
-    </div>
-    {buttons}
-    <p style="font-size:13px; color:rgba(255,255,255,0.4);">Keep this email. These links are how you'll re-download your ticket(s).</p>
+    <h2 style="margin-bottom:8px;">You're in! 🎉</h2>
+    <p style="margin-top:0;">Your {plural} for <strong>{event_title}</strong> are confirmed.
+    The ticket PDF{'s are' if ticket_count != 1 else ' is'} attached to this email.
+    Show the QR code at the door to check in.</p>
+    {link_html}
+    <p style="font-size:12px; color:rgba(255,255,255,0.45); margin-top:24px;">
+      Keep this email — these links let you re-download your ticket at any time.
+    </p>
     """
-    html = _base_template(content, f"{ticket_count} ticket(s) confirmed for {event_title}")
+    html = _base_template(content, f"Your ticket for {event_title}")
     return subject, html
 
 
@@ -401,18 +415,40 @@ def launch_announcement_email() -> tuple[str, str]:
     return subject, _base_template(content, "Pollord is officially live!")
 
 
-def send_email(to: str, subject: str, html_body: str) -> bool:
-    """Send an email via Zoho SMTP with SSL."""
+def send_email(
+    to: str,
+    subject: str,
+    html_body: str,
+    attachments: list[tuple[str, bytes]] | None = None,
+) -> bool:
+    """Send an email via Zoho SMTP with SSL.
+
+    attachments is a list of (filename, bytes) pairs — each is encoded as
+    application/octet-stream. Pass None (the default) for no attachments.
+    """
     if not settings.MAIL_PASSWORD:
         logger.warning(f"MAIL_PASSWORD not set, skipping email to {to}")
         return False
 
     try:
-        msg = MIMEMultipart("alternative")
+        # "mixed" lets us attach files; "alternative" only allows text variants.
+        msg = MIMEMultipart("mixed")
         msg["From"] = f"{settings.MAIL_FROM_NAME} <{settings.MAIL_FROM}>"
         msg["To"] = to
         msg["Subject"] = subject
-        msg.attach(MIMEText(html_body, "html"))
+        # HTML goes in its own "alternative" sub-part so plain-text clients
+        # still get something sensible rather than raw MIME garbage.
+        html_part = MIMEMultipart("alternative")
+        html_part.attach(MIMEText(html_body, "html"))
+        msg.attach(html_part)
+        for filename, data in (attachments or []):
+            from email.mime.base import MIMEBase
+            from email import encoders as _enc
+            part = MIMEBase("application", "octet-stream")
+            part.set_payload(data)
+            _enc.encode_base64(part)
+            part.add_header("Content-Disposition", f'attachment; filename="{filename}"')
+            msg.attach(part)
 
         context = ssl.create_default_context()
 
