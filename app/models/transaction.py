@@ -40,6 +40,19 @@ class Transaction(Base):
     currency: Mapped[str] = mapped_column(String(10), default="GHS")
     # pending | success | failed | abandoned
     status: Mapped[str] = mapped_column(String(20), default="pending", index=True)
+    # Plain (no FK), matching this table's existing convention. Set at
+    # initiation when a promo code discounted this payment.
+    promo_code_id: Mapped[Optional[uuid.UUID]] = mapped_column(UUID(as_uuid=True), nullable=True)
+    discount_pesewas: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    # Decided at initiation and trusted as-is at verify time, rather than
+    # re-derived from amount // vote_price — that division would silently
+    # undercount once a promo code changes the per-vote price.
+    vote_count: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    # Snapshotted from the parent election/event's fee_payer at initiation,
+    # not re-read live — an organizer flipping the toggle after some sales
+    # already happened shouldn't retroactively change what past transactions
+    # are reported as. See app/core/financial_breakdown.py.
+    fee_payer: Mapped[str] = mapped_column(String(20), default="organizer", nullable=False)
     paystack_response: Mapped[Optional[dict]] = mapped_column(JSONB, nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now()

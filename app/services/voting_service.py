@@ -1,10 +1,13 @@
 import logging
-from datetime import datetime, timezone
+from datetime import datetime, time, timezone
 from typing import List, Optional
 from uuid import UUID
 
 from fastapi import HTTPException, status
+from sqlalchemy.exc import IntegrityError
 
+from app.core.results_stream import notify_vote_cast
+from app.services.org_notification_service import notify_vote_cast_if_due
 from app.models.election import Category
 from app.models.vote import Vote
 from app.repositories.audit_log_repository import AuditLogRepository
@@ -23,11 +26,25 @@ def resolve_candidate_selection(
     category: Category,
     candidate_ids: Optional[List[UUID]],
     candidate_short_codes: Optional[List[str]],
+    abstain: bool = False,
 ) -> List[UUID]:
     """Resolve + validate a candidate selection against one category's candidate
     pool. Parent-agnostic (works the same whether the category belongs to an
     Election or an Event) — shared by the authenticated cast_vote path and the
-    public/anonymous voting.py endpoints so this logic isn't hand-duplicated."""
+    public/anonymous voting.py endpoints so this logic isn't hand-duplicated.
+
+    An abstention returns an empty selection, which the tally then counts
+    toward no candidate. It has to be requested explicitly: inferring it from
+    an empty list would let a client bug silently discard a real choice.
+    """
+    if abstain:
+        if not category.allow_abstain:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="This category is not optional — a selection is required",
+            )
+        return []
+
     if candidate_short_codes:
         code_map = {
             c.short_code.upper(): c.candidate_id
@@ -186,7 +203,7 @@ class VotingService:
             )
 
         candidate_ids = resolve_candidate_selection(
-            category, data.candidate_ids, data.candidate_short_codes
+            category, data.candidate_ids, data.candidate_short_codes, data.abstain
         )
 
         open_election = (
@@ -222,16 +239,26 @@ class VotingService:
         cast_at = now.isoformat()
         signature = self.crypto.sign_vote(encrypted, cast_at)
 
-        await self.vote_repo.create(
-            {
-                "category_id": category.category_id,
-                "election_id": election.election_id,
-                "voter_hash": voter_hash,
-                "vote_data": encrypted,
-                "vote_signature": signature,
-                "count": 1,
-            }
-        )
+        try:
+            await self.vote_repo.create(
+                {
+                    "category_id": category.category_id,
+                    "election_id": election.election_id,
+                    "voter_hash": voter_hash,
+                    "vote_data": encrypted,
+                    "vote_signature": signature,
+                    "count": 1,
+                }
+            )
+        except IntegrityError:
+            # has_voted() above is a check-then-insert race under real
+            # concurrent load — uq_vote_per_category is the atomic backstop.
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="You have already voted in this category",
+            )
+        await notify_vote_cast(election.election_id, None)
+        await notify_vote_cast_if_due(self.vote_repo.session, election.election_id, None)
 
         receipt_code = self.crypto.generate_receipt_code()
         receipt = await self.receipt_repo.create(
@@ -394,6 +421,30 @@ class VotingService:
             categories=category_results,
         )
 
+    async def get_event_results(self, event_id: UUID) -> EventResults:
+        """Same as get_event_live_results, but only once voting has closed —
+        events have no "completed" status (only draft/published/cancelled),
+        so "ended" is derived from the same voting window
+        _assert_open_for_voting uses, not a status value."""
+        event = await self.event_repo.get_with_categories(event_id)
+        if not event:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Event not found",
+            )
+
+        if event.voting_starts_at is not None and event.voting_ends_at is not None:
+            ends_at = event.voting_ends_at
+        else:
+            ends_at = datetime.combine(event.event_date, time.max, tzinfo=timezone.utc)
+        if datetime.now(timezone.utc) <= ends_at:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Results are only available after voting has ended",
+            )
+
+        return await self.get_event_live_results(event_id)
+
     @staticmethod
     def build_election_with_categories(election) -> ElectionWithCategories:
         return ElectionWithCategories(
@@ -481,6 +532,7 @@ class VotingService:
                     description=c.description,
                     image_url=c.image_url,
                     display_order=c.display_order,
+                    created_at=c.created_at,
                 )
                 for c in sorted(category.candidates, key=lambda c: c.display_order)
             ],

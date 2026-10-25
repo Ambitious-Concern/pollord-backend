@@ -9,18 +9,25 @@ from fastapi import APIRouter, Depends, Request
 from fastapi.responses import StreamingResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.request_meta import client_ip
 from app.core.config import settings
 from app.core.dependencies import get_current_active_user, require_roles
+from app.core.financial_breakdown import buyer_facing_ticket_price_ghs
 from app.core.security import decode_token
 from app.db.base import get_db
+from app.db.tenant import get_tenant_db
 from app.models.audit_log import AuditLog
+from app.models.election import Election
 from app.models.event import Event, TicketType
 from app.models.organization import Organization
+from app.models.promo_code import PromoCode
 from app.models.ticket import Ticket, TicketPurchase, is_owned_by
 from app.models.user import User
 from app.repositories.audit_log_repository import AuditLogRepository
+from app.repositories.election_repository import ElectionRepository
 from app.repositories.event_repository import EventRepository, TicketTypeRepository
 from app.repositories.organization_repository import OrganizationRepository
+from app.repositories.promo_code_repository import PromoCodeRepository
 from app.repositories.ticket_repository import TicketPurchaseRepository, TicketRepository
 from app.repositories.ticket_transaction_repository import TicketTransactionRepository
 from app.repositories.user_repository import UserRepository
@@ -41,6 +48,7 @@ from app.schemas.ticket import (
     VerifyAndPurchaseRequest,
 )
 from app.services.paystack_service import PaystackService
+from app.services.promo_code_service import PromoCodeService, discount_price
 from app.services.ticketing_service import TicketingService
 from app.utils.pdf_generator import generate_ticket_pdf
 from app.utils.qr_code import generate_qr_code
@@ -85,11 +93,26 @@ def _get_ticketing_service(db: AsyncSession) -> TicketingService:
     )
 
 
+def _get_promo_service(db: AsyncSession) -> PromoCodeService:
+    return PromoCodeService(
+        db=db,
+        promo_repo=PromoCodeRepository(PromoCode, db),
+        org_repo=OrganizationRepository(Organization, db),
+        election_repo=ElectionRepository(Election, db),
+        event_repo=EventRepository(Event, db),
+    )
+
+
 @router.post("/purchase", response_model=TicketPurchaseResponse, status_code=201)
 async def purchase_tickets(
     data: TicketPurchaseRequest,
     request: Request,
     current_user: User = Depends(get_current_active_user),
+    # Deliberately plain get_db, not get_tenant_db: this is a buyer acting on
+    # their own behalf, not an organizer acting within an org. Most buyers
+    # belong to no organization at all — routing this through org-scoped RLS
+    # would (once the eventual cutover happens) reject every purchase from a
+    # buyer with no org membership, which is nearly all of them.
     db: AsyncSession = Depends(get_db),
 ):
     """Free-ticket purchase for a signed-in user (rejects if any item is priced)."""
@@ -97,7 +120,7 @@ async def purchase_tickets(
     return await service.purchase_tickets(
         user_id=current_user.user_id,
         data=data,
-        ip=request.client.host if request.client else None,
+        ip=client_ip(request),
         user_agent=request.headers.get("user-agent"),
     )
 
@@ -106,7 +129,7 @@ async def purchase_tickets(
 async def initiate_ticket_payment(
     data: TicketPurchaseRequest,
     current_user: User = Depends(get_current_active_user),
-    db: AsyncSession = Depends(get_db),
+    db: AsyncSession = Depends(get_db),  # buyer flow, not org-scoped — see purchase_tickets
 ):
     """Step 1 of a paid ticket purchase: validates each item and initializes
     a Paystack transaction. See verify_and_purchase_tickets for step 2."""
@@ -123,8 +146,18 @@ async def initiate_ticket_payment(
             detail="Event is not available for ticket purchase",
         )
 
+    promo = None
+    if data.promo_code:
+        promo = await _get_promo_service(db).resolve_for_checkout(
+            data.promo_code, event_id=data.event_id, email=current_user.email
+        )
+
     now = datetime.now(timezone.utc)
     total_amount = Decimal("0.00")
+    original_amount = Decimal("0.00")
+    # Kept separate from total_amount so discount_amount below stays a pure
+    # promo-code ledger, unaffected by whether the fee surcharge is on.
+    pre_surcharge_amount = Decimal("0.00")
     type_map = {tt.ticket_type_id: tt for tt in event.ticket_types}
 
     for item in data.items:
@@ -158,7 +191,14 @@ async def initiate_ticket_payment(
                 status_code=http_status.HTTP_400_BAD_REQUEST,
                 detail=f"Maximum {ticket_type.max_per_user} tickets per user for '{ticket_type.type_name}'",
             )
-        total_amount += Decimal(str(ticket_type.price)) * item.quantity
+        base_price = Decimal(str(ticket_type.price))
+        unit_price = discount_price(promo, base_price) if promo else base_price
+        pre_surcharge_amount += unit_price * item.quantity
+        original_amount += base_price * item.quantity
+        charged_unit_price = buyer_facing_ticket_price_ghs(
+            unit_price, event.plan, event.commission_rate_override_bps, event.fee_payer
+        )
+        total_amount += charged_unit_price * item.quantity
 
     if total_amount <= 0:
         raise HTTPException(
@@ -176,6 +216,9 @@ async def initiate_ticket_payment(
         "amount": total_amount,
         "currency": "GHS",
         "status": "pending",
+        "promo_code_id": promo.promo_code_id if promo else None,
+        "discount_amount": original_amount - pre_surcharge_amount,
+        "fee_payer": event.fee_payer,
     })
 
     paystack = PaystackService(settings.PAYSTACK_SECRET_KEY)
@@ -200,7 +243,7 @@ async def initiate_ticket_payment(
 async def verify_and_purchase_tickets(
     data: VerifyAndPurchaseRequest,
     current_user: User = Depends(get_current_active_user),
-    db: AsyncSession = Depends(get_db),
+    db: AsyncSession = Depends(get_db),  # buyer flow, not org-scoped — see purchase_tickets
 ):
     """Step 2: verifies the Paystack payment, then issues the tickets."""
     from fastapi import HTTPException, status as http_status
@@ -265,7 +308,7 @@ async def purchase_tickets_guest(
         guest_name=data.guest_name,
         guest_email=data.guest_email,
         guest_phone=data.guest_phone,
-        ip=request.client.host if request.client else None,
+        ip=client_ip(request),
         user_agent=request.headers.get("user-agent"),
     )
 
@@ -290,8 +333,18 @@ async def initiate_ticket_payment_guest(
             detail="Event is not available for ticket purchase",
         )
 
+    promo = None
+    if data.promo_code:
+        promo = await _get_promo_service(db).resolve_for_checkout(
+            data.promo_code, event_id=data.event_id, email=data.guest_email
+        )
+
     now = datetime.now(timezone.utc)
     total_amount = Decimal("0.00")
+    original_amount = Decimal("0.00")
+    # Kept separate from total_amount so discount_amount below stays a pure
+    # promo-code ledger, unaffected by whether the fee surcharge is on.
+    pre_surcharge_amount = Decimal("0.00")
     type_map = {tt.ticket_type_id: tt for tt in event.ticket_types}
 
     for item in data.items:
@@ -325,7 +378,14 @@ async def initiate_ticket_payment_guest(
                 status_code=http_status.HTTP_400_BAD_REQUEST,
                 detail=f"Maximum {ticket_type.max_per_user} tickets per user for '{ticket_type.type_name}'",
             )
-        total_amount += Decimal(str(ticket_type.price)) * item.quantity
+        base_price = Decimal(str(ticket_type.price))
+        unit_price = discount_price(promo, base_price) if promo else base_price
+        pre_surcharge_amount += unit_price * item.quantity
+        original_amount += base_price * item.quantity
+        charged_unit_price = buyer_facing_ticket_price_ghs(
+            unit_price, event.plan, event.commission_rate_override_bps, event.fee_payer
+        )
+        total_amount += charged_unit_price * item.quantity
 
     if total_amount <= 0:
         raise HTTPException(
@@ -346,6 +406,9 @@ async def initiate_ticket_payment_guest(
         "amount": total_amount,
         "currency": "GHS",
         "status": "pending",
+        "promo_code_id": promo.promo_code_id if promo else None,
+        "discount_amount": original_amount - pre_surcharge_amount,
+        "fee_payer": event.fee_payer,
     })
 
     paystack = PaystackService(settings.PAYSTACK_SECRET_KEY)
@@ -508,7 +571,7 @@ async def validate_ticket_guest(
     return await service.validate_ticket(
         ticket_code=data.ticket_code,
         scanned_by=None,
-        ip=request.client.host if request.client else None,
+        ip=client_ip(request),
         user_agent=request.headers.get("user-agent"),
         expected_event_id=UUID(payload["sub"]),
     )
@@ -517,7 +580,7 @@ async def validate_ticket_guest(
 @router.get("/my-tickets", response_model=List[TicketDetailResponse])
 async def get_my_tickets(
     current_user: User = Depends(get_current_active_user),
-    db: AsyncSession = Depends(get_db),
+    db: AsyncSession = Depends(get_db),  # buyer flow, not org-scoped — see purchase_tickets
     skip: int = 0,
     limit: int = 20,
 ):
@@ -532,7 +595,7 @@ async def get_my_tickets(
 async def get_ticket_sales(
     event_id: Optional[UUID] = None,
     current_user: User = Depends(get_current_active_user),
-    db: AsyncSession = Depends(get_db),
+    db: AsyncSession = Depends(get_tenant_db),
     skip: int = 0,
     limit: int = 50,
 ):
@@ -557,7 +620,7 @@ async def resend_ticket_sale_email(
     data: ResendTicketEmailRequest,
     request: Request,
     current_user: User = Depends(get_current_active_user),
-    db: AsyncSession = Depends(get_db),
+    db: AsyncSession = Depends(get_tenant_db),
 ):
     """Re-send the ticket email for one of the caller's sales.
 
@@ -569,7 +632,7 @@ async def resend_ticket_sale_email(
         ticket_id=ticket_id,
         actor=current_user,
         override_email=data.email,
-        ip=request.client.host if request.client else None,
+        ip=client_ip(request),
         user_agent=request.headers.get("user-agent"),
     )
 
@@ -578,7 +641,7 @@ async def resend_ticket_sale_email(
 async def download_ticket(
     ticket_id: UUID,
     current_user: User = Depends(get_current_active_user),
-    db: AsyncSession = Depends(get_db),
+    db: AsyncSession = Depends(get_db),  # buyer flow, not org-scoped — see purchase_tickets
 ):
     """Render and stream a ticket's PDF (QR code, event details, banner)."""
     from fastapi import HTTPException
@@ -626,14 +689,14 @@ async def validate_ticket(
     current_user: User = Depends(
         require_roles("System Administrator", "Event Organizer")
     ),
-    db: AsyncSession = Depends(get_db),
+    db: AsyncSession = Depends(get_tenant_db),
 ):
     """Organizer-side scan/check-in by ticket code."""
     service = _get_ticketing_service(db)
     return await service.validate_ticket(
         ticket_code=data.ticket_code,
         scanned_by=current_user.user_id,
-        ip=request.client.host if request.client else None,
+        ip=client_ip(request),
         user_agent=request.headers.get("user-agent"),
     )
 
@@ -642,7 +705,7 @@ async def validate_ticket(
 async def cancel_ticket(
     ticket_id: UUID,
     current_user: User = Depends(get_current_active_user),
-    db: AsyncSession = Depends(get_db),
+    db: AsyncSession = Depends(get_db),  # buyer flow, not org-scoped — see purchase_tickets
 ):
     """Cancel the caller's own valid ticket."""
     service = _get_ticketing_service(db)

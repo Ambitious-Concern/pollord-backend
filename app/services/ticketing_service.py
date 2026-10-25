@@ -8,14 +8,23 @@ from uuid import UUID
 from fastapi import HTTPException, status
 
 from app.core.security import create_ticket_download_token, generate_secure_token
-from app.models.event import Event
+from app.models.event import Event, TicketType
+from app.models.notification import Notification
+from app.models.org_activity_log import OrgActivityLog
+from app.models.organization import Organization
+from app.models.promo_code import PromoCode
 from app.models.ticket import Ticket, TicketPurchase, is_owned_by
 from app.models.user import User
 from app.repositories.audit_log_repository import AuditLogRepository
 from app.repositories.event_repository import EventRepository, TicketTypeRepository
+from app.repositories.notification_repository import NotificationRepository
+from app.repositories.org_activity_log_repository import OrgActivityLogRepository
+from app.repositories.organization_repository import OrganizationRepository
+from app.repositories.promo_code_repository import PromoCodeRepository
 from app.repositories.ticket_repository import TicketPurchaseRepository, TicketRepository
 from app.repositories.ticket_transaction_repository import TicketTransactionRepository
 from app.repositories.user_repository import UserRepository
+from app.services.org_notification_service import notify_ticket_purchased_if_due
 from app.schemas.ticket import (
     AdminTicketPurchaseListResponse,
     AdminTicketPurchaseResponse,
@@ -217,6 +226,232 @@ class TicketingService:
             purchased_at=purchase.purchased_at,
         )
 
+    # --- Front Desk: staff-issued walk-up tickets, bypassing checkout -----
+
+    async def get_or_create_free_registration_type(self, event_id: UUID) -> TicketType:
+        types = await self.ticket_type_repo.get_by_event(event_id)
+        existing = next((t for t in types if t.type_name == "Free Registration"), None)
+        if existing:
+            return existing
+        return await self.ticket_type_repo.create(
+            {
+                "event_id": event_id,
+                "type_name": "Free Registration",
+                "price": Decimal("0"),
+                "quantity_available": 999_999,
+            }
+        )
+
+    @staticmethod
+    def _walkin_guest_email() -> str:
+        return f"walkin-{generate_secure_token(4)}@front-desk.pollord.internal"
+
+    async def _maybe_notify_low_stock(
+        self, event: Event, ticket_type: TicketType, quantity: int
+    ) -> None:
+        """Fires exactly once, on the sale that pushes remaining stock at or
+        below the low-stock threshold — `ticket_type`'s in-memory
+        quantity_available/quantity_sold are pre-decrement values (the real
+        decrement happened via a raw UPDATE, not an ORM mutation), so this
+        can only be called right after a successful decrement_available for
+        this exact `quantity`."""
+        if event.org_id is None:
+            return
+        pre_remaining = ticket_type.quantity_available
+        total = pre_remaining + ticket_type.quantity_sold
+        post_remaining = pre_remaining - quantity
+        threshold = max(10, round(total * 0.1))
+        if not (pre_remaining > threshold >= post_remaining >= 0):
+            return
+        member_ids = await OrganizationRepository(Organization, self.ticket_repo.session).get_member_ids(
+            event.org_id
+        )
+        await NotificationRepository(Notification, self.ticket_repo.session).notify_org(
+            org_id=event.org_id,
+            member_ids=member_ids,
+            type="alert",
+            title=f"{event.title} — {ticket_type.type_name} tickets almost sold out",
+            description=f"Only {post_remaining} {ticket_type.type_name} tickets remain out of {total}.",
+            link="/dashboard/events/ticket-types",
+        )
+
+    async def front_desk_sell(
+        self,
+        event: Event,
+        ticket_type_id: UUID,
+        quantity: int,
+        name: str,
+        phone: str,
+        payment_method: str,
+        staff_user_id: UUID,
+        origin: Optional[str] = None,
+        ip: Optional[str] = None,
+        user_agent: Optional[str] = None,
+    ) -> List[TicketResponse]:
+        """Walk-up paid door sale — buying and checking in happen in the
+        same action, since the buyer is standing right there. Bypasses the
+        normal Paystack checkout entirely; payment_method just records what
+        the staff member says they were handed."""
+        ticket_type = await self.ticket_type_repo.get_by_id(
+            ticket_type_id, id_field="ticket_type_id"
+        )
+        if not ticket_type or ticket_type.event_id != event.event_id:
+            raise HTTPException(status_code=400, detail="Ticket type not found for this event")
+
+        success = await self.ticket_type_repo.decrement_available(ticket_type_id, quantity)
+        if not success:
+            raise HTTPException(
+                status_code=409,
+                detail=f"Not enough tickets available for '{ticket_type.type_name}'",
+            )
+        await self._maybe_notify_low_stock(event, ticket_type, quantity)
+        await notify_ticket_purchased_if_due(self.ticket_repo.session, event)
+
+        total_amount = Decimal(str(ticket_type.price)) * quantity
+        purchase = await self.purchase_repo.create(
+            {
+                "event_id": event.event_id,
+                "guest_name": name,
+                "guest_email": self._walkin_guest_email(),
+                "guest_phone": phone,
+                "total_amount": total_amount,
+                "payment_status": "completed",
+                "payment_method": payment_method,
+            }
+        )
+
+        now = datetime.now(timezone.utc)
+        tickets = []
+        for i in range(quantity):
+            ticket_code = generate_secure_token(16)
+            qr_data = json.dumps(
+                {
+                    "ticket_code": ticket_code,
+                    "event_id": str(event.event_id),
+                    "ticket_type": ticket_type.type_name,
+                }
+            )
+            ticket = await self.ticket_repo.create(
+                {
+                    "ticket_code": ticket_code,
+                    "event_id": event.event_id,
+                    "ticket_type_id": ticket_type_id,
+                    "guest_name": name if quantity == 1 else f"{name} ({i + 1})",
+                    "guest_email": purchase.guest_email,
+                    "guest_phone": phone,
+                    "purchase_id": purchase.purchase_id,
+                    "qr_code_data": qr_data,
+                    "ticket_status": "used",
+                    "used_at": now,
+                    "scanned_by": staff_user_id,
+                    "check_in_channel": "door-sale",
+                    "origin": origin,
+                }
+            )
+            tickets.append(ticket)
+
+        await self.audit_repo.log_action(
+            action_type="FRONT_DESK_SALE",
+            entity_type="Event",
+            entity_id=event.event_id,
+            user_id=staff_user_id,
+            changes={"ticket_count": quantity, "amount": str(total_amount)},
+        )
+        if event.org_id is not None:
+            await OrgActivityLogRepository(OrgActivityLog, self.ticket_repo.session).log_activity(
+                org_id=event.org_id,
+                category="front-desk",
+                verb="sold a walk-up ticket for",
+                target_name=event.title,
+                user_id=staff_user_id,
+                detail=f"{ticket_type.type_name} · {payment_method.replace('_', ' ').title()}",
+                ip_address=ip,
+                user_agent=user_agent,
+            )
+        return [self._to_ticket_response(t) for t in tickets]
+
+    async def front_desk_register(
+        self,
+        event: Event,
+        name: str,
+        phone: str,
+        staff_user_id: UUID,
+        origin: Optional[str] = None,
+        email: Optional[str] = None,
+        send_confirmation_email: bool = False,
+        ip: Optional[str] = None,
+        user_agent: Optional[str] = None,
+    ) -> TicketResponse:
+        """Free registration under an event's "Free Registration" ticket
+        type — access is granted at the actual door scan, not here (see
+        check_in_channel's model docstring).
+
+        Walk-up Front Desk registrations have no real email to capture, so
+        `email` defaults to a synthetic walk-in address and no confirmation
+        is sent. A remote registration (e.g. an accepted RSVP invite) passes
+        the guest's real email plus `send_confirmation_email=True` so they
+        get a download link for the ticket they'll never physically see
+        anyone hand them.
+        """
+        ticket_type = await self.get_or_create_free_registration_type(event.event_id)
+        guest_email = email or self._walkin_guest_email()
+
+        purchase = await self.purchase_repo.create(
+            {
+                "event_id": event.event_id,
+                "guest_name": name,
+                "guest_email": guest_email,
+                "guest_phone": phone,
+                "total_amount": Decimal("0"),
+                "payment_status": "completed",
+            }
+        )
+
+        ticket_code = generate_secure_token(16)
+        qr_data = json.dumps(
+            {
+                "ticket_code": ticket_code,
+                "event_id": str(event.event_id),
+                "ticket_type": ticket_type.type_name,
+            }
+        )
+        ticket = await self.ticket_repo.create(
+            {
+                "ticket_code": ticket_code,
+                "event_id": event.event_id,
+                "ticket_type_id": ticket_type.ticket_type_id,
+                "guest_name": name,
+                "guest_email": guest_email,
+                "guest_phone": phone,
+                "purchase_id": purchase.purchase_id,
+                "qr_code_data": qr_data,
+                "check_in_channel": "registration",
+                "origin": origin,
+            }
+        )
+
+        await self.audit_repo.log_action(
+            action_type="FRONT_DESK_REGISTRATION",
+            entity_type="Event",
+            entity_id=event.event_id,
+            user_id=staff_user_id,
+        )
+        if event.org_id is not None:
+            await OrgActivityLogRepository(OrgActivityLog, self.ticket_repo.session).log_activity(
+                org_id=event.org_id,
+                category="front-desk",
+                verb="registered a free walk-in for",
+                target_name=event.title,
+                user_id=staff_user_id,
+                ip_address=ip,
+                user_agent=user_agent,
+            )
+        if send_confirmation_email and email:
+            await self._send_purchase_confirmation(
+                event.title, [ticket], user_id=None, guest_email=email, purchase=purchase
+            )
+        return self._to_ticket_response(ticket)
+
     def _to_ticket_response(self, t: Ticket) -> TicketResponse:
         return TicketResponse(
             ticket_id=t.ticket_id,
@@ -226,6 +461,8 @@ class TicketingService:
             ticket_status=t.ticket_status,
             purchase_date=t.purchase_date,
             used_at=t.used_at,
+            check_in_channel=t.check_in_channel,
+            origin=t.origin,
             download_token=create_ticket_download_token(str(t.ticket_id)) if t.user_id is None else None,
         )
 
@@ -774,6 +1011,8 @@ class TicketingService:
         txn_guest_phone = txn.guest_phone
         txn_event_id = txn.event_id
         txn_amount = txn.amount
+        txn_promo_code_id = txn.promo_code_id
+        txn_discount_amount = txn.discount_amount
 
         event = await self.event_repo.get_with_ticket_types(txn_event_id)
         if not event or event.status != "published":
@@ -815,6 +1054,8 @@ class TicketingService:
                 )
             decremented.append((ticket_type_id, quantity))
             ticket_items.append((ticket_type, quantity))
+            await self._maybe_notify_low_stock(event, ticket_type, quantity)
+        await notify_ticket_purchased_if_due(self.ticket_repo.session, event)
 
         purchase = await self.purchase_repo.create({
             "user_id": txn_user_id,
@@ -861,6 +1102,20 @@ class TicketingService:
         )
 
         await txn_repo.update_status(reference, "success", paystack_data)
+
+        if txn_promo_code_id:
+            redemption_email = txn_guest_email
+            if not redemption_email and txn_user_id:
+                buyer = await self.user_repo.get_by_id(txn_user_id, id_field="user_id")
+                redemption_email = buyer.email if buyer else None
+            if redemption_email:
+                await PromoCodeRepository(PromoCode, self.ticket_repo.session).record_redemption(
+                    txn_promo_code_id,
+                    channel="ticket",
+                    email=redemption_email,
+                    discount_amount=txn_discount_amount,
+                    user_id=txn_user_id,
+                )
 
         return TicketPurchaseResponse(
             purchase_id=purchase.purchase_id,
@@ -921,6 +1176,7 @@ class TicketingService:
                     ticket_status=ticket.ticket_status,
                     purchase_date=ticket.purchase_date,
                     used_at=ticket.used_at,
+                    check_in_channel=ticket.check_in_channel,
                 ),
             )
 
@@ -930,8 +1186,9 @@ class TicketingService:
                 message="Ticket has been cancelled",
             )
 
+        channel = "manual_code" if scanned_by else "scan"
         updated = await self.ticket_repo.mark_as_used(
-            ticket.ticket_id, scanned_by
+            ticket.ticket_id, scanned_by, channel
         )
 
         await self.audit_repo.log_action(
@@ -954,6 +1211,7 @@ class TicketingService:
                 ticket_status=updated.ticket_status,
                 purchase_date=updated.purchase_date,
                 used_at=updated.used_at,
+                check_in_channel=updated.check_in_channel,
             ),
             attendee_name=(updated.user.full_name if updated.user else updated.guest_name),
             event_title=updated.event.title if updated.event else None,
@@ -1003,11 +1261,15 @@ class TicketingService:
                 ticket_status=t.ticket_status,
                 purchase_date=t.purchase_date,
                 used_at=t.used_at,
+                check_in_channel=t.check_in_channel,
+                origin=t.origin,
                 event_title=t.event.title if t.event else "",
                 ticket_type_name=t.ticket_type.type_name if t.ticket_type else "",
                 attendee_name=(t.user.full_name if t.user else t.guest_name) or "",
                 attendee_email=(t.user.email if t.user else t.guest_email) or "",
                 amount=t.ticket_type.price if t.ticket_type else Decimal("0"),
+                payment_method=t.purchase.payment_method if t.purchase else None,
+                attendee_phone=t.guest_phone,
             )
             for t in tickets
         ]

@@ -3,28 +3,37 @@ from pathlib import Path
 from typing import List, Optional
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile, status
+from fastapi import APIRouter, Depends, File, HTTPException, Query, Request, UploadFile, status
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from datetime import datetime, timedelta, timezone
 
 from app.core.config import settings
 from app.core.dependencies import get_current_active_user, require_roles
+from app.core.ownership import owns_election as _owns_election
+from app.core.ownership import require_election_ownership as _require_ownership
 from app.core.pricing import validate_vote_price
+from app.core.request_meta import client_ip_and_agent
 from app.core.security import create_candidate_result_token, decode_token
 from app.core.slug import generate_slug
 from app.core.ussd import generate_unique_ussd_code
 from app.db.base import get_db
+from app.db.tenant import get_tenant_db
 from app.models.audit_log import AuditLog
 from app.models.election import Candidate, CandidateAccessOTP, Category, Election, EligibleVoter
+from app.models.org_activity_log import OrgActivityLog
 from app.models.organization import Organization
 from app.models.platform_setting import PlatformSetting
 from app.models.user import User
+from app.models.vote import Vote
 from app.repositories.audit_log_repository import AuditLogRepository
 from app.repositories.election_repository import CandidateRepository, CategoryRepository, ElectionRepository
+from app.repositories.org_activity_log_repository import OrgActivityLogRepository
 from app.repositories.organization_repository import OrganizationRepository
 from app.services import email_service
 from app.services.file_storage_service import file_storage_service
+from app.services.org_notification_service import OrgNotificationService
 from app.services.voting_service import VotingService
 from app.schemas.election import (
     CandidateCreate,
@@ -37,35 +46,19 @@ from app.schemas.election import (
     ElectionCreate,
     ElectionPublicResponse,
     ElectionResponse,
+    ElectionSummaryResponse,
     ElectionUpdate,
     ElectionWithCategories,
     EligibleVoterAdd,
+    EligibleVoterImport,
     EligibleVoterResponse,
+    PaginatedEligibleVotersResponse,
 )
+from app.services.election_summary_service import ElectionSummaryService
 
 router = APIRouter(prefix="/elections", tags=["Elections"])
 
 ADMIN_ROLES = ("System Administrator", "Election Administrator")
-SYSTEM_ADMIN = "System Administrator"
-
-
-async def _owns_election(election, current_user: User, db: AsyncSession) -> bool:
-    """The creator, a System Administrator, or an organization teammate
-    holding a managing role. Elections carry no org_id, so organization
-    access is resolved through shared membership with the creator."""
-    user_roles = [ur.role.role_name for ur in current_user.user_roles]
-    if election.created_by == current_user.user_id or SYSTEM_ADMIN in user_roles:
-        return True
-    return await OrganizationRepository(Organization, db).can_manage_with(
-        current_user.user_id, election.created_by
-    )
-
-
-async def _require_ownership(election, current_user: User, db: AsyncSession) -> None:
-    """Raise 403 unless the caller created this election, is a teammate in
-    its organization, or is a System Administrator."""
-    if not await _owns_election(election, current_user, db):
-        raise HTTPException(status_code=403, detail="You do not have access to this election")
 
 SETTINGS_FIELDS = (
     "visibility",
@@ -80,10 +73,15 @@ SETTINGS_FIELDS = (
     "vote_price",
 )
 
-# Once an election is active, its ballot (dates, categories, voting rules,
-# access) is locked so results stay trustworthy — but purely cosmetic/info
-# fields are still safe to fix up (a typo in the title, a wrong venue, etc).
-SAFE_FIELDS_WHILE_ACTIVE = {"title", "description", "venue", "latitude", "longitude", "tag"}
+# Once an election is active, its ballot (title, dates other than the end,
+# categories, voting rules, access, venue/geo/tag) is locked so results stay
+# trustworthy and voters aren't confused mid-vote by an identity change —
+# only the description, banner, and end date/time can still move.
+SAFE_FIELDS_WHILE_ACTIVE = {
+    "description",
+    "banner_image_url",
+    "end_datetime",
+}
 SAFE_SETTINGS_WHILE_ACTIVE = {"enable_notifications"}
 
 
@@ -155,19 +153,13 @@ async def list_public_elections(
     skip: int = Query(0, ge=0),
     limit: int = Query(20, ge=1, le=100),
     status_filter: Optional[str] = None,
+    search: Optional[str] = None,
 ):
     """List all public elections. No authentication required."""
     election_repo = ElectionRepository(Election, db)
-
-    if status_filter:
-        elections = await election_repo.get_elections_by_status(
-            status_filter, skip, limit
-        )
-    else:
-        elections = await election_repo.get_all(skip=skip, limit=limit)
-
-    # Filter to only public elections
-    public = [e for e in elections if getattr(e, "visibility", "public") == "public"]
+    public = await election_repo.get_public_elections(
+        skip=skip, limit=limit, status=status_filter, search=search
+    )
 
     global_vote_price = await _get_global_vote_price(db)
     responses = []
@@ -239,14 +231,14 @@ async def list_user_public_elections(
 
 @router.post("", response_model=ElectionResponse, status_code=201)
 async def create_election(
+    request: Request,
     data: ElectionCreate,
     current_user: User = Depends(require_roles(*ADMIN_ROLES)),
-    db: AsyncSession = Depends(get_db),
+    db: AsyncSession = Depends(get_tenant_db),
 ):
     """Create an election, auto-generating a slug and USSD code."""
-    if not await OrganizationRepository(Organization, db).can_create(
-        current_user.user_id
-    ):
+    org_repo = OrganizationRepository(Organization, db)
+    if not await org_repo.can_create(current_user.user_id):
         raise HTTPException(
             status_code=403,
             detail=(
@@ -273,6 +265,7 @@ async def create_election(
         "longitude": data.longitude,
         "tag": data.tag,
         "created_by": current_user.user_id,
+        "org_id": await org_repo.get_primary_org_id_for_user(current_user.user_id),
         **_extract_settings(data),
     }
 
@@ -284,21 +277,32 @@ async def create_election(
         entity_id=election.election_id,
         user_id=current_user.user_id,
     )
+    if election.org_id is not None:
+        ip, agent = client_ip_and_agent(request)
+        await OrgActivityLogRepository(OrgActivityLog, db).log_activity(
+            org_id=election.org_id,
+            category="election",
+            verb="created election",
+            target_name=election.title,
+            user_id=current_user.user_id,
+            ip_address=ip,
+            user_agent=agent,
+        )
 
     return ElectionResponse.model_validate(election)
 
 
-@router.get("", response_model=List[ElectionResponse])
+@router.get("", response_model=List[ElectionSummaryResponse])
 async def list_elections(
-    db: AsyncSession = Depends(get_db),
+    db: AsyncSession = Depends(get_tenant_db),
     skip: int = 0,
     limit: int = 20,
     status_filter: Optional[str] = None,
     current_user: User = Depends(require_roles(*ADMIN_ROLES)),
 ):
-    """Elections belonging to the caller's organization.
-
-    Scoped to the caller plus their teammates — see list_events for why.
+    """Elections belonging to the caller's organization, with the grid's
+    aggregate stats (categories/candidates/votes/revenue) bulk-computed
+    alongside — see list_events for why the scoping is teammate-wide.
     """
     election_repo = ElectionRepository(Election, db)
     teammate_ids = await OrganizationRepository(Organization, db).get_teammate_ids(
@@ -310,13 +314,27 @@ async def list_elections(
         limit=limit,
         status=status_filter,
     )
-    return [ElectionResponse.model_validate(e) for e in elections]
+    global_vote_price = await _get_global_vote_price(db)
+    summaries = await ElectionSummaryService(db).get_summaries([e.election_id for e in elections])
+
+    responses = []
+    for e in elections:
+        resp = ElectionSummaryResponse.model_validate(e)
+        resp.effective_vote_price = e.vote_price if e.vote_price is not None else global_vote_price
+        stats = summaries[e.election_id]
+        resp.categories_count = stats.categories_count
+        resp.candidates_count = stats.candidates_count
+        resp.votes_cast = stats.votes_cast
+        resp.revenue_ghs = stats.revenue_ghs
+        resp.revenue_growth_pct = stats.revenue_growth_pct
+        responses.append(resp)
+    return responses
 
 
 @router.get("/{election_id}", response_model=ElectionWithCategories)
 async def get_election(
     election_id: UUID,
-    db: AsyncSession = Depends(get_db),
+    db: AsyncSession = Depends(get_tenant_db),
     current_user: User = Depends(require_roles(*ADMIN_ROLES)),
 ):
     """Full election detail including categories/candidates, for the
@@ -332,10 +350,11 @@ async def get_election(
 
 @router.put("/{election_id}", response_model=ElectionResponse)
 async def update_election(
+    request: Request,
     election_id: UUID,
     data: ElectionUpdate,
     current_user: User = Depends(require_roles(*ADMIN_ROLES)),
-    db: AsyncSession = Depends(get_db),
+    db: AsyncSession = Depends(get_tenant_db),
 ):
     """Partial update. Once active, only SAFE_FIELDS_WHILE_ACTIVE /
     SAFE_SETTINGS_WHILE_ACTIVE may change — the rest of the ballot is
@@ -375,6 +394,18 @@ async def update_election(
     updated = await election_repo.update(
         election_id, update_data, id_field="election_id"
     )
+    if updated.org_id is not None and update_data:
+        ip, agent = client_ip_and_agent(request)
+        await OrgActivityLogRepository(OrgActivityLog, db).log_activity(
+            org_id=updated.org_id,
+            category="election",
+            verb="updated settings for",
+            target_name=updated.title,
+            user_id=current_user.user_id,
+            detail=f"Updated: {', '.join(sorted(update_data.keys()))}",
+            ip_address=ip,
+            user_agent=agent,
+        )
     return ElectionResponse.model_validate(updated)
 
 
@@ -382,7 +413,7 @@ async def update_election(
 async def delete_election(
     election_id: UUID,
     current_user: User = Depends(require_roles(*ADMIN_ROLES)),
-    db: AsyncSession = Depends(get_db),
+    db: AsyncSession = Depends(get_tenant_db),
 ):
     """Delete a draft election."""
     election_repo = ElectionRepository(Election, db)
@@ -406,7 +437,7 @@ async def delete_election(
 VALID_TRANSITIONS = {
     "draft": ["scheduled", "active"],
     "scheduled": ["active", "draft"],
-    "active": ["completed"],
+    "active": ["completed", "draft"],
 }
 
 
@@ -414,7 +445,7 @@ VALID_TRANSITIONS = {
 async def publish_election(
     election_id: UUID,
     current_user: User = Depends(require_roles(*ADMIN_ROLES)),
-    db: AsyncSession = Depends(get_db),
+    db: AsyncSession = Depends(get_tenant_db),
 ):
     """Activate/publish an election (draft/scheduled → active)."""
     election_repo = ElectionRepository(Election, db)
@@ -458,6 +489,18 @@ async def publish_election(
         user_id=current_user.user_id,
     )
 
+    if election.org_id is not None:
+        member_ids = await OrganizationRepository(Organization, db).get_member_ids(election.org_id)
+        await OrgNotificationService(db).notify(
+            org_id=election.org_id,
+            member_ids=member_ids,
+            pref_key="election_started",
+            notif_type="vote",
+            title=f"{election.title} is now live",
+            description="Voting has started.",
+            link=f"/dashboard/elections?highlight={election_id}",
+        )
+
     return ElectionResponse.model_validate(updated)
 
 
@@ -465,7 +508,7 @@ async def publish_election(
 async def schedule_election(
     election_id: UUID,
     current_user: User = Depends(require_roles(*ADMIN_ROLES)),
-    db: AsyncSession = Depends(get_db),
+    db: AsyncSession = Depends(get_tenant_db),
 ):
     """Schedule a draft election."""
     election_repo = ElectionRepository(Election, db)
@@ -488,7 +531,7 @@ async def schedule_election(
 async def close_election(
     election_id: UUID,
     current_user: User = Depends(require_roles(*ADMIN_ROLES)),
-    db: AsyncSession = Depends(get_db),
+    db: AsyncSession = Depends(get_tenant_db),
 ):
     """Close/complete an active election."""
     election_repo = ElectionRepository(Election, db)
@@ -516,6 +559,52 @@ async def close_election(
     return ElectionResponse.model_validate(updated)
 
 
+@router.post("/{election_id}/unpublish", response_model=ElectionResponse)
+async def unpublish_election(
+    election_id: UUID,
+    current_user: User = Depends(require_roles(*ADMIN_ROLES)),
+    db: AsyncSession = Depends(get_tenant_db),
+):
+    """Revert a scheduled or active election back to draft — the "I clicked
+    the wrong button" undo. Blocked once any vote has been cast, since
+    re-opening the ballot for edits after voting has begun would compromise
+    result integrity; the only way out of an active election with votes
+    already on it is /close."""
+    election_repo = ElectionRepository(Election, db)
+    audit_repo = AuditLogRepository(AuditLog, db)
+    election = await election_repo.get_by_id(election_id, id_field="election_id")
+    if not election:
+        raise HTTPException(status_code=404, detail="Election not found")
+    await _require_ownership(election, current_user, db)
+
+    if "draft" not in VALID_TRANSITIONS.get(election.status, []):
+        raise HTTPException(
+            status_code=400,
+            detail=f"Cannot revert election with status '{election.status}' to draft",
+        )
+
+    if election.status == "active":
+        vote_count = await db.scalar(
+            select(func.count()).select_from(Vote).where(Vote.election_id == election_id)
+        )
+        if vote_count:
+            raise HTTPException(
+                status_code=400,
+                detail="Cannot revert to draft after votes have been cast",
+            )
+
+    updated = await election_repo.update_status(election_id, "draft")
+
+    await audit_repo.log_action(
+        action_type="UNPUBLISH",
+        entity_type="Election",
+        entity_id=election_id,
+        user_id=current_user.user_id,
+    )
+
+    return ElectionResponse.model_validate(updated)
+
+
 # =========================================================================
 # Candidates
 # =========================================================================
@@ -530,7 +619,7 @@ async def add_candidate(
     election_id: UUID,
     data: CandidateCreate,
     current_user: User = Depends(require_roles(*ADMIN_ROLES)),
-    db: AsyncSession = Depends(get_db),
+    db: AsyncSession = Depends(get_tenant_db),
 ):
     """Add a candidate before voting starts, emailing them a nomination
     notice (with a results-tracking link) if an email was given."""
@@ -594,7 +683,7 @@ async def upload_candidate_image(
     election_id: UUID,
     file: UploadFile = File(...),
     current_user: User = Depends(require_roles(*ADMIN_ROLES)),
-    db: AsyncSession = Depends(get_db),
+    db: AsyncSession = Depends(get_tenant_db),
 ):
     """Upload a candidate photo. Returns { image_url } for use in add_candidate."""
     election_repo = ElectionRepository(Election, db)
@@ -628,7 +717,7 @@ async def upload_election_banner(
     election_id: UUID,
     file: UploadFile = File(...),
     current_user: User = Depends(require_roles(*ADMIN_ROLES)),
-    db: AsyncSession = Depends(get_db),
+    db: AsyncSession = Depends(get_tenant_db),
 ):
     """Upload an election banner. Returns { banner_image_url } for use in create/update."""
     election_repo = ElectionRepository(Election, db)
@@ -662,13 +751,55 @@ async def upload_election_banner(
 )
 async def list_candidates(
     election_id: UUID,
-    db: AsyncSession = Depends(get_db),
+    db: AsyncSession = Depends(get_tenant_db),
     current_user: User = Depends(get_current_active_user),
 ):
-    """All candidates across an election's categories."""
+    """All candidates across an election's categories, with each one's vote
+    count and rank within its own category. Organizer-only — this exposes
+    in-progress tallies, same sensitivity as live-results."""
+    from app.models.vote import Vote
+    from app.repositories.vote_repository import VoteRepository
+    from app.services.cryptography_service import CryptographyService
+    from app.services.voting_service import tally_votes_by_category
+
+    election_repo = ElectionRepository(Election, db)
+    election = await election_repo.get_with_categories(election_id)
+    if not election:
+        raise HTTPException(status_code=404, detail="Election not found")
+    await _require_ownership(election, current_user, db)
+
     candidate_repo = CandidateRepository(Candidate, db)
     candidates = await candidate_repo.get_by_election(election_id)
-    return [CandidateResponse.model_validate(c) for c in candidates]
+
+    votes = await VoteRepository(Vote, db).get_votes_by_election(election_id)
+    category_results = tally_votes_by_category(votes, election.categories, CryptographyService())
+    tally_by_candidate = {
+        result.candidate_id: (result.vote_count, rank + 1)
+        for cat in category_results
+        for rank, result in enumerate(cat.results)
+    }
+
+    responses = []
+    for c in candidates:
+        vote_count, category_rank = tally_by_candidate.get(c.candidate_id, (0, None))
+        responses.append(
+            CandidateResponse(
+                candidate_id=c.candidate_id,
+                category_id=c.category_id,
+                election_id=c.election_id,
+                event_id=c.event_id,
+                name=c.name,
+                short_code=c.short_code,
+                email=c.email,
+                description=c.description,
+                image_url=c.image_url,
+                display_order=c.display_order,
+                created_at=c.created_at,
+                vote_count=vote_count,
+                category_rank=category_rank,
+            )
+        )
+    return responses
 
 
 @router.delete("/{election_id}/candidates/{candidate_id}", status_code=204)
@@ -676,7 +807,7 @@ async def remove_candidate(
     election_id: UUID,
     candidate_id: UUID,
     current_user: User = Depends(require_roles(*ADMIN_ROLES)),
-    db: AsyncSession = Depends(get_db),
+    db: AsyncSession = Depends(get_tenant_db),
 ):
     """Remove a candidate from an election."""
     election_repo = ElectionRepository(Election, db)
@@ -702,7 +833,7 @@ async def update_candidate(
     candidate_id: UUID,
     data: CandidateUpdate,
     current_user: User = Depends(require_roles(*ADMIN_ROLES)),
-    db: AsyncSession = Depends(get_db),
+    db: AsyncSession = Depends(get_tenant_db),
 ):
     """Partial update of a candidate before voting starts."""
     election_repo = ElectionRepository(Election, db)
@@ -738,7 +869,7 @@ async def add_category(
     election_id: UUID,
     data: CategoryCreate,
     current_user: User = Depends(require_roles(*ADMIN_ROLES)),
-    db: AsyncSession = Depends(get_db),
+    db: AsyncSession = Depends(get_tenant_db),
 ):
     """Add a category (position/prize) before voting starts."""
     election_repo = ElectionRepository(Election, db)
@@ -763,7 +894,7 @@ async def add_category(
 @router.get("/{election_id}/categories", response_model=List[CategoryWithCandidates])
 async def list_categories(
     election_id: UUID,
-    db: AsyncSession = Depends(get_db),
+    db: AsyncSession = Depends(get_tenant_db),
     current_user: User = Depends(get_current_active_user),
 ):
     """All categories (with their candidates) for an election."""
@@ -776,7 +907,7 @@ async def list_categories(
 async def get_category(
     election_id: UUID,
     category_id: UUID,
-    db: AsyncSession = Depends(get_db),
+    db: AsyncSession = Depends(get_tenant_db),
     current_user: User = Depends(get_current_active_user),
 ):
     """One election category with its candidates."""
@@ -793,7 +924,7 @@ async def update_category(
     category_id: UUID,
     data: CategoryUpdate,
     current_user: User = Depends(require_roles(*ADMIN_ROLES)),
-    db: AsyncSession = Depends(get_db),
+    db: AsyncSession = Depends(get_tenant_db),
 ):
     """Partial update of a category before voting starts."""
     election_repo = ElectionRepository(Election, db)
@@ -823,7 +954,7 @@ async def delete_category(
     election_id: UUID,
     category_id: UUID,
     current_user: User = Depends(require_roles(*ADMIN_ROLES)),
-    db: AsyncSession = Depends(get_db),
+    db: AsyncSession = Depends(get_tenant_db),
 ):
     """Delete a category before voting starts."""
     election_repo = ElectionRepository(Election, db)
@@ -853,10 +984,11 @@ async def delete_category(
 
 @router.post("/{election_id}/eligible-voters", status_code=201)
 async def add_eligible_voters(
+    request: Request,
     election_id: UUID,
     data: EligibleVoterAdd,
     current_user: User = Depends(require_roles(*ADMIN_ROLES)),
-    db: AsyncSession = Depends(get_db),
+    db: AsyncSession = Depends(get_tenant_db),
 ):
     """Add users to the eligibility list of a gated (non-open) election."""
     election_repo = ElectionRepository(Election, db)
@@ -866,6 +998,20 @@ async def add_eligible_voters(
     await _require_ownership(election, current_user, db)
 
     voters = await election_repo.add_eligible_voters(election_id, data.user_ids)
+    if election.org_id is not None and voters:
+        # One entry per bulk-add call, not per voter — a CSV import of 300
+        # voters shouldn't produce 300 log rows.
+        ip, agent = client_ip_and_agent(request)
+        await OrgActivityLogRepository(OrgActivityLog, db).log_activity(
+            org_id=election.org_id,
+            category="team",
+            verb="added a voter to",
+            target_name=election.title,
+            user_id=current_user.user_id,
+            detail=f"{len(voters)} voter(s) added",
+            ip_address=ip,
+            user_agent=agent,
+        )
     return {"message": f"Added {len(voters)} eligible voter(s)"}
 
 
@@ -876,16 +1022,257 @@ async def add_eligible_voters(
 async def list_eligible_voters(
     election_id: UUID,
     current_user: User = Depends(require_roles(*ADMIN_ROLES)),
-    db: AsyncSession = Depends(get_db),
+    db: AsyncSession = Depends(get_tenant_db),
 ):
     """The eligibility list for a gated election."""
+    from app.core.security import generate_voter_hash
+    from app.models.vote import Vote
+    from app.repositories.vote_repository import VoteRepository
+
+    election_repo = ElectionRepository(Election, db)
+    election = await election_repo.get_with_categories(election_id)
+    if not election:
+        raise HTTPException(status_code=404, detail="Election not found")
+    await _require_ownership(election, current_user, db)
+
+    voters = await election_repo.get_eligible_voters(election_id)
+    category_ids = [c.category_id for c in election.categories]
+    voted_hashes = await VoteRepository(Vote, db).get_voter_hashes_by_categories(category_ids)
+
+    responses = []
+    for v in voters:
+        has_voted = any(
+            generate_voter_hash(v.user_id, cid) in voted_hashes for cid in category_ids
+        )
+        responses.append(
+            EligibleVoterResponse(
+                eligible_voter_id=v.eligible_voter_id,
+                election_id=v.election_id,
+                user_id=v.user_id,
+                name=v.user.full_name if v.user else "",
+                email=v.user.email if v.user else "",
+                notified_at=v.notified_at,
+                has_voted=has_voted,
+                created_at=v.created_at,
+            )
+        )
+    return responses
+
+
+MAX_VOTERS_PAGE_SIZE = 200
+
+
+@router.get("/eligible-voters/mine", response_model=PaginatedEligibleVotersResponse)
+async def list_all_eligible_voters(
+    current_user: User = Depends(require_roles(*ADMIN_ROLES)),
+    db: AsyncSession = Depends(get_tenant_db),
+    skip: int = 0,
+    limit: int = 20,
+    search: Optional[str] = None,
+    election_id: Optional[List[UUID]] = Query(None),
+    sort: str = "newest",
+):
+    """Every eligible-voter row across every private election the caller's
+    team owns — the Voters dashboard page's cross-election view, same shape
+    as /nomination-groups for nominations.
+
+    `sort="not_voted"` can't be pushed to SQL (has_voted is derived from
+    anonymized vote hashes, computed in Python), so that path fetches the
+    full filtered set, sorts/pages in Python. "newest"/"name" instead use a
+    real SQL LIMIT/OFFSET so normal browsing never pulls more than one
+    page's worth of rows over the wire."""
+    from sqlalchemy import select
+
+    from app.core.security import generate_voter_hash
+    from app.models.vote import Vote
+    from app.repositories.vote_repository import VoteRepository
+
+    limit = max(1, min(limit, MAX_VOTERS_PAGE_SIZE))
+    skip = max(0, skip)
+
+    election_repo = ElectionRepository(Election, db)
+    teammate_ids = await OrganizationRepository(Organization, db).get_teammate_ids(current_user.user_id)
+    election_rows = (
+        await db.execute(
+            select(Election.election_id, Election.title)
+            .where(Election.created_by.in_(teammate_ids), Election.visibility == "private")
+        )
+    ).all()
+    owned_election_ids = {r.election_id for r in election_rows}
+    election_titles = {r.election_id: r.title for r in election_rows}
+    if not owned_election_ids:
+        return PaginatedEligibleVotersResponse(items=[], total=0)
+
+    # A requested election_id outside what this team owns is silently
+    # dropped rather than erroring — same "ignore, don't leak ownership
+    # info" posture as other org-scoped filters in this API.
+    target_election_ids = (
+        [eid for eid in election_id if eid in owned_election_ids] if election_id else list(owned_election_ids)
+    )
+    if not target_election_ids:
+        return PaginatedEligibleVotersResponse(items=[], total=0)
+
+    category_repo = CategoryRepository(Category, db)
+    categories = await category_repo.get_by_elections(target_election_ids)
+    category_ids_by_election: dict = {}
+    for c in categories:
+        category_ids_by_election.setdefault(c.election_id, []).append(c.category_id)
+    all_category_ids = [c.category_id for c in categories]
+    voted_hashes = await VoteRepository(Vote, db).get_voter_hashes_by_categories(all_category_ids)
+
+    def to_response(v: EligibleVoter) -> EligibleVoterResponse:
+        cat_ids = category_ids_by_election.get(v.election_id, [])
+        has_voted = any(generate_voter_hash(v.user_id, cid) in voted_hashes for cid in cat_ids)
+        return EligibleVoterResponse(
+            eligible_voter_id=v.eligible_voter_id,
+            election_id=v.election_id,
+            user_id=v.user_id,
+            name=v.user.full_name if v.user else "",
+            email=v.user.email if v.user else "",
+            election_title=election_titles.get(v.election_id, ""),
+            notified_at=v.notified_at,
+            has_voted=has_voted,
+            created_at=v.created_at,
+        )
+
+    if sort == "not_voted":
+        all_voters = await election_repo.get_eligible_voters_for_elections(target_election_ids, search=search)
+        all_responses = [to_response(v) for v in all_voters]
+        all_responses.sort(key=lambda r: r.has_voted)
+        page = all_responses[skip : skip + limit]
+        return PaginatedEligibleVotersResponse(items=page, total=len(all_responses))
+
+    voters, total = await election_repo.get_eligible_voters_for_elections_page(
+        target_election_ids, search=search, sort=sort, skip=skip, limit=limit
+    )
+    return PaginatedEligibleVotersResponse(items=[to_response(v) for v in voters], total=total)
+
+
+@router.post("/{election_id}/eligible-voters/import", status_code=201)
+async def import_eligible_voters(
+    request: Request,
+    election_id: UUID,
+    data: EligibleVoterImport,
+    current_user: User = Depends(require_roles(*ADMIN_ROLES)),
+    db: AsyncSession = Depends(get_tenant_db),
+):
+    """Bulk-add eligible voters by email, for organizers who don't already
+    have their voters' Pollord user_ids on hand (the common case — see
+    add_eligible_voters for the raw user_ids variant). A row whose email has
+    no existing account gets a fresh shell account created for it (random,
+    never-issued password) so it can immediately be added to the
+    eligibility list; every row gets a "set your password / go vote" email
+    either way."""
+    import secrets
+
+    from app.core.security import create_password_reset_token, hash_password
+    from app.repositories.user_repository import UserRepository
+    from app.tasks.email_tasks import send_email_task
+
     election_repo = ElectionRepository(Election, db)
     election = await election_repo.get_by_id(election_id, id_field="election_id")
     if not election:
         raise HTTPException(status_code=404, detail="Election not found")
     await _require_ownership(election, current_user, db)
-    voters = await election_repo.get_eligible_voters(election_id)
-    return [EligibleVoterResponse.model_validate(v) for v in voters]
+
+    user_repo = UserRepository(User, db)
+    ballot_url = f"{settings.FRONTEND_URL}/voting/ballot/{election_id}"
+
+    user_ids: List[UUID] = []
+    for row in data.rows:
+        email = row.email.lower()
+        user = await user_repo.get_by_email(email)
+        if user is None:
+            user = await user_repo.create({
+                "email": email,
+                "password_hash": hash_password(secrets.token_urlsafe(32)),
+                "full_name": row.name or email.split("@")[0],
+                "email_verified": True,
+            })
+        user_ids.append(user.user_id)
+
+        reset_url = f"{settings.FRONTEND_URL}/reset-password?token={create_password_reset_token(str(user.user_id))}"
+        subject, html_body = email_service.voter_invite_email(
+            voter_name=row.name,
+            election_title=election.title,
+            reset_url=reset_url,
+            ballot_url=ballot_url,
+        )
+        send_email_task.delay(email, subject, html_body)
+
+    voters = await election_repo.add_eligible_voters(election_id, user_ids)
+    now = datetime.now(timezone.utc)
+    for v in voters:
+        v.notified_at = now
+    await db.flush()
+
+    if election.org_id is not None and voters:
+        ip, agent = client_ip_and_agent(request)
+        await OrgActivityLogRepository(OrgActivityLog, db).log_activity(
+            org_id=election.org_id,
+            category="team",
+            verb="imported voters into",
+            target_name=election.title,
+            user_id=current_user.user_id,
+            detail=f"{len(voters)} voter(s) imported",
+            ip_address=ip,
+            user_agent=agent,
+        )
+    return {"message": f"Imported {len(voters)} eligible voter(s)"}
+
+
+@router.delete("/{election_id}/eligible-voters/{eligible_voter_id}", status_code=204)
+async def remove_eligible_voter(
+    election_id: UUID,
+    eligible_voter_id: UUID,
+    current_user: User = Depends(require_roles(*ADMIN_ROLES)),
+    db: AsyncSession = Depends(get_tenant_db),
+):
+    election_repo = ElectionRepository(Election, db)
+    election = await election_repo.get_by_id(election_id, id_field="election_id")
+    if not election:
+        raise HTTPException(status_code=404, detail="Election not found")
+    await _require_ownership(election, current_user, db)
+
+    voter = await election_repo.get_eligible_voter_by_id(eligible_voter_id)
+    if not voter or voter.election_id != election_id:
+        raise HTTPException(status_code=404, detail="Eligible voter not found")
+    await election_repo.remove_eligible_voter(eligible_voter_id)
+
+
+@router.post("/{election_id}/eligible-voters/{eligible_voter_id}/resend", status_code=200)
+async def resend_eligible_voter_invite(
+    election_id: UUID,
+    eligible_voter_id: UUID,
+    current_user: User = Depends(require_roles(*ADMIN_ROLES)),
+    db: AsyncSession = Depends(get_tenant_db),
+):
+    from app.core.security import create_password_reset_token
+    from app.tasks.email_tasks import send_email_task
+
+    election_repo = ElectionRepository(Election, db)
+    election = await election_repo.get_by_id(election_id, id_field="election_id")
+    if not election:
+        raise HTTPException(status_code=404, detail="Election not found")
+    await _require_ownership(election, current_user, db)
+
+    voter = await election_repo.get_eligible_voter_by_id(eligible_voter_id)
+    if not voter or voter.election_id != election_id or not voter.user:
+        raise HTTPException(status_code=404, detail="Eligible voter not found")
+
+    reset_url = f"{settings.FRONTEND_URL}/reset-password?token={create_password_reset_token(str(voter.user_id))}"
+    ballot_url = f"{settings.FRONTEND_URL}/voting/ballot/{election_id}"
+    subject, html_body = email_service.voter_invite_email(
+        voter_name=voter.user.full_name,
+        election_title=election.title,
+        reset_url=reset_url,
+        ballot_url=ballot_url,
+    )
+    send_email_task.delay(voter.user.email, subject, html_body)
+
+    voter.notified_at = datetime.now(timezone.utc)
+    await db.flush()
+    return {"message": f"Invite re-sent to {voter.user.email}"}
 
 
 # =========================================================================

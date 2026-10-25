@@ -65,6 +65,51 @@ class OrganizationRepository(BaseRepository[Organization]):
         )
         return list({row[0] for row in result.all()} | {user_id})
 
+    async def get_member_ids(self, org_id: UUID) -> List[UUID]:
+        """Every user_id belonging to one organization — who should be
+        notified about something that happened in it."""
+        result = await self.session.execute(
+            select(OrganizationMember.user_id).where(OrganizationMember.org_id == org_id)
+        )
+        return [row[0] for row in result.all()]
+
+    async def get_org_ids_for_user(self, user_id: UUID) -> List[UUID]:
+        """Every organization this user belongs to. Unlike
+        get_primary_org_id_for_user (which picks ONE org for attributing a
+        newly-created election/event), row-level security needs the FULL
+        set — a multi-org user must keep seeing every org's data through
+        RLS exactly as they already do today via get_teammate_ids, not just
+        whichever org happens to be "primary"."""
+        result = await self.session.execute(
+            select(OrganizationMember.org_id).where(
+                OrganizationMember.user_id == user_id
+            )
+        )
+        return [row[0] for row in result.all()]
+
+    async def get_primary_org_id_for_user(self, user_id: UUID) -> Optional[UUID]:
+        """Which single org a new election/event this user creates should be
+        attributed to. A user can belong to more than one organization, so
+        this picks one deterministically: their 'owner' membership first,
+        else whichever they joined earliest. None if they're in no
+        organization at all — that election/event is personal (see
+        Election.org_id's docstring), same rule `can_create` already applies
+        to whether they may create in the first place.
+
+        Kept in sync with the tie-break used by the org_id backfill migration
+        (alembic) so historical and newly-created rows resolve identically.
+        """
+        result = await self.session.execute(
+            select(OrganizationMember.org_id)
+            .where(OrganizationMember.user_id == user_id)
+            .order_by(
+                (OrganizationMember.role == "owner").desc(),
+                OrganizationMember.joined_at.asc(),
+            )
+            .limit(1)
+        )
+        return result.scalar_one_or_none()
+
     async def can_create(self, user_id: UUID) -> bool:
         """Whether the user may create new elections/events.
 
@@ -156,7 +201,7 @@ class OrganizationRepository(BaseRepository[Organization]):
         return result.scalar_one_or_none()
 
     async def update_member_role(
-        self, member_id: UUID, role: str
+        self, member_id: UUID, role: str, org_role_id: Optional[UUID] = None
     ) -> Optional[OrganizationMember]:
         result = await self.session.execute(
             select(OrganizationMember).where(
@@ -166,8 +211,9 @@ class OrganizationRepository(BaseRepository[Organization]):
         member = result.scalar_one_or_none()
         if member:
             member.role = role
+            member.org_role_id = org_role_id
             await self.session.flush()
-            await self.session.refresh(member)
+            await self.session.refresh(member, attribute_names=["org_role"])
         return member
 
     async def remove_member(self, member_id: UUID) -> bool:
@@ -235,3 +281,47 @@ class OrganizationRepository(BaseRepository[Organization]):
         if inv:
             inv.status = "accepted"
             await self.session.flush()
+
+    async def get_pending_invitations_for_org(self, org_id: UUID) -> List[OrganizationInvitation]:
+        result = await self.session.execute(
+            select(OrganizationInvitation)
+            .where(OrganizationInvitation.org_id == org_id, OrganizationInvitation.status == "pending")
+            .order_by(OrganizationInvitation.created_at.desc())
+        )
+        return list(result.scalars().all())
+
+    # ── Ownership transfer / deactivation ─────────────────────────────────────
+
+    async def transfer_ownership(
+        self,
+        org: Organization,
+        current_owner_member: OrganizationMember,
+        new_owner_member: OrganizationMember,
+    ) -> Organization:
+        org.owner_id = new_owner_member.user_id
+        new_owner_member.role = "owner"
+        current_owner_member.role = "admin"
+        await self.session.flush()
+        await self.session.refresh(org)
+        return org
+
+    async def deactivate(self, org_id: UUID) -> None:
+        org = await self.get_by_id(org_id, id_field="org_id")
+        if org:
+            org.is_active = False
+            org.deactivated_at = datetime.now(timezone.utc)
+            await self.session.flush()
+
+    async def delete_invitation(self, org_id: UUID, invitation_id: UUID) -> bool:
+        result = await self.session.execute(
+            select(OrganizationInvitation).where(
+                OrganizationInvitation.invitation_id == invitation_id,
+                OrganizationInvitation.org_id == org_id,
+            )
+        )
+        inv = result.scalar_one_or_none()
+        if not inv:
+            return False
+        await self.session.delete(inv)
+        await self.session.flush()
+        return True

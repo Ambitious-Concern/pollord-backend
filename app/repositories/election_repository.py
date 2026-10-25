@@ -1,12 +1,13 @@
 from datetime import datetime, timezone
-from typing import List, Optional
+from typing import List, Optional, Tuple
 from uuid import UUID
 
-from sqlalchemy import select
+from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from app.models.election import Candidate, Category, Election, EligibleVoter
+from app.models.user import User
 from app.repositories.base import BaseRepository
 
 
@@ -15,6 +16,10 @@ class ElectionRepository(BaseRepository[Election]):
 
     def __init__(self, model, session: AsyncSession):
         super().__init__(model, session)
+
+    async def get_by_org(self, org_id: UUID) -> List[Election]:
+        result = await self.session.execute(select(Election).where(Election.org_id == org_id))
+        return list(result.scalars().all())
 
     async def get_with_categories(self, election_id: UUID) -> Optional[Election]:
         result = await self.session.execute(
@@ -85,6 +90,27 @@ class ElectionRepository(BaseRepository[Election]):
         result = await self.session.execute(query)
         return list(result.scalars().all())
 
+    async def get_public_elections(
+        self,
+        skip: int = 0,
+        limit: int = 20,
+        status: Optional[str] = None,
+        search: Optional[str] = None,
+    ) -> List[Election]:
+        """The public listings page's source query — visibility filtering
+        and the title search both happen here in SQL rather than after the
+        fact in the endpoint, so a search term narrows the actual page of
+        rows fetched instead of being applied to whatever page happened to
+        come back."""
+        query = select(Election).where(Election.visibility == "public")
+        if status:
+            query = query.where(Election.status == status)
+        if search:
+            query = query.where(Election.title.ilike(f"%{search}%"))
+        query = query.order_by(Election.created_at.desc()).offset(skip).limit(limit)
+        result = await self.session.execute(query)
+        return list(result.scalars().all())
+
     async def get_elections_by_status(
         self, status: str, skip: int = 0, limit: int = 20
     ) -> List[Election]:
@@ -134,7 +160,9 @@ class ElectionRepository(BaseRepository[Election]):
 
     async def get_eligible_voters(self, election_id: UUID) -> List[EligibleVoter]:
         result = await self.session.execute(
-            select(EligibleVoter).where(EligibleVoter.election_id == election_id)
+            select(EligibleVoter)
+            .options(selectinload(EligibleVoter.user))
+            .where(EligibleVoter.election_id == election_id)
         )
         return list(result.scalars().all())
 
@@ -146,6 +174,82 @@ class ElectionRepository(BaseRepository[Election]):
             )
         )
         return result.scalar_one()
+
+    async def get_eligible_voters_for_elections(
+        self, election_ids: List[UUID], search: Optional[str] = None
+    ) -> List[EligibleVoter]:
+        """Cross-election view for the Voters dashboard page — same rows
+        get_eligible_voters returns per-election, just spanning every gated
+        election passed in at once. Unpaginated: used for the "not yet
+        voted" sort preset, whose key (has_voted) is computed from
+        anonymized vote hashes in Python and so can't drive a SQL ORDER BY
+        + LIMIT/OFFSET — the caller sorts and slices this full set itself."""
+        if not election_ids:
+            return []
+        query = (
+            select(EligibleVoter)
+            .join(User, EligibleVoter.user_id == User.user_id)
+            .options(selectinload(EligibleVoter.user))
+            .where(EligibleVoter.election_id.in_(election_ids))
+        )
+        if search:
+            like = f"%{search}%"
+            query = query.where(or_(User.full_name.ilike(like), User.email.ilike(like)))
+        result = await self.session.execute(query)
+        return list(result.scalars().all())
+
+    async def get_eligible_voters_for_elections_page(
+        self,
+        election_ids: List[UUID],
+        search: Optional[str] = None,
+        sort: str = "newest",
+        skip: int = 0,
+        limit: int = 20,
+    ) -> Tuple[List[EligibleVoter], int]:
+        """SQL-side paginated variant for the two sort presets that map to a
+        real column (created_at, name). See get_eligible_voters_for_elections
+        for the has_voted-sort fallback."""
+        if not election_ids:
+            return [], 0
+
+        filters = [EligibleVoter.election_id.in_(election_ids)]
+        if search:
+            like = f"%{search}%"
+            filters.append(or_(User.full_name.ilike(like), User.email.ilike(like)))
+
+        total = (
+            await self.session.execute(
+                select(func.count(EligibleVoter.eligible_voter_id))
+                .join(User, EligibleVoter.user_id == User.user_id)
+                .where(*filters)
+            )
+        ).scalar_one()
+
+        query = (
+            select(EligibleVoter)
+            .join(User, EligibleVoter.user_id == User.user_id)
+            .options(selectinload(EligibleVoter.user))
+            .where(*filters)
+        )
+        query = query.order_by(User.full_name.asc() if sort == "name" else EligibleVoter.created_at.desc())
+        result = await self.session.execute(query.offset(skip).limit(limit))
+        return list(result.scalars().all()), total
+
+    async def get_eligible_voter_by_id(self, eligible_voter_id: UUID) -> Optional[EligibleVoter]:
+        result = await self.session.execute(
+            select(EligibleVoter)
+            .options(selectinload(EligibleVoter.user), selectinload(EligibleVoter.election))
+            .where(EligibleVoter.eligible_voter_id == eligible_voter_id)
+        )
+        return result.scalar_one_or_none()
+
+    async def remove_eligible_voter(self, eligible_voter_id: UUID) -> bool:
+        voter = await self.session.get(EligibleVoter, eligible_voter_id)
+        if voter is None:
+            return False
+        await self.session.delete(voter)
+        await self.session.flush()
+        return True
 
 
 class CategoryRepository(BaseRepository[Category]):
@@ -168,6 +272,16 @@ class CategoryRepository(BaseRepository[Category]):
             select(Category)
             .options(selectinload(Category.candidates))
             .where(Category.event_id == event_id)
+            .order_by(Category.display_order)
+        )
+        return list(result.scalars().all())
+
+    async def get_by_elections(self, election_ids: List[UUID]) -> List[Category]:
+        if not election_ids:
+            return []
+        result = await self.session.execute(
+            select(Category)
+            .where(Category.election_id.in_(election_ids))
             .order_by(Category.display_order)
         )
         return list(result.scalars().all())

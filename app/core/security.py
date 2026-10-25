@@ -27,12 +27,21 @@ def verify_password(plain_password: str, hashed_password: str) -> bool:
 
 # JWT token management
 def create_access_token(
-    subject: str, token_version: int = 0, expires_delta: Optional[timedelta] = None
+    subject: str,
+    token_version: int = 0,
+    expires_delta: Optional[timedelta] = None,
+    session_id: Optional[str] = None,
 ) -> str:
     """Short-lived token for authenticating requests. token_version must
     match the user's current User.token_version (checked in
     dependencies.get_current_user) or it's rejected even if unexpired —
-    that's what makes logout/password-change able to kill sessions."""
+    that's what makes logout/password-change able to kill sessions.
+
+    `session_id` (when given) is the paired refresh token's own jti — it
+    lets a request identify which row in `refresh_tokens` it belongs to,
+    which is how the Security settings page's session list marks "this
+    device" without the frontend having to know its own refresh token.
+    """
     if expires_delta:
         expire = datetime.now(timezone.utc) + expires_delta
     else:
@@ -45,6 +54,7 @@ def create_access_token(
         "type": "access",
         "ver": token_version,
         "jti": secrets.token_urlsafe(16),
+        "sid": session_id,
     }
     return jwt.encode(to_encode, settings.JWT_SECRET_KEY, algorithm=settings.JWT_ALGORITHM)
 
@@ -76,6 +86,15 @@ def decode_token(token: str) -> dict:
         return payload
     except JWTError:
         return None
+
+
+def create_mfa_challenge_token(user_id: str) -> str:
+    """Issued by login() once the password has already checked out for a
+    2FA-enabled account — scoped only to completing that one login, not a
+    general-purpose auth token (checked via its "type" claim)."""
+    expire = datetime.now(timezone.utc) + timedelta(minutes=5)
+    to_encode = {"sub": user_id, "exp": expire, "type": "mfa_challenge"}
+    return jwt.encode(to_encode, settings.JWT_SECRET_KEY, algorithm=settings.JWT_ALGORITHM)
 
 
 def create_email_verification_token(user_id: str) -> str:
@@ -148,6 +167,37 @@ def encrypt_vote(vote_data: dict) -> bytes:
     return nonce + ciphertext
 
 
+# Private-file encryption (AES-256-GCM), same key as votes.
+#
+# The external file-storage service is plain HTTP with no authentication, so
+# anything uploaded there is readable by anyone who learns its file id. Identity
+# documents therefore go up already encrypted and are only decrypted when served
+# through the authenticated /files/private route — a leaked object is ciphertext.
+#
+# Layout: nonce(12) || AESGCM(ct_len(2) || content_type || file_bytes), so the
+# original content type survives the round trip without a second column or a
+# base64 envelope inflating every image by a third.
+def encrypt_file_bytes(content: bytes, content_type: str | None) -> bytes:
+    key = _get_aes_key()
+    aesgcm = AESGCM(key)
+    nonce = secrets.token_bytes(12)
+    ct = (content_type or "application/octet-stream").encode()
+    if len(ct) > 0xFFFF:
+        ct = ct[:0xFFFF]
+    plaintext = len(ct).to_bytes(2, "big") + ct + content
+    return nonce + aesgcm.encrypt(nonce, plaintext, None)
+
+
+def decrypt_file_bytes(blob: bytes) -> tuple[bytes, str]:
+    """Inverse of encrypt_file_bytes, returning (content, content_type)."""
+    key = _get_aes_key()
+    aesgcm = AESGCM(key)
+    plaintext = aesgcm.decrypt(blob[:12], blob[12:], None)
+    ct_len = int.from_bytes(plaintext[:2], "big")
+    content_type = plaintext[2 : 2 + ct_len].decode(errors="replace")
+    return plaintext[2 + ct_len :], content_type
+
+
 def decrypt_vote(encrypted: bytes) -> dict:
     """Inverse of encrypt_vote."""
     key = _get_aes_key()
@@ -156,6 +206,26 @@ def decrypt_vote(encrypted: bytes) -> dict:
     ciphertext = encrypted[12:]
     plaintext = aesgcm.decrypt(nonce, ciphertext, None)
     return json.loads(plaintext.decode())
+
+
+# Support chat message encryption — same AES-256-GCM primitive/key as vote
+# encryption above, just wrapping plain text instead of a vote payload.
+def encrypt_text(text: str) -> bytes:
+    """Encrypt a text payload; output is nonce || ciphertext, ready to store."""
+    key = _get_aes_key()
+    aesgcm = AESGCM(key)
+    nonce = secrets.token_bytes(12)
+    ciphertext = aesgcm.encrypt(nonce, text.encode(), None)
+    return nonce + ciphertext
+
+
+def decrypt_text(encrypted: bytes) -> str:
+    """Inverse of encrypt_text."""
+    key = _get_aes_key()
+    aesgcm = AESGCM(key)
+    nonce = encrypted[:12]
+    ciphertext = encrypted[12:]
+    return aesgcm.decrypt(nonce, ciphertext, None).decode()
 
 
 # Voter anonymization (HMAC-SHA256)
@@ -204,6 +274,18 @@ def generate_email_voter_hash(email: str, category_id: UUID) -> str:
     ).hexdigest()
 
 
+def generate_sms_voter_hash(phone: str, category_id: UUID) -> str:
+    """Voter hash for SMS-OTP-verified public web voters, keyed by the
+    verified phone number. Premium-only alternative to
+    generate_email_voter_hash — phone is never stored."""
+    message = f"sms:{phone}:{category_id}"
+    return hmac.new(
+        settings.HMAC_SECRET_KEY.encode(),
+        message.encode(),
+        hashlib.sha256,
+    ).hexdigest()
+
+
 def generate_ussd_voter_hash(phone: str, category_id: UUID) -> str:
     """Voter hash for USSD voters, keyed by the phone number that dialed in.
     Phone is never stored — same pattern as generate_whatsapp_voter_hash."""
@@ -231,6 +313,16 @@ def verify_vote_signature(vote_data: bytes, cast_at: str, signature: str) -> boo
     """Constant-time check of a signature produced by sign_vote."""
     expected = sign_vote(vote_data, cast_at)
     return hmac.compare_digest(expected, signature)
+
+
+def sign_data(data: bytes) -> str:
+    """Generic HMAC over arbitrary bytes — for signed audit certificates and
+    anything else that isn't specifically a cast vote."""
+    return hmac.new(settings.HMAC_SECRET_KEY.encode(), data, hashlib.sha256).hexdigest()
+
+
+def verify_data_signature(data: bytes, signature: str) -> bool:
+    return hmac.compare_digest(sign_data(data), signature)
 
 
 # Secure token generation

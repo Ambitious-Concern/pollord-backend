@@ -16,6 +16,10 @@ class EventRepository(BaseRepository[Event]):
     def __init__(self, model, session: AsyncSession):
         super().__init__(model, session)
 
+    async def get_by_org(self, org_id: UUID) -> List[Event]:
+        result = await self.session.execute(select(Event).where(Event.org_id == org_id))
+        return list(result.scalars().all())
+
     async def get_with_ticket_types(self, event_id: UUID) -> Optional[Event]:
         result = await self.session.execute(
             select(Event)
@@ -23,6 +27,14 @@ class EventRepository(BaseRepository[Event]):
             .where(Event.event_id == event_id)
         )
         return result.scalar_one_or_none()
+
+    async def get_by_ids(self, event_ids: List[UUID]) -> List[Event]:
+        if not event_ids:
+            return []
+        result = await self.session.execute(
+            select(Event).where(Event.event_id.in_(event_ids))
+        )
+        return list(result.scalars().all())
 
     async def get_by_slug(self, slug: str) -> Optional[Event]:
         result = await self.session.execute(
@@ -53,10 +65,17 @@ class EventRepository(BaseRepository[Event]):
         skip: int = 0,
         limit: int = 20,
         category: Optional[str] = None,
+        search: Optional[str] = None,
     ) -> List[Event]:
-        query = select(Event).where(Event.status == "published")
+        # Cancelled events stay listed (not silently dropped from the public
+        # page) — the frontend marks them with a "Cancelled" stamp instead of
+        # making the listing vanish out from under anyone who bookmarked or
+        # shared the link.
+        query = select(Event).where(Event.status.in_(("published", "cancelled")))
         if category:
             query = query.where(Event.category == category)
+        if search:
+            query = query.where(Event.title.ilike(f"%{search}%"))
         query = query.order_by(Event.event_date.asc()).offset(skip).limit(limit)
         result = await self.session.execute(query)
         return list(result.scalars().all())
@@ -115,6 +134,17 @@ class TicketTypeRepository(BaseRepository[TicketType]):
         result = await self.session.execute(
             select(TicketType)
             .where(TicketType.event_id == event_id)
+            .order_by(TicketType.price.asc())
+        )
+        return list(result.scalars().all())
+
+    async def get_by_creators(self, user_ids: List[UUID]) -> List[TicketType]:
+        if not user_ids:
+            return []
+        result = await self.session.execute(
+            select(TicketType)
+            .join(Event, Event.event_id == TicketType.event_id)
+            .where(Event.created_by.in_(user_ids))
             .order_by(TicketType.price.asc())
         )
         return list(result.scalars().all())

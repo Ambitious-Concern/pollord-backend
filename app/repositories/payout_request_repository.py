@@ -1,5 +1,5 @@
 from datetime import datetime, timezone
-from typing import List, Optional
+from typing import Dict, List, Optional, Set, Tuple
 from uuid import UUID
 
 from sqlalchemy import select
@@ -50,7 +50,9 @@ class PayoutRequestRepository(BaseRepository[PayoutRequest]):
         )
         if status:
             query = query.where(PayoutRequest.status == status)
-        result = await self.session.execute(query.order_by(PayoutRequest.requested_at.desc()))
+        result = await self.session.execute(
+            query.order_by(PayoutRequest.express.desc(), PayoutRequest.requested_at.desc())
+        )
         return list(result.scalars().all())
 
     async def get_total_requested(
@@ -70,6 +72,51 @@ class PayoutRequestRepository(BaseRepository[PayoutRequest]):
             )
         )
         return float(sum(r.amount for r in result.scalars().all()))
+
+    async def get_totals_by_parents(
+        self,
+        *,
+        event_ids: List[UUID],
+        election_ids: List[UUID],
+        exclude_status: str = "rejected",
+    ) -> Tuple[Dict[UUID, float], Dict[UUID, float], Set[UUID], Set[UUID]]:
+        """Bulk version of get_total_requested + has_pending, grouped over
+        many events/elections in one query each — for the payout sources
+        list, where checking N sources one at a time would mean N round
+        trips. Returns (requested_by_event, requested_by_election,
+        pending_event_ids, pending_election_ids)."""
+        requested_by_event: Dict[UUID, float] = {}
+        requested_by_election: Dict[UUID, float] = {}
+        pending_event_ids: Set[UUID] = set()
+        pending_election_ids: Set[UUID] = set()
+
+        if event_ids:
+            result = await self.session.execute(
+                select(PayoutRequest).where(
+                    PayoutRequest.event_id.in_(event_ids),
+                    PayoutRequest.status != exclude_status,
+                )
+            )
+            for req in result.scalars().all():
+                requested_by_event[req.event_id] = requested_by_event.get(req.event_id, 0) + float(req.amount)
+                if req.status == "pending":
+                    pending_event_ids.add(req.event_id)
+
+        if election_ids:
+            result = await self.session.execute(
+                select(PayoutRequest).where(
+                    PayoutRequest.election_id.in_(election_ids),
+                    PayoutRequest.status != exclude_status,
+                )
+            )
+            for req in result.scalars().all():
+                requested_by_election[req.election_id] = (
+                    requested_by_election.get(req.election_id, 0) + float(req.amount)
+                )
+                if req.status == "pending":
+                    pending_election_ids.add(req.election_id)
+
+        return requested_by_event, requested_by_election, pending_event_ids, pending_election_ids
 
     async def has_pending(
         self, *, event_id: Optional[UUID] = None, election_id: Optional[UUID] = None

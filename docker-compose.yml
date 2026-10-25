@@ -1,14 +1,20 @@
 services:
   db:
-    image: postgres:15-alpine
+    image: postgres:18-alpine
     environment:
       POSTGRES_DB: pollard
       POSTGRES_USER: pollard
       POSTGRES_PASSWORD: pollard
     ports:
-      - "5432:5432"
+      # Host-side 55432, not 5432 — avoids clashing with a native Postgres
+      # install on the host. The app/celery services stay on db:5432
+      # internally (docker network), unaffected by this remap.
+      - "55432:5432"
     volumes:
-      - postgres_data:/var/lib/postgresql/data
+      # postgres:18+'s image expects the mount at the parent dir (it manages
+      # a major-version-specific subdirectory itself) — mounting at .../data
+      # directly, the pre-18 convention, makes the entrypoint refuse to start.
+      - postgres_data:/var/lib/postgresql
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U pollard"]
       interval: 5s
@@ -16,7 +22,7 @@ services:
       retries: 5
 
   redis:
-    image: redis:7-alpine
+    image: redis:8-alpine
     ports:
       - "6379:6379"
     volumes:

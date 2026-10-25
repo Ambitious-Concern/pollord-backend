@@ -17,6 +17,7 @@ from app.api.websocket import router as ws_router
 from app.core.config import settings
 from app.middleware.logging import RequestLoggingMiddleware
 from app.middleware.rate_limit import limiter
+from app.middleware.security_headers import SecurityHeadersMiddleware
 
 logging.basicConfig(
     level=logging.INFO,
@@ -65,6 +66,9 @@ app.add_middleware(
 # Request logging
 app.add_middleware(RequestLoggingMiddleware)
 
+# Security headers
+app.add_middleware(SecurityHeadersMiddleware)
+
 # Routers
 app.include_router(api_router)
 app.include_router(ws_router)
@@ -109,20 +113,6 @@ async def general_exception_handler(request: Request, exc: Exception):
         content={"detail": "Internal server error", "status_code": 500},
     )
 
-
-# Security headers middleware
-@app.middleware("http")
-async def add_security_headers(request: Request, call_next):
-    response = await call_next(request)
-    response.headers["X-Content-Type-Options"] = "nosniff"
-    response.headers["X-Frame-Options"] = "DENY"
-    response.headers["X-XSS-Protection"] = "0"
-    response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
-    if not settings.DEBUG:
-        response.headers["Strict-Transport-Security"] = (
-            "max-age=31536000; includeSubDomains"
-        )
-    return response
 
 
 # Health check

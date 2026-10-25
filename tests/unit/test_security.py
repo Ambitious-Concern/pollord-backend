@@ -4,8 +4,10 @@ from app.core.security import (
     create_access_token,
     create_refresh_token,
     decode_token,
-    encrypt_vote,
+    decrypt_text,
     decrypt_vote,
+    encrypt_text,
+    encrypt_vote,
     generate_secure_token,
     generate_voter_hash,
     hash_password,
@@ -68,6 +70,21 @@ class TestVoteEncryption:
         enc1 = encrypt_vote(data1)
         enc2 = encrypt_vote(data2)
         assert enc1 != enc2
+
+
+class TestTextEncryption:
+    def test_encrypt_decrypt_roundtrip(self):
+        text = "My payout never arrived, please help!"
+        encrypted = encrypt_text(text)
+        assert encrypted != text.encode()
+        assert decrypt_text(encrypted) == text
+
+    def test_different_text_different_ciphertext(self):
+        assert encrypt_text("hello") != encrypt_text("hello")  # random nonce each time
+
+    def test_unicode_roundtrip(self):
+        text = "Akwaaba! 🎉 Wo ho te sɛn?"
+        assert decrypt_text(encrypt_text(text)) == text
 
 
 class TestVoterHash:

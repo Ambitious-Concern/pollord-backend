@@ -2,27 +2,43 @@ import hashlib
 import secrets
 import uuid as _uuid
 from datetime import datetime, time, timedelta, timezone
+from decimal import Decimal
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi.responses import StreamingResponse
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.request_meta import client_ip
 from app.core.config import settings
 from app.models.platform_setting import PlatformSetting
 from app.core.dependencies import get_current_active_user
-from app.core.security import generate_anonymous_voter_hash, generate_email_voter_hash
+from app.core.financial_breakdown import buyer_facing_vote_price_pesewas
+from app.core.results_cache import cached_or_compute
+from app.core.results_stream import notify_vote_cast, stream_results
+from app.services.org_notification_service import notify_vote_cast_if_due
+from app.core.security import (
+    generate_anonymous_voter_hash,
+    generate_email_voter_hash,
+    generate_sms_voter_hash,
+)
 from app.middleware.rate_limit import limiter
-from app.db.base import get_db
+from app.db.base import async_session_maker, get_db
 from app.models.audit_log import AuditLog
-from app.models.election import Candidate, Category, Election, VoterOTP
+from app.models.election import Candidate, Category, Election, SmsVoterOTP, VoterOTP
 from app.models.event import Event
+from app.models.organization import Organization
+from app.models.promo_code import PromoCode
 from app.models.transaction import Transaction
 from app.models.user import User
 from app.models.vote import Vote, VoteReceipt
 from app.repositories.audit_log_repository import AuditLogRepository
 from app.repositories.election_repository import CandidateRepository, CategoryRepository, ElectionRepository
 from app.repositories.event_repository import EventRepository
+from app.repositories.organization_repository import OrganizationRepository
+from app.repositories.promo_code_repository import PromoCodeRepository
 from app.repositories.transaction_repository import TransactionRepository
 from app.repositories.vote_repository import VoteReceiptRepository, VoteRepository
 from app.schemas.election import ElectionWithCategories
@@ -37,15 +53,29 @@ from app.schemas.vote import (
     ElectionResults,
     EventResults,
     RequestVoteOTP,
+    RequestVoteSmsOTP,
     VerifyVoteOTPAndCast,
+    VerifyVoteSmsOTPAndCast,
     VoteReceiptResponse,
 )
 from app.services import email_service
+from app.services.arkesel_service import ArkeselService
 from app.services.cryptography_service import CryptographyService
 from app.services.paystack_service import PaystackService
+from app.services.promo_code_service import PromoCodeService, discount_price
 from app.services.voting_service import VotingService, resolve_candidate_selection
 
 router = APIRouter(prefix="/voting", tags=["Voting"])
+
+
+def _get_promo_service(db: AsyncSession) -> PromoCodeService:
+    return PromoCodeService(
+        db=db,
+        promo_repo=PromoCodeRepository(PromoCode, db),
+        org_repo=OrganizationRepository(Organization, db),
+        election_repo=ElectionRepository(Election, db),
+        event_repo=EventRepository(Event, db),
+    )
 
 
 async def _get_global_vote_price(db: AsyncSession) -> int:
@@ -108,6 +138,17 @@ async def _resolve_category_and_parent(db: AsyncSession, category_id: UUID):
     return category, parent, parent_kind
 
 
+def _normalize_ghana_phone(phone: str) -> str:
+    """Canonical 233XXXXXXXXX form, accepting 233XXXXXXXXX, 0XXXXXXXXX, or
+    bare XXXXXXXXX input — same acceptance rule as USSD's _detect_network."""
+    digits = "".join(ch for ch in phone if ch.isdigit())
+    if digits.startswith("233"):
+        return digits
+    if digits.startswith("0"):
+        return "233" + digits[1:]
+    return "233" + digits
+
+
 def _assert_open_for_voting(parent, parent_kind: str) -> None:
     """Raise 400/403 unless this election/event is currently open to
     public (unauthenticated) voting."""
@@ -153,7 +194,7 @@ async def cast_vote(
     return await service.cast_vote(
         user_id=current_user.user_id,
         data=data,
-        ip=request.client.host if request.client else None,
+        ip=client_ip(request),
         user_agent=request.headers.get("user-agent"),
     )
 
@@ -188,7 +229,11 @@ async def get_live_results(
 ):
     """In-progress tallies for any election status."""
     service = _get_voting_service(db)
-    return await service.get_live_results(election_id)
+    return await cached_or_compute(
+        f"live_results:election:{election_id}",
+        ElectionResults,
+        lambda: service.get_live_results(election_id),
+    )
 
 
 @router.get("/results/{election_id}", response_model=ElectionResults)
@@ -254,7 +299,7 @@ async def cast_public_vote(
     _assert_open_for_voting(parent, parent_kind)
 
     candidate_ids = resolve_candidate_selection(
-        category, data.candidate_ids, data.candidate_short_codes
+        category, data.candidate_ids, data.candidate_short_codes, data.abstain
     )
 
     ip = request.client.host if request.client else "unknown"
@@ -276,15 +321,22 @@ async def cast_public_vote(
     cast_at = now.isoformat()
     signature = crypto.sign_vote(encrypted, cast_at)
 
-    await vote_repo.create({
-        "category_id": category.category_id,
-        "election_id": category.election_id,
-        "event_id": category.event_id,
-        "voter_hash": voter_hash,
-        "vote_data": encrypted,
-        "vote_signature": signature,
-        "count": 1,
-    })
+    try:
+        await vote_repo.create({
+            "category_id": category.category_id,
+            "election_id": category.election_id,
+            "event_id": category.event_id,
+            "voter_hash": voter_hash,
+            "vote_data": encrypted,
+            "vote_signature": signature,
+            "count": 1,
+        })
+    except IntegrityError:
+        # has_voted() above is a check-then-insert race under real concurrent
+        # load — uq_vote_per_category is the atomic backstop.
+        raise HTTPException(status_code=409, detail="You have already voted in this category")
+    await notify_vote_cast(category.election_id, category.event_id)
+    await notify_vote_cast_if_due(db, category.election_id, category.event_id)
 
     # Anonymous voters get a receipt code without a persisted VoteReceipt row
     # (that table is user-account scoped).
@@ -382,7 +434,7 @@ async def verify_vote_otp_and_cast(
     await db.flush()
 
     candidate_ids = resolve_candidate_selection(
-        category, data.candidate_ids, data.candidate_short_codes
+        category, data.candidate_ids, data.candidate_short_codes, data.abstain
     )
 
     voter_hash = generate_email_voter_hash(email, data.category_id)
@@ -399,15 +451,139 @@ async def verify_vote_otp_and_cast(
     cast_at = now.isoformat()
     signature = crypto.sign_vote(encrypted, cast_at)
 
-    await vote_repo.create({
-        "category_id": category.category_id,
-        "election_id": category.election_id,
-        "event_id": category.event_id,
-        "voter_hash": voter_hash,
-        "vote_data": encrypted,
-        "vote_signature": signature,
-        "count": 1,
-    })
+    try:
+        await vote_repo.create({
+            "category_id": category.category_id,
+            "election_id": category.election_id,
+            "event_id": category.event_id,
+            "voter_hash": voter_hash,
+            "vote_data": encrypted,
+            "vote_signature": signature,
+            "count": 1,
+        })
+    except IntegrityError:
+        raise HTTPException(status_code=409, detail="You have already voted in this category")
+    await notify_vote_cast(category.election_id, category.event_id)
+    await notify_vote_cast_if_due(db, category.election_id, category.event_id)
+
+    receipt_code = crypto.generate_receipt_code()
+    return VoteReceiptResponse(
+        receipt_code=receipt_code,
+        election_id=category.election_id,
+        event_id=category.event_id,
+        issued_at=now,
+    )
+
+
+@router.post("/public/request-vote-sms-otp", status_code=200)
+@limiter.limit(settings.RATE_LIMIT_VOTING)
+async def request_vote_sms_otp(
+    data: RequestVoteSmsOTP,
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+):
+    """Step 1 of SMS-OTP-verified free voting — an alternative to
+    request_vote_otp's email channel, open to every plan."""
+    category, parent, parent_kind = await _resolve_category_and_parent(db, data.category_id)
+    _assert_open_for_voting(parent, parent_kind)
+
+    phone = _normalize_ghana_phone(data.phone)
+    voter_hash = generate_sms_voter_hash(phone, data.category_id)
+    vote_repo = VoteRepository(Vote, db)
+    allow_revoting = getattr(parent, "allow_revoting", False)
+    if not allow_revoting and await vote_repo.has_voted(voter_hash, data.category_id):
+        raise HTTPException(status_code=409, detail="You have already voted in this category")
+
+    prev = await db.execute(
+        select(SmsVoterOTP).where(
+            SmsVoterOTP.category_id == data.category_id,
+            SmsVoterOTP.phone == phone,
+            SmsVoterOTP.used == False,
+        )
+    )
+    for old in prev.scalars().all():
+        old.used = True
+    await db.flush()
+
+    otp_record = SmsVoterOTP(
+        category_id=data.category_id,
+        phone=phone,
+        expires_at=datetime.now(timezone.utc) + timedelta(minutes=10),
+    )
+    db.add(otp_record)
+    await db.flush()
+    await db.refresh(otp_record)
+
+    await ArkeselService().send_sms(
+        to=phone,
+        message=f"Your Pollord voting code is {otp_record.otp_code}. It expires in 10 minutes.",
+    )
+
+    return {"message": "Code sent"}
+
+
+@router.post("/public/verify-vote-sms-otp-and-cast", response_model=VoteReceiptResponse, status_code=201)
+@limiter.limit(settings.RATE_LIMIT_VOTING)
+async def verify_vote_sms_otp_and_cast(
+    data: VerifyVoteSmsOTPAndCast,
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+):
+    """Step 2 — verify the texted code and cast the vote, hashed on the
+    verified phone number instead of email."""
+    category, parent, parent_kind = await _resolve_category_and_parent(db, data.category_id)
+    _assert_open_for_voting(parent, parent_kind)
+
+    phone = _normalize_ghana_phone(data.phone)
+    result = await db.execute(
+        select(SmsVoterOTP).where(
+            SmsVoterOTP.category_id == data.category_id,
+            SmsVoterOTP.phone == phone,
+            SmsVoterOTP.otp_code == data.otp.strip(),
+            SmsVoterOTP.used == False,
+        )
+    )
+    otp_record = result.scalar_one_or_none()
+    if not otp_record:
+        raise HTTPException(status_code=400, detail="Invalid or expired code")
+    if otp_record.expires_at < datetime.now(timezone.utc):
+        raise HTTPException(status_code=400, detail="Code has expired, please request a new one")
+
+    otp_record.used = True
+    await db.flush()
+
+    candidate_ids = resolve_candidate_selection(
+        category, data.candidate_ids, data.candidate_short_codes, data.abstain
+    )
+
+    voter_hash = generate_sms_voter_hash(phone, data.category_id)
+    vote_repo = VoteRepository(Vote, db)
+    allow_revoting = getattr(parent, "allow_revoting", False)
+    if allow_revoting:
+        voter_hash = hashlib.sha256(f"{voter_hash}:{_uuid.uuid4().hex}".encode()).hexdigest()
+    elif await vote_repo.has_voted(voter_hash, data.category_id):
+        raise HTTPException(status_code=409, detail="You have already voted in this category")
+
+    crypto = CryptographyService()
+    encrypted = crypto.encrypt_vote_data([str(cid) for cid in candidate_ids])
+    now = datetime.now(timezone.utc)
+    cast_at = now.isoformat()
+    signature = crypto.sign_vote(encrypted, cast_at)
+
+    try:
+        await vote_repo.create({
+            "category_id": category.category_id,
+            "election_id": category.election_id,
+            "event_id": category.event_id,
+            "voter_hash": voter_hash,
+            "vote_data": encrypted,
+            "vote_signature": signature,
+            "count": 1,
+        })
+    except IntegrityError:
+        raise HTTPException(status_code=409, detail="You have already voted in this category")
+    await notify_vote_cast(category.election_id, category.event_id)
+    await notify_vote_cast_if_due(db, category.election_id, category.event_id)
 
     receipt_code = crypto.generate_receipt_code()
     return VoteReceiptResponse(
@@ -450,15 +626,38 @@ async def initiate_public_vote_payment(
 
     vote_price = await _get_effective_vote_price(parent, db)
 
+    promo = None
+    if data.promo_code:
+        promo = await _get_promo_service(db).resolve_for_checkout(
+            data.promo_code,
+            election_id=category.election_id,
+            event_id=category.event_id,
+            email=data.email,
+        )
+    effective_vote_price = vote_price
+    discount_pesewas = 0
+    if promo:
+        discounted_ghs = discount_price(promo, Decimal(vote_price) / 100)
+        effective_vote_price = max(1, int(discounted_ghs * 100))
+        discount_pesewas = vote_price - effective_vote_price
+
+    # Fee-payer surcharge is applied post-discount — the buyer's per-vote
+    # price becomes what they actually pay, which then drives every
+    # downstream unit-price calculation (bulk-amount snapping, vote_count).
+    fee_payer = getattr(parent, "fee_payer", "organizer")
+    effective_vote_price = buyer_facing_vote_price_pesewas(
+        effective_vote_price, parent.plan, parent.commission_rate_override_bps, fee_payer
+    )
+
     if is_multi_vote and data.amount_pesewas is not None:
         charge_pesewas = data.amount_pesewas
     else:
-        charge_pesewas = vote_price
+        charge_pesewas = effective_vote_price
 
-    # Must be an exact multiple of the effective vote_price
-    if charge_pesewas % vote_price != 0:
-        charge_pesewas = (charge_pesewas // vote_price) * vote_price
-    vote_count = charge_pesewas // vote_price
+    # Must be an exact multiple of the effective (post-discount) unit price
+    if charge_pesewas % effective_vote_price != 0:
+        charge_pesewas = (charge_pesewas // effective_vote_price) * effective_vote_price
+    vote_count = charge_pesewas // effective_vote_price
 
     ip = request.client.host if request.client else "unknown"
     ua = request.headers.get("user-agent", "unknown")
@@ -487,6 +686,10 @@ async def initiate_public_vote_payment(
         "amount": charge_pesewas,
         "currency": settings.VOTE_CURRENCY,
         "status": "pending",
+        "promo_code_id": promo.promo_code_id if promo else None,
+        "discount_pesewas": discount_pesewas * vote_count if promo else None,
+        "vote_count": vote_count,
+        "fee_payer": fee_payer,
     })
 
     paystack = PaystackService(settings.PAYSTACK_SECRET_KEY)
@@ -555,25 +758,48 @@ async def verify_and_cast_public_vote(
         parent = await EventRepository(Event, db).get_by_id(
             txn.event_id, id_field="event_id"
         )
-    vote_price = await _get_effective_vote_price(parent, db) if parent else await _get_global_vote_price(db)
-    vote_count = max(1, txn.amount // vote_price)
+    if txn.vote_count is not None:
+        # Decided at initiation, trusted as-is — re-deriving via
+        # amount // vote_price would silently undercount once a promo code
+        # changed the per-vote price (see Transaction.vote_count's docstring).
+        vote_count = txn.vote_count
+    else:
+        vote_price = await _get_effective_vote_price(parent, db) if parent else await _get_global_vote_price(db)
+        vote_count = max(1, txn.amount // vote_price)
 
     now = datetime.now(timezone.utc)
     encrypted = crypto.encrypt_vote_data(txn.candidate_ids)
     cast_at = now.isoformat()
     signature = crypto.sign_vote(encrypted, cast_at)
 
-    await vote_repo.create({
-        "category_id": txn.category_id,
-        "election_id": txn.election_id,
-        "event_id": txn.event_id,
-        "voter_hash": txn.voter_hash,
-        "vote_data": encrypted,
-        "vote_signature": signature,
-        "count": vote_count,
-    })
+    try:
+        await vote_repo.create({
+            "category_id": txn.category_id,
+            "election_id": txn.election_id,
+            "event_id": txn.event_id,
+            "voter_hash": txn.voter_hash,
+            "vote_data": encrypted,
+            "vote_signature": signature,
+            "count": vote_count,
+        })
+    except IntegrityError:
+        # txn.status is checked above but two concurrent verify calls for the
+        # same reference can both pass that check before either updates it.
+        raise HTTPException(
+            status_code=409, detail="This payment has already been used to cast a vote"
+        )
+    await notify_vote_cast(txn.election_id, txn.event_id)
+    await notify_vote_cast_if_due(db, txn.election_id, txn.event_id)
 
     await txn_repo.update_status(data.reference, "success", ps_data)
+
+    if txn.promo_code_id:
+        await PromoCodeRepository(PromoCode, db).record_redemption(
+            txn.promo_code_id,
+            channel="vote",
+            email=txn.email,
+            discount_amount=Decimal(txn.discount_pesewas or 0) / 100,
+        )
 
     receipt_code = crypto.generate_receipt_code()
     return VoteReceiptResponse(
@@ -591,7 +817,11 @@ async def get_public_live_results(
 ):
     """Live results for a public election. No auth required."""
     service = _get_voting_service(db)
-    return await service.get_live_results(election_id)
+    return await cached_or_compute(
+        f"live_results:election:{election_id}",
+        ElectionResults,
+        lambda: service.get_live_results(election_id),
+    )
 
 
 @router.get("/public/events/{event_id}/live-results", response_model=EventResults)
@@ -601,4 +831,44 @@ async def get_public_event_live_results(
 ):
     """Live results for an event's categories. No auth required."""
     service = _get_voting_service(db)
-    return await service.get_event_live_results(event_id)
+    return await cached_or_compute(
+        f"live_results:event:{event_id}",
+        EventResults,
+        lambda: service.get_event_live_results(event_id),
+    )
+
+
+_SSE_HEADERS = {"Cache-Control": "no-cache", "X-Accel-Buffering": "no"}
+
+
+async def _compute_election_live_results(election_id: UUID) -> ElectionResults:
+    # A fresh, short-lived session per recompute — an SSE connection can
+    # stay open far longer than a normal request, so it must never hold a
+    # single pooled DB connection for its whole lifetime.
+    async with async_session_maker() as db:
+        return await _get_voting_service(db).get_live_results(election_id)
+
+
+async def _compute_event_live_results(event_id: UUID) -> EventResults:
+    async with async_session_maker() as db:
+        return await _get_voting_service(db).get_event_live_results(event_id)
+
+
+@router.get("/public/live-results/{election_id}/stream")
+async def stream_public_live_results(election_id: UUID):
+    """Server-Sent Events stream: pushes a fresh tally the instant a vote
+    lands (see notify_vote_cast), instead of the client polling. No auth
+    required, matching the polling endpoint above."""
+    generator = stream_results(
+        "election", election_id, ElectionResults, lambda: _compute_election_live_results(election_id)
+    )
+    return StreamingResponse(generator, media_type="text/event-stream", headers=_SSE_HEADERS)
+
+
+@router.get("/public/events/{event_id}/live-results/stream")
+async def stream_public_event_live_results(event_id: UUID):
+    """Same as stream_public_live_results, for an event's categories."""
+    generator = stream_results(
+        "event", event_id, EventResults, lambda: _compute_event_live_results(event_id)
+    )
+    return StreamingResponse(generator, media_type="text/event-stream", headers=_SSE_HEADERS)

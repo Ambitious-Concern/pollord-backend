@@ -26,12 +26,22 @@ class EventCreate(BaseModel):
     # pesewas, None = inherit the global platform price (mirrors Election).
     vote_price: Optional[int] = None
     allow_revoting: bool = False
+    # "organizer" (default): commission comes out of the payout. "buyer":
+    # commission is added on top as a surcharge, organizer nets sticker price.
+    fee_payer: str = "organizer"
     # Independent voting window — None means "fall back to the event's own
     # start time through end of that calendar day" (see EventResponse).
     voting_starts_at: Optional[datetime] = None
     voting_ends_at: Optional[datetime] = None
     # Whether ticket check-in is open.
     scan_enabled: bool = True
+
+    @field_validator("fee_payer")
+    @classmethod
+    def validate_fee_payer(cls, v: str) -> str:
+        if v not in ("organizer", "buyer"):
+            raise ValueError("fee_payer must be 'organizer' or 'buyer'")
+        return v
 
 
 class EventUpdate(BaseModel):
@@ -49,9 +59,17 @@ class EventUpdate(BaseModel):
     show_ticket_counts: Optional[bool] = None
     vote_price: Optional[int] = None
     allow_revoting: Optional[bool] = None
+    fee_payer: Optional[str] = None
     voting_starts_at: Optional[datetime] = None
     voting_ends_at: Optional[datetime] = None
     scan_enabled: Optional[bool] = None
+
+    @field_validator("fee_payer")
+    @classmethod
+    def validate_fee_payer(cls, v: Optional[str]) -> Optional[str]:
+        if v is not None and v not in ("organizer", "buyer"):
+            raise ValueError("fee_payer must be 'organizer' or 'buyer'")
+        return v
 
 
 class EventResponse(BaseModel):
@@ -74,12 +92,31 @@ class EventResponse(BaseModel):
     show_ticket_counts: bool = True
     vote_price: Optional[int] = None
     allow_revoting: bool = False
+    fee_payer: str = "organizer"
     voting_starts_at: Optional[datetime] = None
     voting_ends_at: Optional[datetime] = None
     scan_enabled: bool = True
+    # Chosen at launch, locked in until the event closes (see core/plans.py)
+    # — determines the commission rate, not an org-wide setting.
+    plan: str = "standard"
     created_by: UUID
     created_at: datetime
     updated_at: datetime
+
+
+class EventSummaryResponse(EventResponse):
+    """The organizer dashboard's list view — adds bulk-computed aggregate
+    stats on top of the plain event row, mirroring ElectionSummaryResponse."""
+
+    tickets_sold: int = 0
+    # Summed real ticket-type capacity (quantity_available + quantity_sold) —
+    # kept distinct from the inherited `capacity` field (Event.capacity),
+    # which organizers often leave unset (None), unlike this, always an int.
+    ticket_capacity: int = 0
+    lowest_ticket_price: Optional[Decimal] = None
+    has_voting: bool = False
+    revenue_ghs: str = "0.00"
+    revenue_growth_pct: float = 0.0
 
 
 class TicketTypeCreate(BaseModel):
@@ -131,6 +168,14 @@ class TicketTypeResponse(BaseModel):
     sales_end_datetime: Optional[datetime] = None
     max_per_user: int
     status: str
+
+
+class TicketTypeWithEventResponse(TicketTypeResponse):
+    """One ticket type plus its parent event's title — the cross-event
+    Ticket Types dashboard page's row, vs. the per-event list which doesn't
+    need to repeat the event it's already scoped to."""
+
+    event_title: str = ""
 
 
 class EventWithTicketTypes(EventResponse):

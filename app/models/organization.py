@@ -3,7 +3,7 @@ import uuid
 from datetime import datetime
 from typing import TYPE_CHECKING, List, Optional
 
-from sqlalchemy import DateTime, ForeignKey, String, Text, Boolean, func
+from sqlalchemy import DateTime, ForeignKey, String, Text, Boolean, JSON, func
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -25,6 +25,8 @@ class Organization(TimestampMixin, Base):
     name: Mapped[str] = mapped_column(String(255), nullable=False)
     description: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     logo_url: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    # Premium+ perk — see require_election_plan/require_event_plan for the gate.
+    brand_primary_color: Mapped[Optional[str]] = mapped_column(String(7), nullable=True)
     website: Mapped[Optional[str]] = mapped_column(String(500), nullable=True)
     address: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     phone: Mapped[Optional[str]] = mapped_column(String(30), nullable=True)
@@ -36,6 +38,11 @@ class Organization(TimestampMixin, Base):
     owner_id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), ForeignKey("users.user_id"), nullable=False
     )
+    # Soft-delete: "Delete organization" deactivates rather than destroys
+    # rows, since elections/events/votes/tickets/payouts underneath it are
+    # real financial/voting records that must stay recoverable and auditable.
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    deactivated_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
 
     # Relationships
     owner: Mapped["User"] = relationship(
@@ -66,6 +73,12 @@ class OrganizationMember(Base):
     role: Mapped[str] = mapped_column(
         String(30), default="member"
     )  # owner | admin | editor | member
+    # Optional, additive — grants whatever specific permission flags the
+    # assigned OrgRole lists, on top of (never instead of) the coarse role
+    # above. See app/core/org_permissions.py for how the two combine.
+    org_role_id: Mapped[Optional[uuid.UUID]] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("org_roles.org_role_id", ondelete="SET NULL"), nullable=True
+    )
     invited_by: Mapped[Optional[uuid.UUID]] = mapped_column(
         UUID(as_uuid=True), ForeignKey("users.user_id"), nullable=True
     )
@@ -80,6 +93,37 @@ class OrganizationMember(Base):
     user: Mapped["User"] = relationship(
         foreign_keys=[user_id], lazy="selectin"
     )
+    org_role: Mapped[Optional["OrgRole"]] = relationship(
+        foreign_keys=[org_role_id], lazy="selectin"
+    )
+
+
+class OrgRole(Base):
+    """An organization-defined custom role: a name plus a set of permission
+    flags (see app/core/org_permissions.py for the fixed, valid flag list).
+
+    Deliberately separate from the platform-wide `Role`/`UserRole` system
+    (app/models/user.py) — that table is global and checked by hardcoded
+    name across ~40 endpoint files; this one is scoped to a single
+    organization's own resources and checked via member_has_permission()."""
+
+    __tablename__ = "org_roles"
+
+    org_role_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+    org_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("organizations.org_id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    name: Mapped[str] = mapped_column(String(100), nullable=False)
+    permissions: Mapped[list] = mapped_column(JSON, default=list, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+
+    # Relationships
+    organization: Mapped["Organization"] = relationship(foreign_keys=[org_id], lazy="select")
 
 
 class OrganizationInvitation(Base):

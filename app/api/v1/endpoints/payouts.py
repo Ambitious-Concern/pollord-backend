@@ -1,12 +1,14 @@
 from typing import List, Optional
 from uuid import UUID
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Request
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
 from app.core.dependencies import CONSOLE_READ_ROLES, get_current_active_user, require_roles
+from app.core.request_meta import client_ip_and_agent
 from app.db.base import get_db
+from app.db.tenant import get_tenant_db
 from app.models.election import Election
 from app.models.event import Event
 from app.models.payout_request import PayoutRequest
@@ -19,11 +21,12 @@ from app.repositories.ticket_repository import TicketPurchaseRepository
 from app.repositories.transaction_repository import TransactionRepository
 from app.repositories.user_repository import UserRepository
 from app.schemas.payout import (
-    MobileMoneyNetwork,
     PayoutAvailableResponse,
+    PayoutDestinationOption,
     PayoutRequestCreate,
     PayoutRequestResponse,
     PayoutReviewRequest,
+    PayoutSourceAvailability,
 )
 from app.services.payout_service import PayoutService
 from app.services.paystack_service import PaystackService
@@ -51,42 +54,68 @@ def _get_service(db: AsyncSession) -> PayoutService:
 async def get_available_payout(
     event_id: UUID,
     current_user: User = Depends(require_roles(*ORGANIZER_ROLES)),
-    db: AsyncSession = Depends(get_db),
+    db: AsyncSession = Depends(get_tenant_db),
 ):
     """How much revenue for this event hasn't been requested (or paid) yet."""
     return await _get_service(db).get_available(event_id, current_user)
 
 
-@router.get("/mobile-money-networks", response_model=List[MobileMoneyNetwork])
+@router.get("/sources", response_model=List[PayoutSourceAvailability])
+async def list_payout_sources(
+    current_user: User = Depends(
+        require_roles("System Administrator", "Event Organizer", "Election Administrator")
+    ),
+    db: AsyncSession = Depends(get_tenant_db),
+):
+    """Every election/event the caller's team has earned money from, with
+    its payable balance — the bulk view behind the payout sources table."""
+    return await _get_service(db).list_available_sources(current_user)
+
+
+@router.get("/mobile-money-networks", response_model=List[PayoutDestinationOption])
 async def list_mobile_money_networks(
     current_user: User = Depends(
         require_roles("System Administrator", "Event Organizer", "Election Administrator")
     ),
-    db: AsyncSession = Depends(get_db),
+    db: AsyncSession = Depends(get_tenant_db),
 ):
     """Paystack's own list of supported GHS mobile money networks + their
     codes, for the payout-destination dropdown."""
     return await _get_service(db).list_mobile_money_networks()
 
 
+@router.get("/banks", response_model=List[PayoutDestinationOption])
+async def list_banks(
+    current_user: User = Depends(
+        require_roles("System Administrator", "Event Organizer", "Election Administrator")
+    ),
+    db: AsyncSession = Depends(get_tenant_db),
+):
+    """Paystack's own list of supported GHS banks + their codes, for the
+    bank-account payout-destination dropdown."""
+    return await _get_service(db).list_banks()
+
+
 @router.post("/events/{event_id}", response_model=PayoutRequestResponse, status_code=201)
 async def request_payout(
+    request: Request,
     event_id: UUID,
     data: PayoutRequestCreate,
     current_user: User = Depends(require_roles(*ORGANIZER_ROLES)),
-    db: AsyncSession = Depends(get_db),
+    db: AsyncSession = Depends(get_tenant_db),
 ):
     """Request payout of an event's outstanding revenue, to the given mobile
     money destination. An admin can then pay this out via Paystack Transfer
     from the admin console, or pay outside the app and mark it paid."""
-    return await _get_service(db).request_payout(event_id, current_user, data)
+    ip, agent = client_ip_and_agent(request)
+    return await _get_service(db).request_payout(event_id, current_user, data, ip=ip, user_agent=agent)
 
 
 @router.get("/events/{event_id}", response_model=List[PayoutRequestResponse])
 async def list_event_payout_requests(
     event_id: UUID,
     current_user: User = Depends(require_roles(*ORGANIZER_ROLES)),
-    db: AsyncSession = Depends(get_db),
+    db: AsyncSession = Depends(get_tenant_db),
 ):
     """This event's payout request history."""
     return await _get_service(db).list_for_event(event_id, current_user)
@@ -96,7 +125,7 @@ async def list_event_payout_requests(
 async def get_available_election_payout(
     election_id: UUID,
     current_user: User = Depends(require_roles(*ELECTION_ROLES)),
-    db: AsyncSession = Depends(get_db),
+    db: AsyncSession = Depends(get_tenant_db),
 ):
     """How much revenue for this election's paid votes hasn't been requested
     (or paid) yet."""
@@ -105,21 +134,25 @@ async def get_available_election_payout(
 
 @router.post("/elections/{election_id}", response_model=PayoutRequestResponse, status_code=201)
 async def request_election_payout(
+    request: Request,
     election_id: UUID,
     data: PayoutRequestCreate,
     current_user: User = Depends(require_roles(*ELECTION_ROLES)),
-    db: AsyncSession = Depends(get_db),
+    db: AsyncSession = Depends(get_tenant_db),
 ):
     """Request payout of an election's outstanding paid-vote revenue, to the
     given mobile money destination. Mirrors the event payout flow."""
-    return await _get_service(db).request_payout_for_election(election_id, current_user, data)
+    ip, agent = client_ip_and_agent(request)
+    return await _get_service(db).request_payout_for_election(
+        election_id, current_user, data, ip=ip, user_agent=agent
+    )
 
 
 @router.get("/elections/{election_id}", response_model=List[PayoutRequestResponse])
 async def list_election_payout_requests(
     election_id: UUID,
     current_user: User = Depends(require_roles(*ELECTION_ROLES)),
-    db: AsyncSession = Depends(get_db),
+    db: AsyncSession = Depends(get_tenant_db),
 ):
     """This election's payout request history."""
     return await _get_service(db).list_for_election(election_id, current_user)
@@ -130,7 +163,7 @@ async def list_my_payout_requests(
     current_user: User = Depends(
         require_roles("System Administrator", "Event Organizer", "Election Administrator")
     ),
-    db: AsyncSession = Depends(get_db),
+    db: AsyncSession = Depends(get_tenant_db),
 ):
     """All payout requests made by the signed-in organizer."""
     return await _get_service(db).list_mine(current_user.user_id)
@@ -140,6 +173,9 @@ async def list_my_payout_requests(
 async def list_all_payout_requests(
     status: Optional[str] = None,
     current_user: User = Depends(require_roles(*CONSOLE_READ_ROLES)),
+    # Plain get_db, not get_tenant_db: this is the admin console, deliberately
+    # cross-org by design (same as admin.py/admin_detail.py/admin_tickets.py)
+    # — a System Administrator reviewing every org's requests, not their own.
     db: AsyncSession = Depends(get_db),
 ):
     """Every payout request on the platform, for a System Administrator to review."""
@@ -151,7 +187,7 @@ async def review_payout_request(
     payout_request_id: UUID,
     data: PayoutReviewRequest,
     current_user: User = Depends(require_roles(ADMIN_ROLE)),
-    db: AsyncSession = Depends(get_db),
+    db: AsyncSession = Depends(get_db),  # admin console, cross-org — see list_all_payout_requests
 ):
     """Mark a payout request as paid (after paying the organizer manually
     outside the app) or rejected."""
@@ -162,9 +198,10 @@ async def review_payout_request(
 
 @router.post("/admin/{payout_request_id}/pay", response_model=PayoutRequestResponse)
 async def pay_via_paystack(
+    request: Request,
     payout_request_id: UUID,
     current_user: User = Depends(require_roles(ADMIN_ROLE)),
-    db: AsyncSession = Depends(get_db),
+    db: AsyncSession = Depends(get_db),  # admin console, cross-org — see list_all_payout_requests
 ):
     """Pays a pending request out via Paystack Transfer, to the mobile money
     destination the organizer provided when requesting it. Moves real money —
@@ -173,4 +210,5 @@ async def pay_via_paystack(
     OTP finalization on Paystack's own dashboard and the request stays
     pending; anything else means it failed and can be retried or paid
     manually instead."""
-    return await _get_service(db).initiate_transfer(payout_request_id, current_user)
+    ip, agent = client_ip_and_agent(request)
+    return await _get_service(db).initiate_transfer(payout_request_id, current_user, ip=ip, user_agent=agent)

@@ -40,6 +40,14 @@ class TicketTransaction(Base):
     currency: Mapped[str] = mapped_column(String(10), default="GHS")
     # pending | success | failed | needs_refund
     status: Mapped[str] = mapped_column(String(20), default="pending", index=True)
+    # Plain (no FK), matching this table's existing convention. Set at
+    # initiation when a promo code discounted this payment; `amount` above
+    # already reflects the discount, this is just for the redemption ledger.
+    promo_code_id: Mapped[Optional[uuid.UUID]] = mapped_column(UUID(as_uuid=True), nullable=True)
+    discount_amount: Mapped[Decimal] = mapped_column(Numeric(10, 2), default=Decimal("0"))
+    # Snapshotted from the event's fee_payer at initiation — see the matching
+    # note on Transaction.fee_payer.
+    fee_payer: Mapped[str] = mapped_column(String(20), default="organizer", nullable=False)
     paystack_response: Mapped[Optional[dict]] = mapped_column(JSONB, nullable=True)
     purchase_id: Mapped[Optional[uuid.UUID]] = mapped_column(UUID(as_uuid=True), nullable=True)
     created_at: Mapped[datetime] = mapped_column(

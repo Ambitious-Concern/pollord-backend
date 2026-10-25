@@ -1,5 +1,5 @@
 from datetime import datetime, timezone
-from typing import List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 from uuid import UUID
 
 from sqlalchemy import func, or_, select
@@ -70,8 +70,13 @@ class TicketRepository(BaseRepository[Ticket]):
                 selectinload(Ticket.event),
                 selectinload(Ticket.ticket_type),
                 selectinload(Ticket.user),
+                selectinload(Ticket.purchase),
             )
-            .order_by(Ticket.purchase_date.desc())
+            # Tiebreaker matters here — Attendees pages through this with
+            # skip/limit, and ties on purchase_date alone let Postgres
+            # reorder rows between calls, duplicating/skipping some at page
+            # boundaries.
+            .order_by(Ticket.purchase_date.desc(), Ticket.ticket_id)
             .offset(skip)
             .limit(limit)
         )
@@ -83,8 +88,28 @@ class TicketRepository(BaseRepository[Ticket]):
         )
         return list(result.scalars().all())
 
+    async def get_recipient_emails(self, event_id: UUID) -> List[str]:
+        """Distinct, resolved, deliverable email addresses for everyone
+        holding a non-cancelled ticket to an event — the recipient list for
+        ticket-holder broadcasts. Front Desk walk-in registrations without a
+        real email get a synthetic @front-desk.pollord.internal address
+        (see TicketingService._walkin_guest_email) that's excluded here
+        rather than silently bounced."""
+        result = await self.session.execute(
+            select(Ticket)
+            .where(Ticket.event_id == event_id, Ticket.ticket_status != "cancelled")
+            .options(selectinload(Ticket.user))
+        )
+        emails: set[str] = set()
+        for ticket in result.scalars().all():
+            if ticket.user is not None and ticket.user.email:
+                emails.add(ticket.user.email.lower())
+            elif ticket.guest_email and not ticket.guest_email.endswith("@front-desk.pollord.internal"):
+                emails.add(ticket.guest_email.lower())
+        return sorted(emails)
+
     async def mark_as_used(
-        self, ticket_id: UUID, scanned_by: Optional[UUID]
+        self, ticket_id: UUID, scanned_by: Optional[UUID], channel: str
     ) -> Optional[Ticket]:
         result = await self.session.execute(
             select(Ticket)
@@ -96,6 +121,7 @@ class TicketRepository(BaseRepository[Ticket]):
             ticket.ticket_status = "used"
             ticket.used_at = datetime.now(timezone.utc)
             ticket.scanned_by = scanned_by
+            ticket.check_in_channel = channel
             await self.session.flush()
             await self.session.refresh(ticket)
             return ticket
@@ -267,3 +293,15 @@ class TicketPurchaseRepository(BaseRepository[TicketPurchase]):
             )
         )
         return float(result.scalar_one() or 0)
+
+    async def get_revenue_by_events(self, event_ids: List[UUID]) -> Dict[UUID, float]:
+        """Same as get_revenue_by_event but grouped over many events in one
+        query — for the payout sources list."""
+        if not event_ids:
+            return {}
+        result = await self.session.execute(
+            select(TicketPurchase.event_id, func.sum(TicketPurchase.total_amount))
+            .where(TicketPurchase.event_id.in_(event_ids), TicketPurchase.payment_status == "completed")
+            .group_by(TicketPurchase.event_id)
+        )
+        return {event_id: float(total) for event_id, total in result.all()}

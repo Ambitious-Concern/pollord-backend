@@ -3,7 +3,7 @@ from datetime import datetime
 from decimal import Decimal
 from typing import TYPE_CHECKING, Optional
 
-from sqlalchemy import CheckConstraint, DateTime, ForeignKey, Numeric, String, Text, func
+from sqlalchemy import Boolean, CheckConstraint, DateTime, ForeignKey, Numeric, String, Text, func
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -51,13 +51,19 @@ class PayoutRequest(TimestampMixin, Base):
     )
     amount: Mapped[Decimal] = mapped_column(Numeric(10, 2), nullable=False)
     status: Mapped[str] = mapped_column(String(20), default="pending", nullable=False)
+    # Premium+ perk, derived from the parent election/event's plan at request
+    # time (see core/plans.py) — sorts first in the admin review queue.
+    express: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     admin_notes: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
 
     # Payout destination, provided by the organizer when requesting payout.
+    # "mobile_money" or "bank_account" — destination_code is a Paystack
+    # bank_code either way (a mobile network code or a real bank code),
+    # destination_number is the mobile number or bank account number.
     payout_method: Mapped[Optional[str]] = mapped_column(String(20), nullable=True)
     recipient_name: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
-    mobile_network: Mapped[Optional[str]] = mapped_column(String(20), nullable=True)
-    mobile_number: Mapped[Optional[str]] = mapped_column(String(20), nullable=True)
+    destination_code: Mapped[Optional[str]] = mapped_column(String(20), nullable=True)
+    destination_number: Mapped[Optional[str]] = mapped_column(String(20), nullable=True)
 
     # Paystack Transfer bookkeeping — set once an admin initiates a transfer
     # from the admin console. Distinct from `status`: a transfer can fail and

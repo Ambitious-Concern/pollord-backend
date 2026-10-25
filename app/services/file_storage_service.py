@@ -7,12 +7,16 @@ service responds with a public ``downloadUrl`` that we persist in the database
 
 import base64
 import binascii
+import mimetypes
 import re
+import uuid
+from pathlib import Path
 
 import httpx
 from fastapi import HTTPException
 
 from app.core.config import settings
+from app.core.security import encrypt_file_bytes
 
 # data:[<mediatype>][;base64],<data>
 _DATA_URI_RE = re.compile(r"^data:(?P<mime>[^;,]+)?(?P<b64>;base64)?,(?P<data>.*)$", re.DOTALL)
@@ -33,6 +37,16 @@ def is_data_uri(value: str | None) -> bool:
     return bool(value) and _DATA_URI_RE.match(value) is not None
 
 
+# Python's mimetypes doesn't know the OOXML formats, so an exported .xlsx
+# would otherwise be served as application/octet-stream and a browser would
+# treat a perfectly good workbook as an unknown binary.
+_EXTRA_MIME_TYPES = {
+    "xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    "docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    "pptx": "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+}
+
+
 class FileStorageService:
     """Uploads/downloads files to the external file-storage service and
     rewrites its URLs to our HTTPS proxy route (see to_public_url)."""
@@ -40,6 +54,43 @@ class FileStorageService:
     def __init__(self, base_url: str | None = None):
         # Strip trailing slash so we can safely append paths.
         self._base_url = (base_url or settings.FILE_STORAGE_URL).rstrip("/")
+
+    @property
+    def _local_dir(self) -> Path | None:
+        """The directory to read/write when running on local disk, else None."""
+        if not settings.use_local_file_storage:
+            return None
+        return Path(settings.FILE_STORAGE_LOCAL_DIR)
+
+    def _local_path(self, root: Path, ext: str, file_id: str) -> Path:
+        """Resolve ext/file_id under root, refusing anything that escapes it.
+
+        The HTTP routes already constrain both segments by regex, but this is
+        also reachable from internal callers, and a path traversal here would
+        read arbitrary files off the server.
+        """
+        candidate = (root / ext / file_id).resolve()
+        if not str(candidate).startswith(str(root.resolve())):
+            raise HTTPException(status_code=400, detail="Invalid file path")
+        return candidate
+
+    def _local_upload(self, content: bytes, filename: str) -> dict:
+        root = self._local_dir
+        assert root is not None
+        ext = "".join(c for c in Path(filename or "").suffix.lstrip(".") if c.isalnum())[:10].lower()
+        ext = ext or "bin"
+        file_id = uuid.uuid4().hex
+
+        dest = self._local_path(root, ext, file_id)
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_bytes(content)
+
+        # Same URL shape the remote service returns, so to_public_url /
+        # to_private_url and the /files routes behave identically either way.
+        return {
+            "fileId": file_id,
+            "downloadUrl": self.to_public_url(f"{self._base_url}/{ext}/{file_id}"),
+        }
 
     async def upload_full(
         self,
@@ -53,6 +104,9 @@ class FileStorageService:
         HTTPException(502) if the storage service is unreachable or returns an
         unexpected response.
         """
+        if self._local_dir is not None:
+            return self._local_upload(content, filename)
+
         files = {
             "file": (
                 filename or "upload",
@@ -107,12 +161,60 @@ class FileStorageService:
             return f"{settings.PUBLIC_BASE_URL.rstrip('/')}/api/v1/files{path}"
         return download_url
 
+    def to_private_url(self, download_url: str) -> str:
+        """Rewrite a storage-service URL to our authenticated proxy route.
+
+        Used for identity documents: the resulting URL is only servable to the
+        organization owner or a System Administrator, unlike to_public_url's
+        route which deliberately serves anyone so <img src> works.
+        """
+        if download_url.startswith(f"{self._base_url}/"):
+            path = download_url[len(self._base_url):]
+            return f"{settings.PUBLIC_BASE_URL.rstrip('/')}/api/v1/files/private{path}"
+        return download_url
+
+    async def upload_private(
+        self,
+        *,
+        content: bytes,
+        filename: str,
+        content_type: str | None = None,
+    ) -> str:
+        """Encrypt, upload, and return an authenticated-only download URL.
+
+        Encryption happens here rather than being left to the storage service
+        because that service has no authentication: anything readable by file
+        id is readable by the world, so identity documents must arrive there
+        already unreadable.
+        """
+        body = await self.upload_full(
+            content=encrypt_file_bytes(content, content_type),
+            filename=filename,
+            content_type="application/octet-stream",
+        )
+        # upload_full already rewrote downloadUrl to the public route; swap that
+        # prefix for the private one so the document is never served unauthenticated.
+        public_prefix = f"{settings.PUBLIC_BASE_URL.rstrip('/')}/api/v1/files"
+        url = body["downloadUrl"]
+        if url.startswith(f"{public_prefix}/"):
+            return f"{public_prefix}/private{url[len(public_prefix):]}"
+        return url
+
     async def download(self, ext: str, file_id: str) -> tuple[bytes, str]:
         """Fetch a stored file, returning ``(content, content_type)``.
 
         Raises HTTPException(404) if the file does not exist and
         HTTPException(502) if the storage service is unreachable.
         """
+        root = self._local_dir
+        if root is not None:
+            path = self._local_path(root, ext, file_id)
+            if not path.is_file():
+                raise HTTPException(status_code=404, detail="File not found")
+            guessed, _ = mimetypes.guess_type(f"placeholder.{ext}")
+            content_type = _EXTRA_MIME_TYPES.get(ext.lower()) or guessed
+            return path.read_bytes(), content_type or "application/octet-stream"
+
         try:
             async with httpx.AsyncClient() as client:
                 r = await client.get(

@@ -23,10 +23,19 @@ class UserRepository(BaseRepository[User]):
         return result.scalar_one_or_none()
 
     async def get_with_roles(self, user_id: UUID) -> Optional[User]:
+        # populate_existing forces a re-fetch of user_roles even when this
+        # User is already identity-mapped from an earlier query in the same
+        # session — User.user_roles is lazy="selectin", so it's eagerly
+        # (and often stalely) loaded the moment the object is first touched,
+        # e.g. by BaseRepository.create()'s refresh() right after signup,
+        # before any roles have been granted yet. Without this, a caller
+        # that grants a role and then calls get_with_roles() in the same
+        # request gets back the pre-grant empty list.
         result = await self.session.execute(
             select(User)
             .options(selectinload(User.user_roles).selectinload(UserRole.role))
             .where(User.user_id == user_id)
+            .execution_options(populate_existing=True)
         )
         return result.scalar_one_or_none()
 

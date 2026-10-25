@@ -38,6 +38,17 @@ class VoteRepository(BaseRepository[Vote]):
         )
         return list(result.scalars().all())
 
+    async def get_voter_hashes_by_categories(self, category_ids: List[UUID]) -> set:
+        """Every voter_hash that voted in any of these categories — used to
+        derive "has this eligible voter voted" without an N+1 has_voted
+        check per voter."""
+        if not category_ids:
+            return set()
+        result = await self.session.execute(
+            select(Vote.voter_hash).where(Vote.category_id.in_(category_ids))
+        )
+        return set(result.scalars().all())
+
     async def count_by_election(self, election_id: UUID) -> int:
         """Total votes cast, not total vote rows — a single row can represent
         many votes at once (a paid multi-vote purchase sets Vote.count > 1),

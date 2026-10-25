@@ -2,7 +2,7 @@ from decimal import ROUND_HALF_UP, Decimal
 from typing import Optional
 from uuid import UUID
 
-from sqlalchemy import func, select
+from sqlalchemy import func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.election import Election, EligibleVoter
@@ -140,6 +140,57 @@ class AnalyticsService:
                     "price": float(row.price),
                 }
                 for row in type_stats.all()
+            ],
+        }
+
+    async def get_listing_activity_timeline(
+        self, listing_type: str, listing_id: UUID, granularity: str
+    ) -> dict:
+        """Zero-filled rolling timeline ending now: last 24 hourly buckets or
+        last 14 daily buckets. Votes for an election, tickets sold for an
+        event — the two "how much traffic is this listing getting" signals
+        the dashboard's trend card needs. generate_series supplies every
+        bucket up front so a quiet hour/day shows as zero instead of just
+        not appearing in the result.
+        """
+        is_hourly = granularity == "hour"
+        unit = "hour" if is_hourly else "day"
+        bucket_count = 24 if is_hourly else 14
+
+        if listing_type == "election":
+            source_sql = """
+                SELECT date_trunc(:unit, cast_at) AS bucket, COUNT(*) AS count
+                FROM votes
+                WHERE election_id = :listing_id
+                GROUP BY 1
+            """
+        else:
+            source_sql = """
+                SELECT date_trunc(:unit, purchase_date) AS bucket, COUNT(*) AS count
+                FROM tickets
+                WHERE event_id = :listing_id AND ticket_status != 'cancelled'
+                GROUP BY 1
+            """
+
+        sql = text(f"""
+            SELECT bucket, COALESCE(activity.count, 0) AS count
+            FROM generate_series(
+                date_trunc(:unit, now()) - ((:bucket_count - 1) * interval '1 {unit}'),
+                date_trunc(:unit, now()),
+                interval '1 {unit}'
+            ) AS bucket
+            LEFT JOIN ({source_sql}) activity USING (bucket)
+            ORDER BY bucket
+        """)
+
+        result = await self.session.execute(
+            sql, {"unit": unit, "bucket_count": bucket_count, "listing_id": listing_id}
+        )
+        return {
+            "granularity": granularity,
+            "points": [
+                {"bucket": row.bucket.isoformat(), "count": row.count}
+                for row in result.all()
             ],
         }
 

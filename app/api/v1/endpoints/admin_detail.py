@@ -18,6 +18,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.v1.endpoints.admin import ADMIN_ROLE, _get_platform_setting
+from app.core.request_meta import client_ip
 from app.core.dependencies import CONSOLE_READ_ROLES, require_roles
 from app.db.base import get_db
 from app.models.audit_log import AuditLog
@@ -304,7 +305,7 @@ async def update_event_settings(
             entity_id=event_id,
             user_id=current_user.user_id,
             changes=changes,
-            ip_address=request.client.host if request.client else None,
+            ip_address=client_ip(request),
             user_agent=request.headers.get("user-agent"),
         )
 

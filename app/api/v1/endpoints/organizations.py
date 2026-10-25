@@ -3,24 +3,32 @@ from pathlib import Path
 from typing import List, Optional
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, File, HTTPException, UploadFile, status
+from fastapi import APIRouter, Depends, File, HTTPException, Request, UploadFile, status
 from pydantic import BaseModel, EmailStr
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
 from app.core.dependencies import get_current_active_user
+from app.core.ownership import SYSTEM_ADMIN
+from app.core.org_permissions import MANAGE_SETTINGS, MANAGE_TEAM, member_has_permission
+from app.core.request_meta import client_ip_and_agent
 from app.core.security import hash_password
 from app.db.base import get_db
 from app.models.audit_log import AuditLog
 from app.models.election import Election
 from app.models.event import Event
-from app.models.organization import Organization, OrganizationMember
+from app.models.org_activity_log import OrgActivityLog
+from app.models.organization import Organization, OrganizationMember, OrgRole
+from app.models.payout_request import PayoutRequest
 from app.models.user import User
 from app.models.vote import Vote
 from app.repositories.audit_log_repository import AuditLogRepository
 from app.repositories.election_repository import ElectionRepository
 from app.repositories.event_repository import EventRepository
+from app.repositories.org_activity_log_repository import OrgActivityLogRepository
 from app.repositories.organization_repository import OrganizationRepository
+from app.repositories.org_role_repository import OrgRoleRepository
+from app.repositories.payout_request_repository import PayoutRequestRepository
 from app.repositories.user_repository import UserRepository
 from app.repositories.vote_repository import VoteRepository
 from app.schemas.organization import (
@@ -33,11 +41,16 @@ from app.schemas.organization import (
     OrganizationMemberUpdate,
     OrganizationResponse,
     OrganizationUpdate,
+    OrgRoleCreate,
+    OrgRoleResponse,
+    OrgRoleUpdate,
+    TransferOwnershipRequest,
 )
 from app.schemas.user import TokenResponse
 from app.services import email_service
 from app.services.auth_service import AuthService
 from app.services.file_storage_service import file_storage_service
+from app.services.org_notification_service import OrgNotificationService
 
 # System roles granted to org owners and admins so they can create elections/events
 # The organizer app gates its whole dashboard on these, so every member
@@ -79,6 +92,7 @@ class OrganizationPublicResponse(BaseModel):
     name: str
     description: Optional[str] = None
     logo_url: Optional[str] = None
+    brand_primary_color: Optional[str] = None
     website: Optional[str] = None
     address: Optional[str] = None
     phone: Optional[str] = None
@@ -86,6 +100,7 @@ class OrganizationPublicResponse(BaseModel):
     industry: Optional[str] = None
     is_verified: bool
     owner_id: UUID
+    owner_name: str
     created_at: datetime
     member_count: int
 
@@ -99,24 +114,44 @@ def _member_to_response(m: OrganizationMember) -> OrganizationMemberResponse:
         joined_at=m.joined_at,
         user_name=m.user.full_name if m.user else None,
         user_email=m.user.email if m.user else None,
+        org_role=OrgRoleResponse.model_validate(m.org_role) if m.org_role else None,
     )
 
 
-def _org_to_response(org: Organization) -> OrganizationResponse:
+def _org_to_response(
+    org: Organization,
+    *,
+    viewer: User | None = None,
+) -> OrganizationResponse:
+    """Serialize an organization.
+
+    KYC document URLs are redacted unless ``viewer`` is the owner or a System
+    Administrator. They point at identity documents, so handing them to every
+    teammate who can read the org would widen access far beyond who actually
+    needs to see them. Redacting by default means a new call site has to opt in
+    deliberately rather than leak them by omission.
+    """
+    may_see_kyc = viewer is not None and (
+        org.owner_id == viewer.user_id
+        or SYSTEM_ADMIN in [ur.role.role_name for ur in viewer.user_roles]
+    )
     return OrganizationResponse(
         org_id=org.org_id,
         name=org.name,
         description=org.description,
         logo_url=org.logo_url,
+        brand_primary_color=org.brand_primary_color,
         website=org.website,
         address=org.address,
         phone=org.phone,
         email=org.email,
         industry=org.industry,
         is_verified=org.is_verified,
-        kyc_document_front=org.kyc_document_front,
-        kyc_document_back=org.kyc_document_back,
+        kyc_document_front=org.kyc_document_front if may_see_kyc else None,
+        kyc_document_back=org.kyc_document_back if may_see_kyc else None,
         owner_id=org.owner_id,
+        is_active=org.is_active,
+        deactivated_at=org.deactivated_at,
         created_at=org.created_at,
         updated_at=org.updated_at,
         members=[_member_to_response(m) for m in (org.members or [])],
@@ -160,7 +195,7 @@ async def create_organization(
     await user_repo.grant_roles_by_name(current_user.user_id, ORG_MEMBER_SYSTEM_ROLES)
 
     org = await repo.get_with_members(org.org_id)
-    return _org_to_response(org)
+    return _org_to_response(org, viewer=current_user)
 
 
 # --- List user's organizations ---
@@ -174,7 +209,7 @@ async def list_my_organizations(
     """List all organizations the user owns or is a member of."""
     repo = OrganizationRepository(Organization, db)
     orgs = await repo.get_user_organizations(current_user.user_id)
-    return [_org_to_response(o) for o in orgs]
+    return [_org_to_response(o, viewer=current_user) for o in orgs if o.is_active]
 
 
 # --- Public org info by owner user_id (no auth required) ---
@@ -188,16 +223,18 @@ async def get_org_by_owner(
 ):
     """Return the organization owned by a specific user. No auth required."""
     repo = OrganizationRepository(Organization, db)
-    orgs = await repo.get_by_owner(user_id)
+    orgs = [o for o in await repo.get_by_owner(user_id) if o.is_active]
     if not orgs:
         raise HTTPException(status_code=404, detail="Organization not found for this user")
     org = orgs[0]
+    owner = await UserRepository(User, db).get_by_id(user_id, id_field="user_id")
 
     return OrganizationPublicResponse(
         org_id=org.org_id,
         name=org.name,
         description=org.description,
         logo_url=org.logo_url,
+        brand_primary_color=org.brand_primary_color,
         website=org.website,
         address=org.address,
         phone=org.phone,
@@ -205,6 +242,7 @@ async def get_org_by_owner(
         industry=org.industry,
         is_verified=org.is_verified,
         owner_id=org.owner_id,
+        owner_name=owner.full_name if owner else "",
         created_at=org.created_at,
         member_count=len(org.members or []),
     )
@@ -221,14 +259,16 @@ async def get_public_organization(
     """Return basic organization info by org_id publicly."""
     repo = OrganizationRepository(Organization, db)
     org = await repo.get_with_members(org_id)
-    if not org:
+    if not org or not org.is_active:
         raise HTTPException(status_code=404, detail="Organization not found")
+    owner = await UserRepository(User, db).get_by_id(org.owner_id, id_field="user_id")
 
     return OrganizationPublicResponse(
         org_id=org.org_id,
         name=org.name,
         description=org.description,
         logo_url=org.logo_url,
+        brand_primary_color=org.brand_primary_color,
         website=org.website,
         address=org.address,
         phone=org.phone,
@@ -236,6 +276,7 @@ async def get_public_organization(
         industry=org.industry,
         is_verified=org.is_verified,
         owner_id=org.owner_id,
+        owner_name=owner.full_name if owner else "",
         created_at=org.created_at,
         member_count=len(org.members or []),
     )
@@ -256,7 +297,7 @@ async def get_organization_stats(
     already use for the authenticated dashboard)."""
     repo = OrganizationRepository(Organization, db)
     org = await repo.get_with_members(org_id)
-    if not org:
+    if not org or not org.is_active:
         raise HTTPException(status_code=404, detail="Organization not found")
 
     teammate_ids = await repo.get_teammate_ids(org.owner_id)
@@ -294,14 +335,14 @@ async def get_organization(
     """Full organization detail — caller must be a member."""
     repo = OrganizationRepository(Organization, db)
     org = await repo.get_with_members(org_id)
-    if not org:
+    if not org or not org.is_active:
         raise HTTPException(status_code=404, detail="Organization not found")
 
     is_member = any(m.user_id == current_user.user_id for m in org.members)
     if not is_member:
         raise HTTPException(status_code=403, detail="Not a member of this organization")
 
-    return _org_to_response(org)
+    return _org_to_response(org, viewer=current_user)
 
 
 # --- Update organization ---
@@ -309,6 +350,7 @@ async def get_organization(
 
 @router.put("/{org_id}", response_model=OrganizationResponse)
 async def update_organization(
+    request: Request,
     org_id: UUID,
     data: OrganizationUpdate,
     current_user: User = Depends(get_current_active_user),
@@ -321,10 +363,11 @@ async def update_organization(
         raise HTTPException(status_code=404, detail="Organization not found")
 
     member = next((m for m in org.members if m.user_id == current_user.user_id), None)
-    if not member or member.role not in ("owner", "admin"):
+    if not member or not (member.role in ("owner", "admin") or member_has_permission(member, MANAGE_SETTINGS)):
         raise HTTPException(status_code=403, detail="Insufficient permissions")
 
     update_data = data.model_dump(exclude_unset=True)
+    # Custom branding is open to every plan.
     # Convert a base64 logo data URI to a stored URL before persisting.
     if "logo_url" in update_data:
         update_data["logo_url"] = await file_storage_service.resolve(
@@ -333,7 +376,19 @@ async def update_organization(
 
     updated = await repo.update(org_id, update_data, id_field="org_id")
     org = await repo.get_with_members(org_id)
-    return _org_to_response(org)
+    if update_data:
+        ip, agent = client_ip_and_agent(request)
+        await OrgActivityLogRepository(OrgActivityLog, db).log_activity(
+            org_id=org_id,
+            category="settings",
+            verb="updated",
+            target_name="Organization profile",
+            user_id=current_user.user_id,
+            detail=f"Updated: {', '.join(sorted(update_data.keys()))}",
+            ip_address=ip,
+            user_agent=agent,
+        )
+    return _org_to_response(org, viewer=current_user)
 
 
 # --- Add member ---
@@ -354,12 +409,14 @@ async def add_member(
         raise HTTPException(status_code=404, detail="Organization not found")
 
     member = next((m for m in org.members if m.user_id == current_user.user_id), None)
-    if not member or member.role not in ("owner", "admin"):
+    if not member or not (member.role in ("owner", "admin") or member_has_permission(member, MANAGE_TEAM)):
         raise HTTPException(status_code=403, detail="Insufficient permissions")
 
     existing = await repo.get_member(org_id, data.user_id)
     if existing:
         raise HTTPException(status_code=409, detail="User is already a member")
+
+    existing_member_ids = [m.user_id for m in org.members]
 
     new_member = await repo.add_member(
         org_id=org_id,
@@ -371,6 +428,17 @@ async def add_member(
     # Every member needs these to reach the organizer dashboard at all.
     user_repo = UserRepository(User, db)
     await user_repo.grant_roles_by_name(data.user_id, ORG_MEMBER_SYSTEM_ROLES)
+
+    added_user = await user_repo.get_by_id(data.user_id, id_field="user_id")
+    await OrgNotificationService(db).notify(
+        org_id=org_id,
+        member_ids=existing_member_ids,
+        pref_key="new_member",
+        notif_type="alert",
+        title=f"{added_user.full_name if added_user else 'A new member'} joined your team",
+        description=f"Added as {data.role}.",
+        link="/dashboard/settings",
+    )
 
     return OrganizationMemberResponse(
         member_id=new_member.member_id,
@@ -386,6 +454,7 @@ async def add_member(
 
 @router.post("/{org_id}/invite", status_code=201)
 async def invite_member_by_email(
+    request: Request,
     org_id: UUID,
     data: OrganizationMemberInvite,
     current_user: User = Depends(get_current_active_user),
@@ -403,7 +472,7 @@ async def invite_member_by_email(
         raise HTTPException(status_code=404, detail="Organization not found")
 
     caller = next((m for m in org.members if m.user_id == current_user.user_id), None)
-    if not caller or caller.role not in ("owner", "admin"):
+    if not caller or not (caller.role in ("owner", "admin") or member_has_permission(caller, MANAGE_TEAM)):
         raise HTTPException(status_code=403, detail="Insufficient permissions")
 
     user_repo = UserRepository(User, db)
@@ -417,6 +486,8 @@ async def invite_member_by_email(
                 status_code=409, detail="User is already a member of this organization"
             )
 
+        existing_member_ids = [m.user_id for m in org.members]
+
         new_member = await repo.add_member(
             org_id=org_id,
             user_id=target.user_id,
@@ -425,6 +496,26 @@ async def invite_member_by_email(
         )
         if data.role == "admin":
             await user_repo.grant_roles_by_name(target.user_id, ORG_MEMBER_SYSTEM_ROLES)
+
+        ip, agent = client_ip_and_agent(request)
+        await OrgActivityLogRepository(OrgActivityLog, db).log_activity(
+            org_id=org_id,
+            category="team",
+            verb="added",
+            target_name=f"{target.full_name} as {data.role}",
+            user_id=current_user.user_id,
+            ip_address=ip,
+            user_agent=agent,
+        )
+        await OrgNotificationService(db).notify(
+            org_id=org_id,
+            member_ids=existing_member_ids,
+            pref_key="new_member",
+            notif_type="alert",
+            title=f"{target.full_name} joined your team",
+            description=f"Added as {data.role}.",
+            link="/dashboard/settings",
+        )
 
         return {
             "type": "added",
@@ -465,6 +556,18 @@ async def invite_member_by_email(
         accept_url=accept_url,
     )
     email_service.send_email(data.email, subject, html_body)
+
+    ip, agent = client_ip_and_agent(request)
+    await OrgActivityLogRepository(OrgActivityLog, db).log_activity(
+        org_id=org_id,
+        category="team",
+        verb="invited",
+        target_name=f"a new {data.role}",
+        user_id=current_user.user_id,
+        detail=data.email,
+        ip_address=ip,
+        user_agent=agent,
+    )
 
     return {
         "type": "invited",
@@ -557,6 +660,7 @@ async def accept_invitation_with_signup(
         user.user_id, ["Voter", "Event Attendee", *ORG_MEMBER_SYSTEM_ROLES]
     )
 
+    existing_member_ids = await repo.get_member_ids(inv.org_id)
     await repo.add_member(
         org_id=inv.org_id,
         user_id=user.user_id,
@@ -564,6 +668,15 @@ async def accept_invitation_with_signup(
         invited_by=inv.invited_by,
     )
     await repo.accept_invitation(inv.invitation_id)
+    await OrgNotificationService(db).notify(
+        org_id=inv.org_id,
+        member_ids=existing_member_ids,
+        pref_key="invitation_accepted",
+        notif_type="alert",
+        title=f"{data.full_name} accepted your invitation",
+        description=f"Joined as {inv.role}.",
+        link="/dashboard/settings",
+    )
 
     # Reuse the login path's token issuing so the refresh token's jti is
     # recorded and single-use rotation works the same as a normal sign-in.
@@ -599,6 +712,7 @@ async def accept_invitation(
     if existing:
         raise HTTPException(status_code=409, detail="You are already a member of this organization")
 
+    existing_member_ids = await repo.get_member_ids(inv.org_id)
     new_member = await repo.add_member(
         org_id=inv.org_id,
         user_id=current_user.user_id,
@@ -612,6 +726,15 @@ async def accept_invitation(
     )
 
     await repo.accept_invitation(inv.invitation_id)
+    await OrgNotificationService(db).notify(
+        org_id=inv.org_id,
+        member_ids=existing_member_ids,
+        pref_key="invitation_accepted",
+        notif_type="alert",
+        title=f"{current_user.full_name} accepted your invitation",
+        description=f"Joined as {inv.role}.",
+        link="/dashboard/settings",
+    )
 
     return OrganizationMemberResponse(
         member_id=new_member.member_id,
@@ -629,23 +752,24 @@ async def accept_invitation(
 
 @router.put("/{org_id}/members/{member_id}", response_model=OrganizationMemberResponse)
 async def update_member_role(
+    request: Request,
     org_id: UUID,
     member_id: UUID,
     data: OrganizationMemberUpdate,
     current_user: User = Depends(get_current_active_user),
     db: AsyncSession = Depends(get_db),
 ):
-    """Change a member's role. Owner-only; also syncs the org-admin system
+    """Change a member's role (and/or assign a custom OrgRole). Owner or
+    anyone with the manage_team permission; also syncs the org-admin system
     roles (Election Administrator, Event Organizer) to match."""
     repo = OrganizationRepository(Organization, db)
     org = await repo.get_with_members(org_id)
     if not org:
         raise HTTPException(status_code=404, detail="Organization not found")
 
-    # Only owner can change roles
     caller = next((m for m in org.members if m.user_id == current_user.user_id), None)
-    if not caller or caller.role != "owner":
-        raise HTTPException(status_code=403, detail="Only the owner can change roles")
+    if not caller or not (caller.role == "owner" or member_has_permission(caller, MANAGE_TEAM)):
+        raise HTTPException(status_code=403, detail="Insufficient permissions")
 
     # Fetch the current member record before updating so we can diff the role
     target = next((m for m in org.members if m.member_id == member_id), None)
@@ -654,10 +778,15 @@ async def update_member_role(
     if target.role == "owner":
         raise HTTPException(status_code=400, detail="Cannot change the owner's role")
 
+    if data.org_role_id is not None:
+        assigned_role = await OrgRoleRepository(OrgRole, db).get_by_id(data.org_role_id, id_field="org_role_id")
+        if not assigned_role or assigned_role.org_id != org_id:
+            raise HTTPException(status_code=404, detail="Custom role not found")
+
     previous_role = target.role
     new_role = data.role
 
-    updated = await repo.update_member_role(member_id, new_role)
+    updated = await repo.update_member_role(member_id, new_role, data.org_role_id)
     if not updated:
         raise HTTPException(status_code=404, detail="Member not found")
 
@@ -669,13 +798,19 @@ async def update_member_role(
     user_repo = UserRepository(User, db)
     await user_repo.grant_roles_by_name(updated.user_id, ORG_MEMBER_SYSTEM_ROLES)
 
-    return OrganizationMemberResponse(
-        member_id=updated.member_id,
-        org_id=updated.org_id,
-        user_id=updated.user_id,
-        role=updated.role,
-        joined_at=updated.joined_at,
+    ip, agent = client_ip_and_agent(request)
+    await OrgActivityLogRepository(OrgActivityLog, db).log_activity(
+        org_id=org_id,
+        category="team",
+        verb="changed role of",
+        target_name=target.user.full_name if target.user else "a team member",
+        user_id=current_user.user_id,
+        detail=f"{previous_role} → {new_role}",
+        ip_address=ip,
+        user_agent=agent,
     )
+
+    return _member_to_response(updated)
 
 
 # --- Remove member ---
@@ -683,6 +818,7 @@ async def update_member_role(
 
 @router.delete("/{org_id}/members/{member_id}", status_code=204)
 async def remove_member(
+    request: Request,
     org_id: UUID,
     member_id: UUID,
     current_user: User = Depends(get_current_active_user),
@@ -695,9 +831,9 @@ async def remove_member(
     if not org:
         raise HTTPException(status_code=404, detail="Organization not found")
 
-    # Owner or admin can remove members (but not the owner themselves)
+    # Owner/admin or a manage_team custom role can remove members (but not the owner themselves)
     caller = next((m for m in org.members if m.user_id == current_user.user_id), None)
-    if not caller or caller.role not in ("owner", "admin"):
+    if not caller or not (caller.role in ("owner", "admin") or member_has_permission(caller, MANAGE_TEAM)):
         raise HTTPException(status_code=403, detail="Insufficient permissions")
 
     target = next((m for m in org.members if m.member_id == member_id), None)
@@ -708,7 +844,19 @@ async def remove_member(
         raise HTTPException(status_code=400, detail="Cannot remove the organization owner")
 
     removed_user_id = target.user_id
+    removed_user_name = target.user.full_name if target.user else "a team member"
     await repo.remove_member(member_id)
+
+    ip, agent = client_ip_and_agent(request)
+    await OrgActivityLogRepository(OrgActivityLog, db).log_activity(
+        org_id=org_id,
+        category="team",
+        verb="removed",
+        target_name=removed_user_name,
+        user_id=current_user.user_id,
+        ip_address=ip,
+        user_agent=agent,
+    )
 
     # Revoke the org-granted platform roles only once they belong to no
     # organization at all — someone on two teams must not lose access to the
@@ -717,6 +865,277 @@ async def remove_member(
     if not await repo.get_user_organizations(removed_user_id):
         user_repo = UserRepository(User, db)
         await user_repo.revoke_roles_by_name(removed_user_id, ORG_MEMBER_SYSTEM_ROLES)
+
+
+# --- Pending invitations (list/revoke) ---
+
+
+@router.get("/{org_id}/invitations", response_model=List[OrganizationInvitationResponse])
+async def list_pending_invitations(
+    org_id: UUID,
+    current_user: User = Depends(get_current_active_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Every not-yet-accepted invitation for this org, for the Team settings
+    page's own list — distinct from GET /invitations/{token}, which is the
+    public single-invite lookup an invitee's link hits."""
+    org_repo = OrganizationRepository(Organization, db)
+    org = await org_repo.get_with_members(org_id)
+    if not org:
+        raise HTTPException(status_code=404, detail="Organization not found")
+
+    caller = next((m for m in org.members if m.user_id == current_user.user_id), None)
+    if not caller or not (caller.role in ("owner", "admin") or member_has_permission(caller, MANAGE_TEAM)):
+        raise HTTPException(status_code=403, detail="Insufficient permissions")
+
+    invitations = await org_repo.get_pending_invitations_for_org(org_id)
+    return [
+        OrganizationInvitationResponse(
+            invitation_id=inv.invitation_id,
+            org_id=inv.org_id,
+            org_name=org.name,
+            email=inv.email,
+            role=inv.role,
+            status=inv.status,
+            expires_at=inv.expires_at,
+            created_at=inv.created_at,
+        )
+        for inv in invitations
+    ]
+
+
+@router.delete("/{org_id}/invitations/{invitation_id}", status_code=204)
+async def revoke_invitation(
+    org_id: UUID,
+    invitation_id: UUID,
+    current_user: User = Depends(get_current_active_user),
+    db: AsyncSession = Depends(get_db),
+):
+    org_repo = OrganizationRepository(Organization, db)
+    org = await org_repo.get_with_members(org_id)
+    if not org:
+        raise HTTPException(status_code=404, detail="Organization not found")
+
+    caller = next((m for m in org.members if m.user_id == current_user.user_id), None)
+    if not caller or not (caller.role in ("owner", "admin") or member_has_permission(caller, MANAGE_TEAM)):
+        raise HTTPException(status_code=403, detail="Insufficient permissions")
+
+    deleted = await org_repo.delete_invitation(org_id, invitation_id)
+    if not deleted:
+        raise HTTPException(status_code=404, detail="Invitation not found")
+
+
+# --- Custom org roles (CRUD) ---
+
+
+@router.post("/{org_id}/roles", response_model=OrgRoleResponse, status_code=201)
+async def create_org_role(
+    request: Request,
+    org_id: UUID,
+    data: OrgRoleCreate,
+    current_user: User = Depends(get_current_active_user),
+    db: AsyncSession = Depends(get_db),
+):
+    org_repo = OrganizationRepository(Organization, db)
+    org = await org_repo.get_with_members(org_id)
+    if not org:
+        raise HTTPException(status_code=404, detail="Organization not found")
+
+    caller = next((m for m in org.members if m.user_id == current_user.user_id), None)
+    if not caller or not (caller.role in ("owner", "admin") or member_has_permission(caller, MANAGE_TEAM)):
+        raise HTTPException(status_code=403, detail="Insufficient permissions")
+
+    role_repo = OrgRoleRepository(OrgRole, db)
+    if await role_repo.get_by_name(org_id, data.name):
+        raise HTTPException(status_code=409, detail=f"A role named '{data.name}' already exists")
+
+    role = await role_repo.create({"org_id": org_id, "name": data.name, "permissions": data.permissions})
+
+    ip, agent = client_ip_and_agent(request)
+    await OrgActivityLogRepository(OrgActivityLog, db).log_activity(
+        org_id=org_id, category="team", verb="created a custom role", target_name=role.name,
+        user_id=current_user.user_id, ip_address=ip, user_agent=agent,
+    )
+    return OrgRoleResponse.model_validate(role)
+
+
+@router.get("/{org_id}/roles", response_model=List[OrgRoleResponse])
+async def list_org_roles(
+    org_id: UUID,
+    current_user: User = Depends(get_current_active_user),
+    db: AsyncSession = Depends(get_db),
+):
+    org_repo = OrganizationRepository(Organization, db)
+    org = await org_repo.get_with_members(org_id)
+    if not org:
+        raise HTTPException(status_code=404, detail="Organization not found")
+    if not any(m.user_id == current_user.user_id for m in org.members):
+        raise HTTPException(status_code=403, detail="Not a member of this organization")
+
+    roles = await OrgRoleRepository(OrgRole, db).get_by_org(org_id)
+    return [OrgRoleResponse.model_validate(r) for r in roles]
+
+
+@router.put("/{org_id}/roles/{org_role_id}", response_model=OrgRoleResponse)
+async def update_org_role(
+    org_id: UUID,
+    org_role_id: UUID,
+    data: OrgRoleUpdate,
+    current_user: User = Depends(get_current_active_user),
+    db: AsyncSession = Depends(get_db),
+):
+    org_repo = OrganizationRepository(Organization, db)
+    org = await org_repo.get_with_members(org_id)
+    if not org:
+        raise HTTPException(status_code=404, detail="Organization not found")
+
+    caller = next((m for m in org.members if m.user_id == current_user.user_id), None)
+    if not caller or not (caller.role in ("owner", "admin") or member_has_permission(caller, MANAGE_TEAM)):
+        raise HTTPException(status_code=403, detail="Insufficient permissions")
+
+    role_repo = OrgRoleRepository(OrgRole, db)
+    role = await role_repo.get_by_id(org_role_id, id_field="org_role_id")
+    if not role or role.org_id != org_id:
+        raise HTTPException(status_code=404, detail="Custom role not found")
+
+    existing = await role_repo.get_by_name(org_id, data.name)
+    if existing and existing.org_role_id != org_role_id:
+        raise HTTPException(status_code=409, detail=f"A role named '{data.name}' already exists")
+
+    updated = await role_repo.update(
+        org_role_id, {"name": data.name, "permissions": data.permissions}, id_field="org_role_id"
+    )
+    return OrgRoleResponse.model_validate(updated)
+
+
+@router.delete("/{org_id}/roles/{org_role_id}", status_code=204)
+async def delete_org_role(
+    org_id: UUID,
+    org_role_id: UUID,
+    current_user: User = Depends(get_current_active_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Deletes the role; any member holding it just loses its permission
+    flags going forward (org_role_id is ON DELETE SET NULL), not removed
+    from the org."""
+    org_repo = OrganizationRepository(Organization, db)
+    org = await org_repo.get_with_members(org_id)
+    if not org:
+        raise HTTPException(status_code=404, detail="Organization not found")
+
+    caller = next((m for m in org.members if m.user_id == current_user.user_id), None)
+    if not caller or not (caller.role in ("owner", "admin") or member_has_permission(caller, MANAGE_TEAM)):
+        raise HTTPException(status_code=403, detail="Insufficient permissions")
+
+    role_repo = OrgRoleRepository(OrgRole, db)
+    role = await role_repo.get_by_id(org_role_id, id_field="org_role_id")
+    if not role or role.org_id != org_id:
+        raise HTTPException(status_code=404, detail="Custom role not found")
+
+    await role_repo.delete(org_role_id, id_field="org_role_id")
+
+
+# --- Danger zone: transfer ownership / delete (deactivate) organization ---
+
+
+@router.put("/{org_id}/transfer-ownership", response_model=OrganizationResponse)
+async def transfer_ownership(
+    request: Request,
+    org_id: UUID,
+    data: TransferOwnershipRequest,
+    current_user: User = Depends(get_current_active_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Hand full ownership to another member. Owner-only — unlike other
+    settings actions, a manage_settings/manage_team custom role is not
+    enough, since this also changes who can delete the organization."""
+    repo = OrganizationRepository(Organization, db)
+    org = await repo.get_with_members(org_id)
+    if not org or not org.is_active:
+        raise HTTPException(status_code=404, detail="Organization not found")
+
+    caller = next((m for m in org.members if m.user_id == current_user.user_id), None)
+    if not caller or caller.role != "owner":
+        raise HTTPException(status_code=403, detail="Only the organization owner can transfer ownership")
+
+    target = next((m for m in org.members if m.member_id == data.new_owner_member_id), None)
+    if not target:
+        raise HTTPException(status_code=404, detail="Member not found")
+    if target.member_id == caller.member_id:
+        raise HTTPException(status_code=400, detail="You already own this organization")
+
+    org = await repo.transfer_ownership(org, caller, target)
+
+    ip, agent = client_ip_and_agent(request)
+    await OrgActivityLogRepository(OrgActivityLog, db).log_activity(
+        org_id=org_id,
+        category="settings",
+        verb="transferred ownership to",
+        target_name=target.user.full_name if target.user else "a team member",
+        user_id=current_user.user_id,
+        ip_address=ip,
+        user_agent=agent,
+    )
+
+    org = await repo.get_with_members(org_id)
+    return _org_to_response(org, viewer=current_user)
+
+
+@router.delete("/{org_id}", status_code=204)
+async def delete_organization(
+    request: Request,
+    org_id: UUID,
+    current_user: User = Depends(get_current_active_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Deactivates the organization rather than destroying its rows — the
+    elections/events/votes/tickets/payouts underneath it are real financial
+    and voting records that must stay recoverable and auditable. Blocked
+    while any election/event is live or any payout is still pending, since
+    either would strand real money or an in-progress vote."""
+    repo = OrganizationRepository(Organization, db)
+    org = await repo.get_with_members(org_id)
+    if not org or not org.is_active:
+        raise HTTPException(status_code=404, detail="Organization not found")
+
+    caller = next((m for m in org.members if m.user_id == current_user.user_id), None)
+    if not caller or caller.role != "owner":
+        raise HTTPException(status_code=403, detail="Only the organization owner can delete this organization")
+
+    election_repo = ElectionRepository(Election, db)
+    event_repo = EventRepository(Event, db)
+    elections = await election_repo.get_by_org(org_id)
+    events = await event_repo.get_by_org(org_id)
+
+    if any(e.status == "active" for e in elections) or any(e.status == "active" for e in events):
+        raise HTTPException(
+            status_code=400,
+            detail="Cannot delete an organization with a live election or event — close it first",
+        )
+
+    payout_repo = PayoutRequestRepository(PayoutRequest, db)
+    _, _, pending_events, pending_elections = await payout_repo.get_totals_by_parents(
+        event_ids=[e.event_id for e in events],
+        election_ids=[e.election_id for e in elections],
+    )
+    if pending_events or pending_elections:
+        raise HTTPException(
+            status_code=400,
+            detail="Cannot delete an organization with a pending payout request — resolve it first",
+        )
+
+    await repo.deactivate(org_id)
+
+    ip, agent = client_ip_and_agent(request)
+    await OrgActivityLogRepository(OrgActivityLog, db).log_activity(
+        org_id=org_id,
+        category="settings",
+        verb="deleted",
+        target_name=org.name,
+        user_id=current_user.user_id,
+        ip_address=ip,
+        user_agent=agent,
+    )
 
 
 # --- KYC document upload ---
@@ -761,7 +1180,7 @@ async def upload_organization_logo(
 
     await repo.update(org_id, {"logo_url": logo_url}, id_field="org_id")
     org = await repo.get_with_members(org_id)
-    return _org_to_response(org)
+    return _org_to_response(org, viewer=current_user)
 
 
 @router.post("/{org_id}/upload-documents", response_model=OrganizationResponse)
@@ -792,7 +1211,9 @@ async def upload_kyc_documents(
         content = await upload.read()
         if len(content) > MAX_FILE_SIZE:
             raise HTTPException(status_code=400, detail=f"File '{upload.filename}' exceeds 100 MB limit")
-        return await file_storage_service.upload(
+        # upload_private (not upload): identity documents must resolve to the
+        # authenticated /files/private route, never the public image one.
+        return await file_storage_service.upload_private(
             content=content,
             filename=upload.filename or f"{label}{ext}",
             content_type=upload.content_type,
@@ -808,4 +1229,4 @@ async def upload_kyc_documents(
     )
 
     org = await repo.get_with_members(org_id)
-    return _org_to_response(org)
+    return _org_to_response(org, viewer=current_user)

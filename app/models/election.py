@@ -16,6 +16,7 @@ if TYPE_CHECKING:
     from app.models.user import User
     from app.models.vote import Vote, VoteReceipt
     from app.models.event import Event
+    from app.models.organization import Organization
 
 
 class Election(TimestampMixin, Base):
@@ -46,6 +47,29 @@ class Election(TimestampMixin, Base):
     created_by: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), ForeignKey("users.user_id"), nullable=False
     )
+    # Nullable on purpose: a creator with no organization runs this election
+    # personally (see OrganizationRepository.can_create's "no org = your own
+    # organizer" rule) — that's not an omission to backfill later, it's the
+    # permanent state for a personal election. Row-level security policies
+    # scope by this column directly instead of re-deriving it from created_by
+    # on every query, the same gap that once caused get_organization_stats to
+    # silently miss teammates' elections (see OrganizationRepository.get_teammate_ids).
+    org_id: Mapped[Optional[uuid.UUID]] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("organizations.org_id"), nullable=True, index=True
+    )
+
+    # Chosen at launch, locked in until the election closes (see core/plans.py).
+    plan: Mapped[str] = mapped_column(String(20), default="standard", nullable=False)
+    commission_rate_override_bps: Mapped[Optional[int]] = mapped_column(
+        Integer, nullable=True
+    )
+    # Who bears the platform commission: "organizer" (default, deducted from
+    # the payout, buyer pays exactly vote_price) or "buyer" (added as a
+    # surcharge on top, organizer nets the full vote_price). See
+    # app/core/financial_breakdown.py for where this is applied.
+    fee_payer: Mapped[str] = mapped_column(
+        String(20), default="organizer", server_default="organizer", nullable=False
+    )
 
     # --- New fields ---
     banner_image_url: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
@@ -74,6 +98,9 @@ class Election(TimestampMixin, Base):
     # Relationships
     creator: Mapped["User"] = relationship(
         back_populates="created_elections", lazy="select"
+    )
+    organization: Mapped[Optional["Organization"]] = relationship(
+        foreign_keys=[org_id], lazy="select"
     )
     categories: Mapped[List["Category"]] = relationship(
         back_populates="election", cascade="all, delete-orphan", lazy="selectin"
@@ -210,6 +237,30 @@ class VoterOTP(Base):
         nullable=False, index=True,
     )
     email: Mapped[str] = mapped_column(String(255), nullable=False)
+    otp_code: Mapped[str] = mapped_column(String(6), nullable=False,
+                                          default=lambda: f"{random.randint(0, 999999):06d}")
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    used: Mapped[bool] = mapped_column(Boolean, default=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+
+
+class SmsVoterOTP(Base):
+    """One-time passcode verifying an anonymous voter's phone via SMS before a
+    free public vote is cast — Premium+ alternative to VoterOTP's email
+    channel (see core/plans.py). Costs money to send, unlike email, so it's
+    gated to elections/events on a plan that meets the Premium tier."""
+    __tablename__ = "sms_voter_otps"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+    category_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("categories.category_id", ondelete="CASCADE"),
+        nullable=False, index=True,
+    )
+    phone: Mapped[str] = mapped_column(String(20), nullable=False)
     otp_code: Mapped[str] = mapped_column(String(6), nullable=False,
                                           default=lambda: f"{random.randint(0, 999999):06d}")
     expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)

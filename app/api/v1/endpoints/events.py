@@ -3,27 +3,34 @@ from pathlib import Path
 from typing import List, Optional
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
+from fastapi import APIRouter, Depends, File, HTTPException, Request, UploadFile
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
 from app.core.dependencies import get_current_active_user, require_roles
+from app.core.ownership import owns_event as _owns_event
+from app.core.ownership import require_event_ownership as _require_event_ownership
+from app.core.request_meta import client_ip_and_agent
 from app.core.security import create_ticket_scan_token
 from app.core.slug import generate_slug
 from app.core.ussd import generate_unique_ussd_code
 from app.db.base import get_db
+from app.db.tenant import get_tenant_db
 from app.models.audit_log import AuditLog
 from app.models.election import Candidate, Category
 from app.models.event import Event, TicketType
+from app.models.org_activity_log import OrgActivityLog
 from app.models.organization import Organization
 from app.models.platform_setting import PlatformSetting
 from app.models.user import User
 from app.repositories.audit_log_repository import AuditLogRepository
 from app.repositories.election_repository import CandidateRepository, CategoryRepository
 from app.repositories.event_repository import EventRepository, TicketTypeRepository
+from app.repositories.org_activity_log_repository import OrgActivityLogRepository
 from app.repositories.organization_repository import OrganizationRepository
 from app.services.file_storage_service import file_storage_service
+from app.services.org_notification_service import OrgNotificationService
 from app.schemas.election import (
     CandidateCreate,
     CandidateResponse,
@@ -36,6 +43,7 @@ from app.schemas.election import (
 from app.schemas.event import (
     EventCreate,
     EventResponse,
+    EventSummaryResponse,
     EventUpdate,
     EventWithTicketTypes,
     TicketTypeCreate,
@@ -43,11 +51,11 @@ from app.schemas.event import (
     TicketTypeUpdate,
 )
 from app.schemas.ticket import TicketScanTokenResponse
+from app.services.event_summary_service import EventSummaryService
 
 router = APIRouter(prefix="/events", tags=["Events"])
 
 ORGANIZER_ROLES = ("System Administrator", "Event Organizer")
-SYSTEM_ADMIN = "System Administrator"
 
 ALLOWED_IMAGE_TYPES = {".jpg", ".jpeg", ".png", ".webp"}
 MAX_IMAGE_SIZE = 100 * 1024 * 1024  # 100 MB
@@ -67,23 +75,6 @@ def scan_link_expiry(event_date: date) -> datetime:
     ).replace(tzinfo=timezone.utc)
 
 
-async def _owns_event(event, current_user: User, db: AsyncSession) -> bool:
-    """The creator, a System Administrator, or an organization teammate
-    holding a managing role. Events carry no org_id, so organization access
-    is resolved through shared membership with the creator."""
-    user_roles = [ur.role.role_name for ur in current_user.user_roles]
-    if event.created_by == current_user.user_id or SYSTEM_ADMIN in user_roles:
-        return True
-    return await OrganizationRepository(Organization, db).can_manage_with(
-        current_user.user_id, event.created_by
-    )
-
-
-async def _require_event_ownership(event, current_user: User, db: AsyncSession) -> None:
-    """Raise 403 unless the caller created this event, is a teammate in
-    its organization, or is a System Administrator."""
-    if not await _owns_event(event, current_user, db):
-        raise HTTPException(status_code=403, detail="You do not have access to this event")
 
 
 @router.get("/user/{user_id}", response_model=List[EventResponse])
@@ -102,14 +93,14 @@ async def list_user_public_events(
 
 @router.post("", response_model=EventResponse, status_code=201)
 async def create_event(
+    request: Request,
     data: EventCreate,
     current_user: User = Depends(require_roles(*ORGANIZER_ROLES)),
-    db: AsyncSession = Depends(get_db),
+    db: AsyncSession = Depends(get_tenant_db),
 ):
     """Create an event, auto-generating a slug and USSD code."""
-    if not await OrganizationRepository(Organization, db).can_create(
-        current_user.user_id
-    ):
+    org_repo = OrganizationRepository(Organization, db)
+    if not await org_repo.can_create(current_user.user_id):
         raise HTTPException(
             status_code=403,
             detail=(
@@ -125,7 +116,11 @@ async def create_event(
     create_data["slug"] = create_data.get("slug") or generate_slug(data.title)
     create_data["ussd_code"] = await generate_unique_ussd_code(db)
     event = await event_repo.create(
-        {**create_data, "created_by": current_user.user_id}
+        {
+            **create_data,
+            "created_by": current_user.user_id,
+            "org_id": await org_repo.get_primary_org_id_for_user(current_user.user_id),
+        }
     )
 
     await audit_repo.log_action(
@@ -134,19 +129,31 @@ async def create_event(
         entity_id=event.event_id,
         user_id=current_user.user_id,
     )
+    if event.org_id is not None:
+        ip, agent = client_ip_and_agent(request)
+        await OrgActivityLogRepository(OrgActivityLog, db).log_activity(
+            org_id=event.org_id,
+            category="event",
+            verb="created event",
+            target_name=event.title,
+            user_id=current_user.user_id,
+            ip_address=ip,
+            user_agent=agent,
+        )
 
     return EventResponse.model_validate(event)
 
 
-@router.get("", response_model=List[EventResponse])
+@router.get("", response_model=List[EventSummaryResponse])
 async def list_events(
-    db: AsyncSession = Depends(get_db),
+    db: AsyncSession = Depends(get_tenant_db),
     skip: int = 0,
     limit: int = 20,
     category: Optional[str] = None,
     current_user: User = Depends(require_roles(*ORGANIZER_ROLES)),
 ):
-    """Events belonging to the caller's organization.
+    """Events belonging to the caller's organization, with the grid's
+    aggregate stats (tickets sold/capacity/revenue) bulk-computed alongside.
 
     Scoped to the caller plus their teammates, not the caller alone — an
     added member created nothing, and scoping to the individual made them
@@ -159,7 +166,20 @@ async def list_events(
     events = await event_repo.get_events_by_creators(
         teammate_ids, skip=skip, limit=limit
     )
-    return [EventResponse.model_validate(e) for e in events]
+    summaries = await EventSummaryService(db).get_summaries([e.event_id for e in events])
+
+    responses = []
+    for e in events:
+        resp = EventSummaryResponse.model_validate(e)
+        stats = summaries[e.event_id]
+        resp.tickets_sold = stats.tickets_sold
+        resp.ticket_capacity = stats.capacity
+        resp.lowest_ticket_price = stats.lowest_ticket_price
+        resp.has_voting = stats.has_voting
+        resp.revenue_ghs = stats.revenue_ghs
+        resp.revenue_growth_pct = stats.revenue_growth_pct
+        responses.append(resp)
+    return responses
 
 
 @router.get("/public", response_model=List[EventResponse])
@@ -168,15 +188,16 @@ async def list_public_events(
     skip: int = 0,
     limit: int = 20,
     category: Optional[str] = None,
+    search: Optional[str] = None,
 ):
-    """List all published events. No authentication required.
+    """List all published (and cancelled — see get_published_events) events. No authentication required.
 
     Must stay registered before GET /{event_id} — otherwise FastAPI matches
     this path against that route first and tries (and fails) to parse
     "public" as a UUID.
     """
     event_repo = EventRepository(Event, db)
-    events = await event_repo.get_published_events(skip=skip, limit=limit, category=category)
+    events = await event_repo.get_published_events(skip=skip, limit=limit, category=category, search=search)
     return [EventResponse.model_validate(e) for e in events]
 
 
@@ -254,10 +275,11 @@ async def get_public_event_by_slug(
 
 @router.put("/{event_id}", response_model=EventResponse)
 async def update_event(
+    request: Request,
     event_id: UUID,
     data: EventUpdate,
     current_user: User = Depends(require_roles(*ORGANIZER_ROLES)),
-    db: AsyncSession = Depends(get_db),
+    db: AsyncSession = Depends(get_tenant_db),
 ):
     """Partial update of an event's own fields."""
     event_repo = EventRepository(Event, db)
@@ -268,6 +290,18 @@ async def update_event(
 
     update_data = data.model_dump(exclude_unset=True)
     updated = await event_repo.update(event_id, update_data, id_field="event_id")
+    if updated.org_id is not None and update_data:
+        ip, agent = client_ip_and_agent(request)
+        await OrgActivityLogRepository(OrgActivityLog, db).log_activity(
+            org_id=updated.org_id,
+            category="event",
+            verb="updated details for",
+            target_name=updated.title,
+            user_id=current_user.user_id,
+            detail=f"Updated: {', '.join(sorted(update_data.keys()))}",
+            ip_address=ip,
+            user_agent=agent,
+        )
     return EventResponse.model_validate(updated)
 
 
@@ -275,7 +309,7 @@ async def update_event(
 async def delete_event(
     event_id: UUID,
     current_user: User = Depends(require_roles(*ORGANIZER_ROLES)),
-    db: AsyncSession = Depends(get_db),
+    db: AsyncSession = Depends(get_tenant_db),
 ):
     """Delete a draft event (published events must be cancelled instead)."""
     event_repo = EventRepository(Event, db)
@@ -297,7 +331,7 @@ async def upload_event_banner(
     event_id: UUID,
     file: UploadFile = File(...),
     current_user: User = Depends(require_roles(*ORGANIZER_ROLES)),
-    db: AsyncSession = Depends(get_db),
+    db: AsyncSession = Depends(get_tenant_db),
 ):
     """Upload an event banner. Returns { banner_image_url } for use in create/update."""
     event_repo = EventRepository(Event, db)
@@ -331,7 +365,7 @@ async def upload_event_candidate_image(
     event_id: UUID,
     file: UploadFile = File(...),
     current_user: User = Depends(require_roles(*ORGANIZER_ROLES)),
-    db: AsyncSession = Depends(get_db),
+    db: AsyncSession = Depends(get_tenant_db),
 ):
     """Upload a nominee photo. Returns { image_url } for use in add_candidate."""
     event_repo = EventRepository(Event, db)
@@ -364,7 +398,7 @@ async def upload_event_candidate_image(
 async def publish_event(
     event_id: UUID,
     current_user: User = Depends(require_roles(*ORGANIZER_ROLES)),
-    db: AsyncSession = Depends(get_db),
+    db: AsyncSession = Depends(get_tenant_db),
 ):
     """Publish a draft/cancelled event, after checking every category (if
     any) has at least one candidate."""
@@ -391,6 +425,19 @@ async def publish_event(
             )
 
     await event_repo.update_status(event_id, "published")
+
+    if event.org_id is not None:
+        member_ids = await OrganizationRepository(Organization, db).get_member_ids(event.org_id)
+        await OrgNotificationService(db).notify(
+            org_id=event.org_id,
+            member_ids=member_ids,
+            pref_key="event_published",
+            notif_type="alert",
+            title=f"{event.title} is now live",
+            description="Your event has been published.",
+            link=f"/dashboard/events?highlight={event_id}",
+        )
+
     return {"message": "Event published successfully"}
 
 
@@ -398,7 +445,7 @@ async def publish_event(
 async def unpublish_event(
     event_id: UUID,
     current_user: User = Depends(require_roles(*ORGANIZER_ROLES)),
-    db: AsyncSession = Depends(get_db),
+    db: AsyncSession = Depends(get_tenant_db),
 ):
     """Revert a published event back to draft. Any tickets already sold stay
     valid — this only hides the event from public listings and re-locks it
@@ -419,7 +466,7 @@ async def unpublish_event(
 async def cancel_event(
     event_id: UUID,
     current_user: User = Depends(require_roles(*ORGANIZER_ROLES)),
-    db: AsyncSession = Depends(get_db),
+    db: AsyncSession = Depends(get_tenant_db),
 ):
     """Cancel an event (distinct from unpublish — see get_event_scan_token's
     neighbor unpublish_event for the reversible, no-audit-trail variant)."""
@@ -445,7 +492,7 @@ async def cancel_event(
 async def get_event_scan_token(
     event_id: UUID,
     current_user: User = Depends(require_roles(*ORGANIZER_ROLES)),
-    db: AsyncSession = Depends(get_db),
+    db: AsyncSession = Depends(get_tenant_db),
 ):
     """Mint (or re-mint — it's deterministic per event/day) a no-auth
     check-in link the organizer can hand to volunteers who have no
@@ -470,10 +517,11 @@ async def get_event_scan_token(
     status_code=201,
 )
 async def create_ticket_type(
+    request: Request,
     event_id: UUID,
     data: TicketTypeCreate,
     current_user: User = Depends(require_roles(*ORGANIZER_ROLES)),
-    db: AsyncSession = Depends(get_db),
+    db: AsyncSession = Depends(get_tenant_db),
 ):
     """Add a ticket type (price tier) to an event."""
     event_repo = EventRepository(Event, db)
@@ -486,6 +534,18 @@ async def create_ticket_type(
     ticket_type = await tt_repo.create(
         {**data.model_dump(), "event_id": event_id}
     )
+    if event.org_id is not None:
+        ip, agent = client_ip_and_agent(request)
+        await OrgActivityLogRepository(OrgActivityLog, db).log_activity(
+            org_id=event.org_id,
+            category="ticketing",
+            verb="added ticket type",
+            target_name=f"{ticket_type.type_name} · {event.title}",
+            user_id=current_user.user_id,
+            detail=f"GH₵{ticket_type.price:.2f}",
+            ip_address=ip,
+            user_agent=agent,
+        )
     return TicketTypeResponse.model_validate(ticket_type)
 
 
@@ -507,11 +567,12 @@ async def list_ticket_types(
     response_model=TicketTypeResponse,
 )
 async def update_ticket_type(
+    request: Request,
     event_id: UUID,
     type_id: UUID,
     data: TicketTypeUpdate,
     current_user: User = Depends(require_roles(*ORGANIZER_ROLES)),
-    db: AsyncSession = Depends(get_db),
+    db: AsyncSession = Depends(get_tenant_db),
 ):
     """Partial update of a ticket type."""
     event_repo = EventRepository(Event, db)
@@ -527,6 +588,18 @@ async def update_ticket_type(
 
     update_data = data.model_dump(exclude_unset=True)
     updated = await tt_repo.update(type_id, update_data, id_field="ticket_type_id")
+    if event.org_id is not None and "price" in update_data:
+        ip, agent = client_ip_and_agent(request)
+        await OrgActivityLogRepository(OrgActivityLog, db).log_activity(
+            org_id=event.org_id,
+            category="ticketing",
+            verb="updated pricing for",
+            target_name=f"{updated.type_name} · {event.title}",
+            user_id=current_user.user_id,
+            detail=f"Now GH₵{updated.price:.2f}",
+            ip_address=ip,
+            user_agent=agent,
+        )
     return TicketTypeResponse.model_validate(updated)
 
 
@@ -538,7 +611,7 @@ async def delete_ticket_type(
     event_id: UUID,
     type_id: UUID,
     current_user: User = Depends(require_roles(*ORGANIZER_ROLES)),
-    db: AsyncSession = Depends(get_db),
+    db: AsyncSession = Depends(get_tenant_db),
 ):
     """Delete a ticket type that has never sold any tickets."""
     event_repo = EventRepository(Event, db)
@@ -572,7 +645,7 @@ async def add_event_category(
     event_id: UUID,
     data: CategoryCreate,
     current_user: User = Depends(require_roles(*ORGANIZER_ROLES)),
-    db: AsyncSession = Depends(get_db),
+    db: AsyncSession = Depends(get_tenant_db),
 ):
     """Add a voting category to a draft event."""
     event_repo = EventRepository(Event, db)
@@ -622,7 +695,7 @@ async def update_event_category(
     category_id: UUID,
     data: CategoryUpdate,
     current_user: User = Depends(require_roles(*ORGANIZER_ROLES)),
-    db: AsyncSession = Depends(get_db),
+    db: AsyncSession = Depends(get_tenant_db),
 ):
     """Partial update of a draft event's category."""
     event_repo = EventRepository(Event, db)
@@ -651,7 +724,7 @@ async def delete_event_category(
     event_id: UUID,
     category_id: UUID,
     current_user: User = Depends(require_roles(*ORGANIZER_ROLES)),
-    db: AsyncSession = Depends(get_db),
+    db: AsyncSession = Depends(get_tenant_db),
 ):
     """Delete a draft event's category."""
     event_repo = EventRepository(Event, db)
@@ -683,7 +756,7 @@ async def add_event_candidate(
     event_id: UUID,
     data: CandidateCreate,
     current_user: User = Depends(require_roles(*ORGANIZER_ROLES)),
-    db: AsyncSession = Depends(get_db),
+    db: AsyncSession = Depends(get_tenant_db),
 ):
     """Add a nominee to one of a draft event's categories."""
     event_repo = EventRepository(Event, db)
@@ -734,7 +807,7 @@ async def update_event_candidate(
     candidate_id: UUID,
     data: CandidateUpdate,
     current_user: User = Depends(require_roles(*ORGANIZER_ROLES)),
-    db: AsyncSession = Depends(get_db),
+    db: AsyncSession = Depends(get_tenant_db),
 ):
     """Partial update of a draft event's nominee."""
     event_repo = EventRepository(Event, db)
@@ -763,7 +836,7 @@ async def remove_event_candidate(
     event_id: UUID,
     candidate_id: UUID,
     current_user: User = Depends(require_roles(*ORGANIZER_ROLES)),
-    db: AsyncSession = Depends(get_db),
+    db: AsyncSession = Depends(get_tenant_db),
 ):
     """Remove a nominee from an event."""
     event_repo = EventRepository(Event, db)

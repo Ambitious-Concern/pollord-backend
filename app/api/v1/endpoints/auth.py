@@ -1,6 +1,7 @@
 from fastapi import APIRouter, Depends, Request
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.request_meta import client_ip
 from app.core.config import settings
 from app.db.base import get_db
 from app.middleware.rate_limit import limiter
@@ -10,11 +11,13 @@ from app.repositories.audit_log_repository import AuditLogRepository
 from app.repositories.user_repository import UserRepository
 from app.schemas.user import (
     ForgotPassword,
+    LoginResponse,
     LogoutRequest,
     RefreshTokenRequest,
     ResendOtp,
     ResetPassword,
     TokenResponse,
+    TwoFactorLoginRequest,
     UserCreate,
     UserLogin,
     UserResponse,
@@ -44,23 +47,43 @@ async def register(
     service = _get_auth_service(db)
     return await service.register(
         data,
-        ip=request.client.host if request.client else None,
+        ip=client_ip(request),
         user_agent=request.headers.get("user-agent"),
     )
 
 
-@router.post("/login", response_model=TokenResponse)
+@router.post("/login", response_model=LoginResponse)
 @limiter.limit(settings.RATE_LIMIT_AUTH)
 async def login(
     data: UserLogin,
     request: Request,
     db: AsyncSession = Depends(get_db),
 ):
-    """Verify credentials and return an access+refresh token pair."""
+    """Verify credentials and return an access+refresh token pair — or, for
+    a 2FA-enabled account, a short-lived mfa_token instead (see
+    /auth/2fa/login-verify)."""
     service = _get_auth_service(db)
     return await service.login(
         data,
-        ip=request.client.host if request.client else None,
+        ip=client_ip(request),
+        user_agent=request.headers.get("user-agent"),
+    )
+
+
+@router.post("/2fa/login-verify", response_model=TokenResponse)
+@limiter.limit(settings.RATE_LIMIT_AUTH)
+async def verify_2fa_login(
+    data: TwoFactorLoginRequest,
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+):
+    """Exchange the mfa_token from a 2FA-challenged /auth/login for real
+    tokens, given a valid TOTP or recovery code."""
+    service = _get_auth_service(db)
+    return await service.verify_2fa_and_login(
+        data.mfa_token,
+        data.code,
+        ip=client_ip(request),
         user_agent=request.headers.get("user-agent"),
     )
 
@@ -75,7 +98,11 @@ async def refresh_token(
     """Exchange a refresh token for a new pair (single-use — see
     AuthService.refresh_token)."""
     service = _get_auth_service(db)
-    return await service.refresh_token(data.refresh_token)
+    return await service.refresh_token(
+        data.refresh_token,
+        ip=client_ip(request),
+        user_agent=request.headers.get("user-agent"),
+    )
 
 
 @router.post("/logout", status_code=204)

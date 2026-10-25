@@ -1,0 +1,2 @@
+0 2 * * * /scripts/backup.sh
+30 2 * * * /scripts/prune_wal.sh

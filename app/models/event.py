@@ -16,6 +16,7 @@ if TYPE_CHECKING:
     from app.models.ticket import Ticket, TicketPurchase
     from app.models.user import User
     from app.models.election import Category
+    from app.models.organization import Organization
 
 
 class Event(TimestampMixin, Base):
@@ -72,10 +73,31 @@ class Event(TimestampMixin, Base):
     created_by: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), ForeignKey("users.user_id"), nullable=False
     )
+    # See Election.org_id for why this is nullable and what it's for — same
+    # reasoning applies here verbatim.
+    org_id: Mapped[Optional[uuid.UUID]] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("organizations.org_id"), nullable=True, index=True
+    )
+
+    # Chosen at launch, locked in until the event closes (see core/plans.py).
+    plan: Mapped[str] = mapped_column(String(20), default="standard", nullable=False)
+    commission_rate_override_bps: Mapped[Optional[int]] = mapped_column(
+        Integer, nullable=True
+    )
+    # Who bears the platform commission: "organizer" (default, deducted from
+    # the payout, buyer pays exactly the ticket price) or "buyer" (added as a
+    # surcharge on top, organizer nets the full ticket price). See
+    # app/core/financial_breakdown.py for where this is applied.
+    fee_payer: Mapped[str] = mapped_column(
+        String(20), default="organizer", server_default="organizer", nullable=False
+    )
 
     # Relationships
     creator: Mapped["User"] = relationship(
         back_populates="created_events", lazy="select"
+    )
+    organization: Mapped[Optional["Organization"]] = relationship(
+        foreign_keys=[org_id], lazy="select"
     )
     ticket_types: Mapped[List["TicketType"]] = relationship(
         back_populates="event", cascade="all, delete-orphan", lazy="selectin"

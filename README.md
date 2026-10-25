@@ -97,7 +97,7 @@ cp .env.example .env
 Edit `.env` and update the hostnames from Docker service names to `localhost`:
 
 ```
-DATABASE_URL=postgresql+asyncpg://pollard:pollard@localhost:5432/pollard
+DATABASE_URL=postgresql+asyncpg://pollard:pollard@localhost:55432/pollard
 REDIS_URL=redis://localhost:6379/0
 ```
 

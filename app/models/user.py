@@ -2,10 +2,11 @@ import uuid
 from datetime import datetime
 from typing import TYPE_CHECKING, List, Optional
 
-from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, JSON, String, func
+from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, JSON, LargeBinary, String, Text, func
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
+from app.core.security import decrypt_text, encrypt_text
 from app.models.base import Base, TimestampMixin
 
 if TYPE_CHECKING:
@@ -34,6 +35,15 @@ class User(TimestampMixin, Base):
     account_status: Mapped[str] = mapped_column(
         String(20), default="active", index=True
     )
+    # Profile picture. Null falls back to an initials monogram client-side,
+    # so this stays optional rather than needing a generated placeholder row.
+    avatar_url: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    # Set the first time an organizer finishes (or skips) the welcome flow.
+    # Stored server-side rather than in localStorage so the tour shows once
+    # per account, not once per browser.
+    onboarding_completed_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
     last_login_at: Mapped[Optional[datetime]] = mapped_column(
         DateTime(timezone=True), nullable=True
     )
@@ -50,6 +60,28 @@ class User(TimestampMixin, Base):
     locked_until: Mapped[Optional[datetime]] = mapped_column(
         DateTime(timezone=True), nullable=True
     )
+    # AES-256-GCM encrypted (same primitive as vote/support-message
+    # encryption) — never stored or logged as plaintext. Use the
+    # `totp_secret` property below rather than this column directly. Set as
+    # soon as setup starts (before `totp_enabled` flips to True), so a
+    # re-scanned QR from an abandoned setup attempt just replaces it.
+    totp_secret_encrypted: Mapped[Optional[bytes]] = mapped_column(LargeBinary, nullable=True)
+    totp_enabled: Mapped[bool] = mapped_column(Boolean, default=False, server_default="false", nullable=False)
+    # Bcrypt-hashed, one entry per unused code — a redeemed code is removed
+    # from the list outright rather than flagged, so "is this code still
+    # valid" is just membership.
+    recovery_codes_hashed: Mapped[Optional[list]] = mapped_column(JSON, nullable=True)
+    # Partial override of app.core.notification_prefs.DEFAULT_NOTIFICATION_PREFS
+    # — null/missing keys fall back to the default via effective_prefs().
+    notification_prefs: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
+
+    @property
+    def totp_secret(self) -> Optional[str]:
+        return decrypt_text(self.totp_secret_encrypted) if self.totp_secret_encrypted else None
+
+    @totp_secret.setter
+    def totp_secret(self, value: str) -> None:
+        self.totp_secret_encrypted = encrypt_text(value)
 
     # Relationships
     user_roles: Mapped[List["UserRole"]] = relationship(

@@ -23,7 +23,11 @@ from uuid import UUID
 
 import redis.asyncio as aioredis
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.core.results_stream import notify_vote_cast
+from app.services.org_notification_service import notify_vote_cast_if_due
 
 from app.core.config import settings
 from app.core.security import generate_whatsapp_voter_hash
@@ -332,14 +336,21 @@ class WhatsAppConversationService:
         cast_at = now.isoformat()
         signature = self.crypto.sign_vote(encrypted, cast_at)
 
-        await self.vote_repo.create({
-            "category_id": category.category_id,
-            "election_id": election.election_id,
-            "voter_hash": voter_hash,
-            "vote_data": encrypted,
-            "vote_signature": signature,
-            "count": 1,
-        })
+        try:
+            await self.vote_repo.create({
+                "category_id": category.category_id,
+                "election_id": election.election_id,
+                "voter_hash": voter_hash,
+                "vote_data": encrypted,
+                "vote_signature": signature,
+                "count": 1,
+            })
+        except IntegrityError:
+            # has_voted() upstream is a check-then-insert race under real
+            # concurrent load — uq_vote_per_category is the atomic backstop.
+            return f"You have already voted in *{category.name}*."
+        await notify_vote_cast(election.election_id, None)
+        await notify_vote_cast_if_due(self.db, election.election_id, None)
 
         receipt_code = self.crypto.generate_receipt_code()
 

@@ -11,6 +11,8 @@ celery_app = Celery(
         "app.tasks.vote_tally_tasks",
         "app.tasks.ticket_tasks",
         "app.tasks.auth_tasks",
+        "app.tasks.support_chat_tasks",
+        "app.tasks.report_export_tasks",
     ],
 )
 
@@ -30,12 +32,20 @@ celery_app.conf.beat_schedule = {
         "task": "app.tasks.vote_tally_tasks.check_election_status",
         "schedule": 60.0,
     },
+    "activate-scheduled-elections": {
+        "task": "app.tasks.vote_tally_tasks.activate_scheduled_elections",
+        "schedule": 60.0,
+    },
     "check-expired-tickets": {
         "task": "app.tasks.ticket_tasks.check_expired_tickets",
         "schedule": 3600.0,
     },
     "prune-expired-refresh-tokens": {
         "task": "app.tasks.auth_tasks.prune_expired_refresh_tokens",
+        "schedule": 86400.0,
+    },
+    "purge-closed-chats": {
+        "task": "app.tasks.support_chat_tasks.purge_closed_chats",
         "schedule": 86400.0,
     },
 }

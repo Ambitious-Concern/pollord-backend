@@ -1,41 +1,12 @@
-"""
-USSD conversation state machine (Arkesel gateway).
+"""USSD conversation state machine (Arkesel gateway).
 
-States (stored per phone number in Redis, TTL = USSD_SESSION_TTL_SECONDS —
-matches Arkesel's own ~180s session timeout):
-  idle              → greet, ask for the election/event's USSD code
-  awaiting_vote     → straight from the access code to "enter a nominee's
-                      code" — no category picker and no candidate listing;
-                      too much for a USSD screen. The category itself is
-                      inferred from whichever nominee code comes back
-                      (see _find_candidate_by_code), then shown back to the
-                      voter as confirmation (name + category) alongside the
-                      vote-count/price prompt.
-  awaiting_vote_count  → paid vote — waiting for how many votes to buy (charge
-                         is vote_price * count; free votes skip this entirely)
-  awaiting_network     → paid vote — waiting for a mobile money network choice
-                         (only reached if the dialing number's prefix isn't a
-                         recognized network block — otherwise skipped, see
-                         _detect_network)
-  awaiting_checkout_confirm → paid vote — total + network are both known, one
-                         last "Proceed to checkout? 1. Proceed 2. Cancel"
-                         before we actually hand off to Paystack. Nothing has
-                         been charged yet at this point.
-  awaiting_payment_otp → some providers need Paystack's OTP relayed back via
-                         /charge/submit_otp before the debit completes; others
-                         ("pay_offline") need nothing further from us at all
-
-Voter identity: phone number is HMAC-hashed per category — never stored in
-plaintext, same convention as generate_whatsapp_voter_hash.
-
-Payment: unlike the web/WhatsApp redirect flow, USSD has no browser to send a
-link to — a direct Paystack mobile money charge is initiated against the same
-phone number that dialed in. If the charge comes back "pay_offline", the
-session ends immediately with instructions to approve on-phone. If it comes
-back "send_otp" instead, the session stays open one more turn to collect and
-relay the OTP. Either way, final completion is always reported later via the
-Paystack webhook (payments.py), which sends the confirmation as an SMS
-through Arkesel instead of ending the (already-closed) USSD session.
+States: idle -> awaiting_vote -> awaiting_vote_count -> awaiting_network ->
+awaiting_checkout_confirm. Free votes skip straight to casting; network is
+skipped if _detect_network guesses it from the phone prefix. Payment is a
+direct JuniPay mobile money charge against the dialing number (no browser to
+redirect); final confirmation always arrives later via the JuniPay webhook
+(junipay_webhook.py), sent as an SMS since the USSD session is already
+closed by then.
 """
 
 import hashlib
@@ -49,8 +20,11 @@ from uuid import UUID
 
 import redis.asyncio as aioredis
 from fastapi import HTTPException
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.results_stream import notify_vote_cast
+from app.services.org_notification_service import notify_vote_cast_if_due
 from app.api.v1.endpoints.voting import (
     _assert_open_for_voting,
     _get_effective_vote_price,
@@ -68,7 +42,7 @@ from app.repositories.event_repository import EventRepository
 from app.repositories.transaction_repository import TransactionRepository
 from app.repositories.vote_repository import VoteRepository
 from app.services.cryptography_service import CryptographyService
-from app.services.paystack_service import PaystackService
+from app.services.junipay_service import JunipayService
 
 logger = logging.getLogger(__name__)
 
@@ -77,19 +51,16 @@ PAYMENT_TTL = 3600  # 1 hr for pending payment data in Redis
 
 _CURRENCY_SYMBOL = {"GHS": "GHS ", "NGN": "NGN ", "USD": "$", "EUR": "EUR "}
 
-# Paystack's Ghana mobile_money provider identifiers.
+# Our own network identifiers — mapped to each gateway's own provider
+# strings inside the service that actually calls it (see JunipayService).
 _NETWORKS = {
     "1": ("mtn", "MTN Mobile Money"),
     "2": ("vod", "Vodafone Cash"),
     "3": ("atl", "AirtelTigo Money"),
 }
 
-# Original Ghana number-block allocations, used to skip the manual network
-# menu entirely — voters are dialing from the phone that already carries
-# their money, so the number itself tells us the network. This is a
-# best-effort guess: a number ported to another network will guess wrong,
-# in which case the charge attempt simply fails with a clear error (existing
-# behavior) rather than silently mischarging anything.
+# Original Ghana number-block allocations — best-effort guess to skip the
+# network menu; a ported number just fails the charge with a clear error.
 _NETWORK_PREFIXES = {
     "24": ("mtn", "MTN Mobile Money"),
     "25": ("mtn", "MTN Mobile Money"),
@@ -109,16 +80,13 @@ MAX_USSD_VOTE_QUANTITY = 100
 
 
 def _join_sentence(first: str, second: str) -> str:
-    """Join two sentence fragments without a doubled period — needed because
-    `first` is often Paystack's own display_text, which usually already ends
-    with its own punctuation."""
+    """Join two sentence fragments without a doubled period."""
     return f"{first.rstrip('. ')}. {second}"
 
 
 def _detect_network(phone: str) -> Optional[Tuple[str, str]]:
-    """Best-guess (provider, label) from a Ghana MSISDN's original block
-    allocation, or None if the prefix isn't recognized (caller should fall
-    back to asking). Accepts 233XXXXXXXXX, 0XXXXXXXXX, or bare XXXXXXXXX."""
+    """Best-guess (provider, label) from a Ghana MSISDN's block allocation,
+    or None if unrecognized. Accepts 233XXXXXXXXX, 0XXXXXXXXX, or XXXXXXXXX."""
     digits = "".join(ch for ch in phone if ch.isdigit())
     if digits.startswith("233"):
         digits = "0" + digits[3:]
@@ -158,8 +126,6 @@ class UssdConversationService:
             return await self._handle_network_selection(phone, text, session)
         if state == "awaiting_checkout_confirm":
             return await self._handle_checkout_confirm(phone, text, session)
-        if state == "awaiting_payment_otp":
-            return await self._handle_payment_otp(phone, text, session)
 
         return await self._handle_code_lookup(phone, text)
 
@@ -171,13 +137,13 @@ class UssdConversationService:
         code = "".join(ch for ch in text if ch.isdigit())
         if not code:
             return (
-                "Welcome to Pollord Voting.\nEnter the election/event code to vote:",
+                "Welcome to Pollord Platform.\nEnter the election/event code to vote:",
                 False,
             )
 
         parent, parent_kind = await self._resolve_parent(code)
         if not parent:
-            return ("Code not found. Please check and try again:", False)
+            return "Code not found. Please check and try again:", False
 
         try:
             _assert_open_for_voting(parent, parent_kind)
@@ -188,13 +154,12 @@ class UssdConversationService:
         if not has_candidates:
             return (f"{parent.title} has no candidates yet.", True)
 
-        # Straight to a nominee code — no category menu, no candidate list.
-        # Which category it belongs to is worked out later from the code
-        # itself (_find_candidate_by_code), once one comes back.
         vote_price = await _get_effective_vote_price(parent, self.db)
         lines = [parent.title, "Enter your nominee's code:"]
         if vote_price > 0:
-            symbol = _CURRENCY_SYMBOL.get(settings.VOTE_CURRENCY, settings.VOTE_CURRENCY)
+            symbol = _CURRENCY_SYMBOL.get(
+                settings.VOTE_CURRENCY, settings.VOTE_CURRENCY
+            )
             lines.append(f"Cost: {symbol}{vote_price / 100:.2f}/vote")
 
         await self._set_session(
@@ -298,8 +263,6 @@ class UssdConversationService:
             "amount": total_amount,
         }
 
-        # The dialing phone is the same one paying — no need to ask which
-        # network it's on when the number itself already tells us.
         detected = _detect_network(phone)
         if detected:
             provider, provider_label = detected
@@ -326,16 +289,14 @@ class UssdConversationService:
             return ("Reply 1 for MTN, 2 for Vodafone, or 3 for AirtelTigo:", False)
 
         provider, provider_label = network
-        return await self._start_checkout_confirm(phone, session, provider, provider_label)
+        return await self._start_checkout_confirm(
+            phone, session, provider, provider_label
+        )
 
     async def _start_checkout_confirm(
         self, phone: str, session: dict, provider: str, provider_label: str
     ) -> Tuple[str, bool]:
-        """Last stop before we actually hand off to Paystack — nothing's been
-        charged yet. A plain proceed/cancel here (rather than walking the
-        voter through Paystack's own OTP/authorization language up front)
-        keeps this screen simple; whatever Paystack actually needs next
-        (OTP relay, on-phone approval) only comes up once they've said yes."""
+        """Last confirm before handing off to JuniPay — nothing charged yet."""
         await self._set_session(
             phone,
             {
@@ -407,21 +368,19 @@ class UssdConversationService:
             }
         )
 
-        paystack = PaystackService(settings.PAYSTACK_SECRET_KEY)
+        junipay = JunipayService(
+            settings.JUNIPAY_CLIENT_ID, settings.JUNIPAY_PRIVATE_KEY
+        )
+        callback_url = f"{settings.PUBLIC_BASE_URL}/api/v1/payments/junipay/webhook"
         try:
-            charge = await paystack.charge_mobile_money(
+            charge = await junipay.charge_mobile_money(
                 email=placeholder_email,
                 amount=total_amount,
                 reference=reference,
                 phone=phone,
                 provider=provider,
-                currency=settings.VOTE_CURRENCY,
-                metadata={
-                    "parent_kind": parent_kind,
-                    "parent_id": session["parent_id"],
-                    "category_id": str(category_id),
-                    "channel": "ussd",
-                },
+                callback_url=callback_url,
+                description=f"Pollord vote: {candidate_name}",
             )
         except HTTPException as exc:
             logger.error(
@@ -435,15 +394,13 @@ class UssdConversationService:
             return (f"Payment could not be started: {exc.detail}", True)
 
         logger.info(
-            "USSD charge_mobile_money ref=%s provider=%s status=%s display_text=%s",
+            "USSD charge_mobile_money ref=%s provider=%s status=%s",
             reference,
             provider,
             charge.get("status"),
-            charge.get("display_text"),
         )
 
-        # So the Paystack webhook (payments.py) knows to text this phone,
-        # regardless of which branch below we take.
+        # Lets the JuniPay webhook (junipay_webhook.py) know which phone to text.
         await self.redis.setex(
             f"ussd:payment:{reference}",
             PAYMENT_TTL,
@@ -453,96 +410,17 @@ class UssdConversationService:
         symbol = _CURRENCY_SYMBOL.get(settings.VOTE_CURRENCY, settings.VOTE_CURRENCY)
         amount_display = f"{symbol}{total_amount / 100:.2f}"
         vote_label = f"{vote_count} vote(s)" if vote_count > 1 else "a vote"
-
-        # Paystack tells us exactly what the customer needs to do next for
-        # this specific network/processor (e.g. MTN GH is often "Dial *170#
-        # and enter your PIN to complete this transaction" rather than an
-        # automatic on-phone push) — relay that verbatim when present instead
-        # of guessing our own generic instruction.
-        display_text = charge.get("display_text")
-
-        # The total is what the voter actually cares about confirming before
-        # anything momo-related happens, so it leads every message here
-        # instead of trailing after the instruction.
         amount_sentence = f"{amount_display}, {vote_label} for {candidate_name}"
 
-        if charge.get("status") == "send_otp":
-            # This provider needs the OTP the customer just received relayed
-            # back to Paystack before the charge finishes.
-            await self._set_session(
-                phone,
-                {
-                    "state": "awaiting_payment_otp",
-                    "reference": reference,
-                    "candidate_name": candidate_name,
-                    "vote_count": vote_count,
-                },
-            )
-            prompt = display_text or "Enter the OTP sent to your phone"
-            return (
-                _join_sentence(amount_sentence, prompt.rstrip(". ") + ":"),
-                False,
-            )
-
         await self._clear_session(phone)
-        # Paystack's own MTN display_text ("...inputting your PIN on your
-        # mobile device") reads, on a plain USSD screen, like an invitation
-        # to type the PIN right back into THIS menu — but this menu is
-        # closing right now; the real approval is a separate MTN-triggered
-        # prompt (or *170# manually) that never touches our webhook at all.
-        # Typing anything back here after this point just starts a brand
-        # new session, which is why voters were landing on "Code not found".
-        # Our own short, unambiguous text avoids that trap for MTN
-        # specifically, where the *170# fallback matters most; other
-        # providers don't share this exact confusion, so their display_text
-        # is still relayed verbatim.
+        # JuniPay's /payment response carries no per-network next-step text
+        # (unlike Paystack's display_text), so this instruction is always ours.
         if provider == "mtn":
-            instruction = (
-                "Approve the MTN prompt on your phone or dial *170#. "
-                "This menu has closed"
-            )
+            instruction = "Approve the MTN prompt on your phone or dial *170#"
         else:
-            instruction = (
-                display_text or f"Check your phone and approve the {provider_label} prompt"
-            )
+            instruction = f"Check your phone and approve the {provider_label} prompt"
         return (
-            _join_sentence(amount_sentence, f"{instruction.rstrip('. ')}. SMS on confirm."),
-            True,
-        )
-
-    async def _handle_payment_otp(
-        self, phone: str, text: str, session: dict
-    ) -> Tuple[str, bool]:
-        otp = "".join(ch for ch in text if ch.isdigit())
-        if not otp:
-            return ("Enter the numeric OTP sent to your phone:", False)
-
-        reference = session["reference"]
-        candidate_name = session.get("candidate_name", "")
-        vote_count = session.get("vote_count", 1)
-        vote_label = f"{vote_count} vote(s)" if vote_count > 1 else "your vote"
-        await self._clear_session(phone)
-
-        paystack = PaystackService(settings.PAYSTACK_SECRET_KEY)
-        try:
-            result = await paystack.submit_otp(otp=otp, reference=reference)
-        except HTTPException as exc:
-            logger.error("USSD submit_otp rejected ref=%s: %s", reference, exc.detail)
-            await self.txn_repo.update_status(reference, "failed")
-            return (f"Payment failed: {exc.detail}. Dial in again to retry.", True)
-
-        logger.info(
-            "USSD submit_otp ref=%s status=%s display_text=%s",
-            reference,
-            result.get("status"),
-            result.get("display_text"),
-        )
-
-        instruction = result.get("display_text") or "Payment submitted"
-        return (
-            _join_sentence(
-                instruction, f"{vote_label} for {candidate_name}. SMS on confirm."
-            ),
+            _join_sentence(amount_sentence, f"{instruction}. SMS on confirm."),
             True,
         )
 
@@ -554,19 +432,28 @@ class UssdConversationService:
         cast_at = now.isoformat()
         signature = self.crypto.sign_vote(encrypted, cast_at)
 
-        await self.vote_repo.create(
-            {
-                "category_id": category.category_id,
-                "election_id": (
-                    parent.election_id if parent_kind == "election" else None
-                ),
-                "event_id": parent.event_id if parent_kind == "event" else None,
-                "voter_hash": voter_hash,
-                "vote_data": encrypted,
-                "vote_signature": signature,
-                "count": 1,
-            }
-        )
+        try:
+            await self.vote_repo.create(
+                {
+                    "category_id": category.category_id,
+                    "election_id": (
+                        parent.election_id if parent_kind == "election" else None
+                    ),
+                    "event_id": parent.event_id if parent_kind == "event" else None,
+                    "voter_hash": voter_hash,
+                    "vote_data": encrypted,
+                    "vote_signature": signature,
+                    "count": 1,
+                }
+            )
+        except IntegrityError:
+            # has_voted() upstream is a check-then-insert race under real
+            # concurrent load — uq_vote_per_category is the atomic backstop.
+            return (f"You have already voted in {category.name}.", True)
+        _ussd_election_id = parent.election_id if parent_kind == "election" else None
+        _ussd_event_id = parent.event_id if parent_kind == "event" else None
+        await notify_vote_cast(_ussd_election_id, _ussd_event_id)
+        await notify_vote_cast_if_due(self.db, _ussd_election_id, _ussd_event_id)
 
         receipt_code = self.crypto.generate_receipt_code()
 
@@ -633,12 +520,8 @@ def _parent_id(parent, parent_kind: str) -> Optional[UUID]:
 
 
 def _find_candidate_by_code(parent, code: str):
-    """Looks up a nominee by short code across every category on this
-    election/event, so the voter never has to pick a category first — the
-    category is just wherever the code turns up. Codes are meant to be
-    unique per election/event (organizers hand them out on one poster for
-    the whole thing), so the first match wins; returns (None, None) if
-    nothing matches."""
+    """Looks up a nominee by short code across every category, so the voter
+    never has to pick a category first. Returns (None, None) if no match."""
     code = code.upper()
     for category in sorted(parent.categories, key=lambda c: c.display_order):
         for candidate in category.candidates:

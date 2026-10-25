@@ -15,6 +15,10 @@ class ArkeselService:
     BASE_URL = "https://sms.arkesel.com/api/v2/sms/send"
 
     async def send_sms(self, to: str, message: str) -> None:
+        if not settings.ARKESEL_API_KEY:
+            logger.warning("ARKESEL_API_KEY not set, skipping SMS to %s", to)
+            return
+
         payload = {
             "sender": settings.ARKESEL_SMS_SENDER_ID,
             "message": message,

@@ -11,10 +11,12 @@ from app.core.dependencies import CONSOLE_READ_ROLES, require_roles
 from app.core.pricing import validate_vote_price
 from app.db.base import get_db
 from app.models.audit_log import AuditLog
+from app.models.notification import Notification
 from app.models.platform_setting import PlatformSetting
 from app.models.organization import Organization
 from app.models.user import User
 from app.repositories.audit_log_repository import AuditLogRepository
+from app.repositories.notification_repository import NotificationRepository
 from app.repositories.organization_repository import OrganizationRepository
 from app.repositories.user_repository import UserRepository
 from app.schemas.organization import OrganizationResponse
@@ -269,6 +271,17 @@ async def verify_organization(
         user_id=current_user.user_id,
         changes={"is_verified": data.is_verified},
     )
+
+    if data.is_verified:
+        member_ids = await repo.get_member_ids(org_id)
+        await NotificationRepository(Notification, db).notify_org(
+            org_id=org_id,
+            member_ids=member_ids,
+            type="verification",
+            title="Organization verified",
+            description="Your KYC documents were approved.",
+            link="/dashboard/settings?section=verification",
+        )
 
     if org.owner and org.owner.email:
         from app.services.email_service import _base_template, send_email

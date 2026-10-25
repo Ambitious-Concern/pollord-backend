@@ -51,11 +51,18 @@ class AuditLogRepository(BaseRepository[AuditLog]):
         return list(result.scalars().all())
 
     async def get_by_user(
-        self, user_id: UUID, skip: int = 0, limit: int = 20
+        self,
+        user_id: UUID,
+        skip: int = 0,
+        limit: int = 20,
+        action_types: Optional[List[str]] = None,
     ) -> List[AuditLog]:
+        conditions = [AuditLog.user_id == user_id]
+        if action_types:
+            conditions.append(AuditLog.action_type.in_(action_types))
         result = await self.session.execute(
             select(AuditLog)
-            .where(AuditLog.user_id == user_id)
+            .where(*conditions)
             .order_by(AuditLog.created_at.desc())
             .offset(skip)
             .limit(limit)

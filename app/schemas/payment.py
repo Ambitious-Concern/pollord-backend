@@ -12,6 +12,7 @@ class InitiateVotePaymentRequest(BaseModel):
     # Custom amount in pesewas for multi-vote elections.
     # If omitted, defaults to VOTE_PRICE (one vote = ₵1).
     amount_pesewas: Optional[int] = None
+    promo_code: Optional[str] = None
 
     @field_validator("amount_pesewas")
     @classmethod

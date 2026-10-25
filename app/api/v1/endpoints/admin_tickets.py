@@ -11,6 +11,7 @@ from uuid import UUID
 from fastapi import APIRouter, Depends, Request
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.request_meta import client_ip
 from app.core.config import settings
 from app.core.dependencies import CONSOLE_READ_ROLES, require_roles
 from app.db.base import get_db
@@ -95,7 +96,7 @@ async def add_attendee_for_untracked_payment(
         actor_user_id=current_user.user_id,
         paystack=PaystackService(settings.PAYSTACK_SECRET_KEY),
         txn_repo=TicketTransactionRepository(db),
-        ip=request.client.host if request.client else None,
+        ip=client_ip(request),
         user_agent=request.headers.get("user-agent"),
     )
 
@@ -146,6 +147,6 @@ async def resend_ticket_email(
         purchase_id=purchase_id,
         actor_user_id=current_user.user_id,
         override_email=data.email,
-        ip=request.client.host if request.client else None,
+        ip=client_ip(request),
         user_agent=request.headers.get("user-agent"),
     )

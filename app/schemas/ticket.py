@@ -1,6 +1,6 @@
 from datetime import datetime
 from decimal import Decimal
-from typing import List, Optional
+from typing import List, Literal, Optional
 from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, EmailStr, field_serializer, field_validator
@@ -21,6 +21,7 @@ class TicketPurchaseItem(BaseModel):
 class TicketPurchaseRequest(BaseModel):
     event_id: UUID
     items: List[TicketPurchaseItem]
+    promo_code: Optional[str] = None
 
     @field_validator("items")
     @classmethod
@@ -74,6 +75,9 @@ class TicketResponse(BaseModel):
     ticket_status: str
     purchase_date: datetime
     used_at: Optional[datetime] = None
+    # "scan" or "manual_code" — see Ticket.check_in_channel. Null until checked in.
+    check_in_channel: Optional[str] = None
+    origin: Optional[str] = None
     # Only set for guest (unauthenticated) purchases — lets the frontend build
     # a no-auth PDF download link right after purchase.
     download_token: Optional[str] = None
@@ -90,6 +94,11 @@ class TicketSaleResponse(TicketDetailResponse):
 
     attendee_email: str = ""
     amount: Decimal = Decimal("0")
+    # Set only for Front Desk door sales — what staff recorded being handed.
+    payment_method: Optional[str] = None
+    # Only ever set for a guest checkout (walk-up or online) — registered
+    # users have no phone captured on the ticket itself.
+    attendee_phone: Optional[str] = None
 
 
 class TicketPurchaseResponse(BaseModel):
@@ -229,3 +238,28 @@ class ScanInfoResponse(BaseModel):
 class PublicTicketValidation(BaseModel):
     scan_token: str
     ticket_code: str
+
+
+# --- Front Desk: staff-issued walk-up tickets (Premium+) -------------------
+
+
+class FrontDeskSaleRequest(BaseModel):
+    ticket_type_id: UUID
+    quantity: int = 1
+    name: str
+    phone: str
+    origin: Optional[str] = None
+    payment_method: Literal["cash", "mobile_money"]
+
+    @field_validator("quantity")
+    @classmethod
+    def quantity_positive(cls, v: int) -> int:
+        if v < 1:
+            raise ValueError("quantity must be at least 1")
+        return v
+
+
+class FrontDeskRegistrationRequest(BaseModel):
+    name: str
+    phone: str
+    origin: Optional[str] = None

@@ -135,6 +135,88 @@ def election_invite_email(
     return subject, _base_template(content, f"Vote now in {election_title}")
 
 
+def event_invite_email(
+    guest_name: str | None, event_title: str, event_date: str, location: str, rsvp_url: str
+) -> tuple[str, str]:
+    """Return (subject, html_body) for an event RSVP invitation."""
+    subject = f"You're invited: {event_title}"
+    greeting = f"Hi {guest_name}, y" if guest_name else "Y"
+    content = f"""
+    <h2>You're Invited</h2>
+    <p>{greeting}ou've been invited to:</p>
+    <div class="otp-box">
+      <div style="color:#fff; font-size:20px; font-weight:800;">{event_title}</div>
+      <div style="color:rgba(255,255,255,0.7); font-size:13px; margin-top:6px;">{event_date} &middot; {location}</div>
+    </div>
+    <p style="text-align:center; margin-top:24px;">
+      <a href="{rsvp_url}" class="btn">RSVP Now</a>
+    </p>
+    """
+    return subject, _base_template(content, f"You're invited to {event_title}")
+
+
+def event_broadcast_email(event_title: str, subject: str, body: str) -> tuple[str, str]:
+    """Return (email subject, html_body) for an organizer's message to
+    every ticket-holder of an event. `subject`/`body` are freeform text from
+    the compose form — HTML-escaped before interpolation since this is the
+    one email template built from organizer-typed prose rather than our own
+    fixed copy, then line breaks become <br> since there's no rich-text
+    editor."""
+    import html
+
+    safe_subject = html.escape(subject)
+    safe_body = html.escape(body).replace("\n", "<br>")
+    content = f"""
+    <h2>{safe_subject}</h2>
+    <p style="color:rgba(255,255,255,0.5); font-size:13px;">A message from the organizers of {html.escape(event_title)}</p>
+    <div class="otp-box" style="text-align:left; padding:20px;">
+      <div style="color:#fff; font-size:14px; line-height:1.6;">{safe_body}</div>
+    </div>
+    """
+    return subject, _base_template(content, safe_subject)
+
+
+def voter_invite_email(
+    voter_name: str | None, election_title: str, reset_url: str, ballot_url: str
+) -> tuple[str, str]:
+    """Return (subject, html_body) for a gated election's eligible-voter
+    invite — sent both on first import and on resend, so it always leads
+    with the password link even for a voter who already has an account and
+    remembers their password (harmless to ignore)."""
+    subject = f"You're eligible to vote: {election_title}"
+    greeting = f"Hi {voter_name}, y" if voter_name else "Y"
+    content = f"""
+    <h2>You're an Eligible Voter</h2>
+    <p>{greeting}ou've been added to the voter list for:</p>
+    <div class="otp-box">
+      <div style="color:#fff; font-size:20px; font-weight:800;">{election_title}</div>
+    </div>
+    <p style="text-align:center; margin-top:24px;">
+      <a href="{reset_url}" class="btn">Set Your Password</a>
+    </p>
+    <p style="text-align:center; margin-top:16px; font-size:13px;">
+      Already have a password? <a href="{ballot_url}" class="highlight">Go straight to the ballot</a>.
+    </p>
+    """
+    return subject, _base_template(content, f"You're eligible to vote in {election_title}")
+
+
+def org_notification_email(title: str, description: str, link: Optional[str] = None) -> tuple[str, str]:
+    """Generic wrapper for the Settings > Notifications preference-gated
+    emails (vote cast, election started/ended, payout events, team
+    changes, ...) — one shared shape rather than a bespoke template per
+    event type, since they're all "here's what just happened" copy."""
+    link_html = (
+        f'<p><a href="{settings.FRONTEND_URL}{link}" class="btn">View details</a></p>' if link else ""
+    )
+    content = f"""
+    <h2>{title}</h2>
+    <p>{description}</p>
+    {link_html}
+    """
+    return title, _base_template(content, description)
+
+
 def candidate_nomination_email(
     candidate_name: str,
     election_title: str,

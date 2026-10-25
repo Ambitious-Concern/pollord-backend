@@ -13,7 +13,7 @@ Run inside the backend container (has the same DATABASE_URL as the app):
     docker compose exec app python scripts/seed_v2_mock.py
 
 Or locally against the dev DB:
-    DATABASE_URL=postgresql+asyncpg://pollard:pollard@localhost:5432/pollard \
+    DATABASE_URL=postgresql+asyncpg://pollard:pollard@localhost:55432/pollard \
         .venv/Scripts/python.exe scripts/seed_v2_mock.py
 """
 import asyncio

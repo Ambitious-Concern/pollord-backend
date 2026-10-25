@@ -47,6 +47,9 @@ class UserResponse(BaseModel):
     account_status: str
     has_organization: bool = False
     organization_verified: bool = False
+    avatar_url: Optional[str] = None
+    totp_enabled: bool = False
+    onboarding_completed_at: Optional[datetime] = None
     created_at: datetime
     roles: List[str] = []
 
@@ -54,6 +57,17 @@ class UserResponse(BaseModel):
 class UserUpdate(BaseModel):
     full_name: Optional[str] = None
     phone_number: Optional[str] = None
+
+
+class SessionResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    jti: str
+    ip_address: Optional[str] = None
+    user_agent: Optional[str] = None
+    created_at: datetime
+    expires_at: datetime
+    is_current: bool = False
 
 
 class ChangePassword(BaseModel):
@@ -70,6 +84,23 @@ class TokenResponse(BaseModel):
     access_token: str
     refresh_token: str
     token_type: str = "bearer"
+
+
+class LoginResponse(BaseModel):
+    """What POST /auth/login actually returns: either a normal token pair,
+    or — for a 2FA-enabled account — a short-lived mfa_token instead, which
+    POST /auth/2fa/login-verify exchanges for the real tokens once the code
+    checks out."""
+    access_token: Optional[str] = None
+    refresh_token: Optional[str] = None
+    token_type: str = "bearer"
+    requires_2fa: bool = False
+    mfa_token: Optional[str] = None
+
+
+class TwoFactorLoginRequest(BaseModel):
+    mfa_token: str
+    code: str
 
 
 class TokenPayload(BaseModel):
@@ -147,4 +178,5 @@ class AuditLogResponse(BaseModel):
     entity_id: Optional[UUID] = None
     changes: Optional[dict] = None
     ip_address: Optional[str] = None
+    user_agent: Optional[str] = None
     created_at: datetime

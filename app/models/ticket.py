@@ -70,6 +70,14 @@ class Ticket(Base):
     scanned_by: Mapped[Optional[uuid.UUID]] = mapped_column(
         UUID(as_uuid=True), ForeignKey("users.user_id"), nullable=True
     )
+    # "scan" / "manual_code" (see TicketRepository.mark_as_used) for a
+    # regularly checked-in ticket, or "door-sale" / "registration" set at
+    # creation time for a Front Desk walk-up — a door-sale is created
+    # already checked in, so this one field records both facts at once.
+    check_in_channel: Mapped[Optional[str]] = mapped_column(String(20), nullable=True)
+    # Free-text "coming from" note, captured at Front Desk walk-up entry —
+    # informational only, no relation to check_in_channel.
+    origin: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
 
     # Relationships
     event: Mapped["Event"] = relationship(

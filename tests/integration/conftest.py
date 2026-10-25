@@ -7,13 +7,14 @@ from sqlalchemy import event
 from sqlalchemy.pool import NullPool
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
+import app.core.redis as redis_module
 from app.core.security import create_access_token, hash_password
 from app.db.base import get_db
 from app.models.base import Base
 
 TEST_DATABASE_URL = os.getenv(
     "TEST_DATABASE_URL",
-    "postgresql+asyncpg://pollard:pollard@localhost:5432/pollard_test",
+    "postgresql+asyncpg://pollard:pollard@localhost:55432/pollard_test",
 )
 
 # NullPool prevents connection pool state from being shared across async event
@@ -27,12 +28,38 @@ test_session_maker = async_sessionmaker(
 
 @pytest_asyncio.fixture(scope="session", autouse=True)
 async def setup_database():
+    """Schema only — DEFAULT_ROLES are seeded separately below. In a real
+    deployment those come from init_db() at app startup, but the test
+    client's ASGITransport never runs FastAPI's lifespan, so nothing else
+    would create them here."""
+    from app.db.init_db import DEFAULT_ROLES
+    from app.models.user import Role
+
     async with test_engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
+
+    async with test_session_maker() as session:
+        for role_data in DEFAULT_ROLES:
+            session.add(Role(role_name=role_data["role_name"], permissions=role_data["permissions"]))
+        await session.commit()
+
     yield
     async with test_engine.begin() as conn:
         await conn.run_sync(Base.metadata.drop_all)
     await test_engine.dispose()
+
+
+@pytest_asyncio.fixture(autouse=True)
+async def _fresh_redis_client():
+    """app.core.redis's shared client is a process-global singleton, but
+    pytest-asyncio gives each test its own event loop by default — reusing a
+    connection opened on a since-closed loop raises "Event loop is closed".
+    Resetting it per test keeps every test's Redis usage on its own loop."""
+    redis_module._client = None
+    yield
+    if redis_module._client is not None:
+        await redis_module._client.aclose()
+        redis_module._client = None
 
 
 @pytest_asyncio.fixture

@@ -11,6 +11,7 @@ from app.core.config import settings
 from app.core.security import (
     create_access_token,
     create_email_verification_token,
+    create_mfa_challenge_token,
     create_password_reset_token,
     create_refresh_token,
     decode_token,
@@ -23,12 +24,14 @@ from app.models.user import User
 from app.repositories.audit_log_repository import AuditLogRepository
 from app.repositories.user_repository import UserRepository
 from app.schemas.user import (
+    LoginResponse,
     TokenResponse,
     UserCreate,
     UserLogin,
     UserResponse,
 )
 from app.services.email_service import welcome_email, otp_email
+from app.services.two_factor_service import TwoFactorService
 from app.tasks.email_tasks import send_email_task, send_password_reset_email
 
 logger = logging.getLogger(__name__)
@@ -53,17 +56,27 @@ class AuthService:
         self.user_repo = user_repo
         self.audit_repo = audit_repo
 
-    async def _issue_tokens(self, user: User) -> TokenResponse:
+    async def _issue_tokens(
+        self,
+        user: User,
+        ip: Optional[str] = None,
+        user_agent: Optional[str] = None,
+    ) -> TokenResponse:
         """Creates a fresh access+refresh pair and records the refresh
-        token's jti so refresh_token() can enforce single-use rotation."""
-        access_token = create_access_token(str(user.user_id), user.token_version)
+        token's jti (plus device metadata, for the Security settings page's
+        session list) so refresh_token() can enforce single-use rotation."""
         refresh_token = create_refresh_token(str(user.user_id), user.token_version)
         payload = decode_token(refresh_token)
+        access_token = create_access_token(
+            str(user.user_id), user.token_version, session_id=payload["jti"]
+        )
         self.user_repo.session.add(
             RefreshToken(
                 jti=payload["jti"],
                 user_id=user.user_id,
                 expires_at=datetime.fromtimestamp(payload["exp"], tz=timezone.utc),
+                ip_address=ip,
+                user_agent=user_agent,
             )
         )
         await self.user_repo.session.flush()
@@ -171,7 +184,7 @@ class AuthService:
         data: UserLogin,
         ip: Optional[str] = None,
         user_agent: Optional[str] = None,
-    ) -> TokenResponse:
+    ) -> LoginResponse:
         """Verify credentials and issue an access+refresh pair. Locks the
         account for LOCKOUT_DURATION after MAX_FAILED_LOGIN_ATTEMPTS
         consecutive failures."""
@@ -192,6 +205,11 @@ class AuthService:
             await self.audit_repo.log_action(
                 action_type="LOGIN_FAILED",
                 entity_type="User",
+                # Attributed to the real account when the email matches one —
+                # lets that user see "someone tried your password" on their
+                # own Login Activity, not just an anonymous failed attempt.
+                entity_id=user.user_id if user else None,
+                user_id=user.user_id if user else None,
                 changes={"email": data.email},
                 ip_address=ip,
                 user_agent=user_agent,
@@ -217,7 +235,13 @@ class AuthService:
         user.locked_until = None
         await self.user_repo.session.flush()
 
-        tokens = await self._issue_tokens(user)
+        if user.totp_enabled:
+            # Password checked out, but the account needs a second factor
+            # before real tokens are issued — no LOGIN audit entry yet,
+            # since the login isn't complete.
+            return LoginResponse(requires_2fa=True, mfa_token=create_mfa_challenge_token(str(user.user_id)))
+
+        tokens = await self._issue_tokens(user, ip, user_agent)
 
         await self.user_repo.update_last_login(user.user_id)
 
@@ -230,9 +254,47 @@ class AuthService:
             user_agent=user_agent,
         )
 
+        return LoginResponse(access_token=tokens.access_token, refresh_token=tokens.refresh_token)
+
+    async def verify_2fa_and_login(
+        self,
+        mfa_token: str,
+        code: str,
+        ip: Optional[str] = None,
+        user_agent: Optional[str] = None,
+    ) -> TokenResponse:
+        """Completes a login that was paused for 2FA by AuthService.login.
+        Accepts either a live TOTP code or a recovery code."""
+        payload = decode_token(mfa_token)
+        if payload is None or payload.get("type") != "mfa_challenge":
+            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid or expired code")
+
+        user = await self.user_repo.get_by_id(UUID(payload["sub"]), id_field="user_id")
+        if not user or not user.totp_enabled:
+            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid or expired code")
+
+        two_factor_service = TwoFactorService(self.user_repo, self.audit_repo)
+        if not await two_factor_service.verify_login_code(user, code):
+            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid code")
+
+        tokens = await self._issue_tokens(user, ip, user_agent)
+        await self.user_repo.update_last_login(user.user_id)
+        await self.audit_repo.log_action(
+            action_type="LOGIN",
+            entity_type="User",
+            entity_id=user.user_id,
+            user_id=user.user_id,
+            ip_address=ip,
+            user_agent=user_agent,
+        )
         return tokens
 
-    async def refresh_token(self, refresh_token: str) -> TokenResponse:
+    async def refresh_token(
+        self,
+        refresh_token: str,
+        ip: Optional[str] = None,
+        user_agent: Optional[str] = None,
+    ) -> TokenResponse:
         """Redeem a refresh token for a new access+refresh pair. Single-use:
         the presented token is revoked here regardless of outcome, so
         replaying it (e.g. a stolen copy used after the legitimate client
@@ -289,7 +351,7 @@ class AuthService:
             token_row.revoked = True
             await self.user_repo.session.flush()
 
-        return await self._issue_tokens(user)
+        return await self._issue_tokens(user, ip, user_agent)
 
     async def logout(self, refresh_token: str) -> None:
         """Bumps token_version so every access/refresh token issued so far —
@@ -397,6 +459,7 @@ class AuthService:
             account_status=user.account_status,
             has_organization=has_organization,
             organization_verified=organization_verified,
+            totp_enabled=user.totp_enabled,
             created_at=user.created_at,
             roles=roles,
         )

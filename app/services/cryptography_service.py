@@ -5,7 +5,9 @@ from app.core.security import (
     encrypt_vote,
     generate_secure_token,
     generate_voter_hash,
+    sign_data,
     sign_vote,
+    verify_data_signature,
     verify_vote_signature,
 )
 
@@ -34,3 +36,9 @@ class CryptographyService:
 
     def generate_receipt_code(self) -> str:
         return generate_secure_token(32)
+
+    def sign_certificate(self, payload: bytes) -> str:
+        return sign_data(payload)
+
+    def verify_certificate(self, payload: bytes, signature: str) -> bool:
+        return verify_data_signature(payload, signature)

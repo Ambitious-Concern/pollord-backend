@@ -2,7 +2,7 @@ from datetime import datetime
 from typing import Any, Dict, List, Optional
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, field_validator
+from pydantic import BaseModel, ConfigDict, EmailStr, field_validator
 
 from app.core.pricing import validate_vote_price
 
@@ -43,6 +43,13 @@ class CandidateResponse(BaseModel):
     description: Optional[str] = None
     image_url: Optional[str] = None
     display_order: int
+    created_at: datetime
+    # Derived, not stored — see list_candidates, which tallies the
+    # election's votes the same way live-results does. Rank is 1-based
+    # within the candidate's own category; None for a candidate with no
+    # votes tallied yet (an empty category).
+    vote_count: int = 0
+    category_rank: Optional[int] = None
 
 
 # --- Category schemas ---
@@ -113,11 +120,21 @@ class ElectionSettings(BaseModel):
     enable_notifications: bool = True
     allow_revoting: bool = False
     vote_price: Optional[int] = None  # pesewas; None = inherit global platform price
+    # "organizer" (default): commission comes out of the payout. "buyer":
+    # commission is added on top as a surcharge, organizer nets vote_price.
+    fee_payer: str = "organizer"
 
     @field_validator("vote_price")
     @classmethod
     def validate_vote_price(cls, v: Optional[int]) -> Optional[int]:
         return validate_vote_price(v)
+
+    @field_validator("fee_payer")
+    @classmethod
+    def validate_fee_payer(cls, v: str) -> str:
+        if v not in ("organizer", "buyer"):
+            raise ValueError("fee_payer must be 'organizer' or 'buyer'")
+        return v
 
     @field_validator("visibility")
     @classmethod
@@ -195,10 +212,14 @@ class ElectionResponse(BaseModel):
     enable_notifications: bool = True
     allow_revoting: bool = False
     vote_price: Optional[int] = None  # None means election uses the global platform price
+    fee_payer: str = "organizer"
     venue: Optional[str] = None
     latitude: Optional[float] = None
     longitude: Optional[float] = None
     tag: Optional[str] = None
+    # Chosen at launch, locked in until the election closes (see core/plans.py)
+    # — determines the commission rate, not an org-wide setting.
+    plan: str = "standard"
 
 
 class ElectionPublicResponse(BaseModel):
@@ -223,11 +244,28 @@ class ElectionPublicResponse(BaseModel):
     tag: Optional[str] = None
     vote_price: Optional[int] = None
     effective_vote_price: int = 100  # resolved price (global or per-election), always set
+    fee_payer: str = "organizer"
 
 
 class ElectionWithCategories(ElectionResponse):
     categories: List[CategoryWithCandidates] = []
     effective_vote_price: int = 100  # resolved price (global or per-election), always set
+
+
+class ElectionSummaryResponse(ElectionResponse):
+    """The organizer dashboard's list view — adds bulk-computed aggregate
+    stats on top of the plain election row. Distinct from ElectionResponse
+    (used by create/update/get) so those endpoints aren't forced to also
+    compute stats nobody reads there."""
+
+    effective_vote_price: int = 100
+    categories_count: int = 0
+    candidates_count: int = 0
+    votes_cast: int = 0
+    revenue_ghs: str = "0.00"
+    # Real revenue trend: % change between the last 7 days and the 7 days
+    # before that (from successful Transaction rows) — not a fabricated number.
+    revenue_growth_pct: float = 0.0
 
 
 # --- Eligible Voter schemas ---
@@ -237,11 +275,33 @@ class EligibleVoterAdd(BaseModel):
     user_ids: List[UUID]
 
 
+class EligibleVoterImportRow(BaseModel):
+    email: EmailStr
+    name: Optional[str] = None
+
+
+class EligibleVoterImport(BaseModel):
+    rows: List[EligibleVoterImportRow]
+
+
 class EligibleVoterResponse(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
     eligible_voter_id: UUID
     election_id: UUID
     user_id: UUID
+    name: str = ""
+    email: str = ""
+    # Populated only by the cross-election aggregate list — a single-election
+    # list already has this from context, so it's left blank there.
+    election_title: str = ""
     notified_at: Optional[datetime] = None
+    # Derived, not stored — see list_eligible_voters, which checks whether
+    # any of the election's categories has a vote hashed to this user.
+    has_voted: bool = False
     created_at: datetime
+
+
+class PaginatedEligibleVotersResponse(BaseModel):
+    items: List[EligibleVoterResponse]
+    total: int

@@ -1,4 +1,4 @@
-from typing import Optional
+from typing import Dict, List, Optional
 from uuid import UUID
 
 from sqlalchemy import func, select
@@ -19,6 +19,19 @@ class TransactionRepository(BaseRepository[Transaction]):
             select(Transaction).where(Transaction.reference == reference)
         )
         return result.scalar_one_or_none()
+
+    async def get_revenue_by_elections(self, election_ids: List[UUID]) -> Dict[UUID, float]:
+        """Same as get_revenue_by_election but grouped over many elections in
+        one query — for the payout sources list, where checking N elections
+        one at a time would mean N round trips."""
+        if not election_ids:
+            return {}
+        result = await self.session.execute(
+            select(Transaction.election_id, func.sum(Transaction.amount))
+            .where(Transaction.election_id.in_(election_ids), Transaction.status == "success")
+            .group_by(Transaction.election_id)
+        )
+        return {election_id: float(total) / 100 for election_id, total in result.all()}
 
     async def get_revenue_by_election(self, election_id: UUID) -> float:
         """Gross revenue (cedis) from paid votes on this election. `amount`

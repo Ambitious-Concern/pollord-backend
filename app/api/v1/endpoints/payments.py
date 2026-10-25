@@ -19,6 +19,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
 from app.core.redis import get_redis
+from app.core.results_stream import notify_vote_cast
+from app.services.org_notification_service import notify_vote_cast_if_due
 from app.db.base import get_db
 from app.models.election import Election
 from app.models.event import Event
@@ -243,6 +245,9 @@ async def _handle_charge_success(reference: str, data: dict, db: AsyncSession) -
         })
     except Exception:
         logger.warning("Vote already exists for reference %s, skipping insert", reference)
+    else:
+        await notify_vote_cast(txn.election_id, txn.event_id)
+        await notify_vote_cast_if_due(db, txn.election_id, txn.event_id)
 
     await txn_repo.update_status(reference, "success", data)
 
