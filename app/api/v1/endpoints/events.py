@@ -531,6 +531,20 @@ async def create_ticket_type(
     await _require_event_ownership(event, current_user, db)
 
     tt_repo = TicketTypeRepository(TicketType, db)
+
+    if event.capacity is not None:
+        existing = await tt_repo.get_by_event(event_id)
+        allocated = sum(tt.quantity_available + tt.quantity_sold for tt in existing)
+        if allocated + data.quantity_available > event.capacity:
+            raise HTTPException(
+                status_code=422,
+                detail=(
+                    f"Ticket quantities would exceed the event capacity of {event.capacity}. "
+                    f"{allocated} already allocated; adding {data.quantity_available} would "
+                    f"reach {allocated + data.quantity_available}."
+                ),
+            )
+
     ticket_type = await tt_repo.create(
         {**data.model_dump(), "event_id": event_id}
     )
@@ -587,6 +601,25 @@ async def update_ticket_type(
         raise HTTPException(status_code=404, detail="Ticket type not found")
 
     update_data = data.model_dump(exclude_unset=True)
+
+    if event.capacity is not None and "quantity_available" in update_data:
+        existing = await tt_repo.get_by_event(event_id)
+        others_allocated = sum(
+            (e.quantity_available + e.quantity_sold)
+            for e in existing
+            if e.ticket_type_id != type_id
+        )
+        new_qty = update_data["quantity_available"]
+        if others_allocated + new_qty > event.capacity:
+            raise HTTPException(
+                status_code=422,
+                detail=(
+                    f"Ticket quantities would exceed the event capacity of {event.capacity}. "
+                    f"Other ticket types use {others_allocated}; setting this to {new_qty} "
+                    f"would reach {others_allocated + new_qty}."
+                ),
+            )
+
     updated = await tt_repo.update(type_id, update_data, id_field="ticket_type_id")
     if event.org_id is not None and "price" in update_data:
         ip, agent = client_ip_and_agent(request)
