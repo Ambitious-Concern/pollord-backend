@@ -18,7 +18,7 @@ class SupportTicketRepository(BaseRepository[SupportTicket]):
     async def get_with_messages(self, ticket_id: UUID) -> Optional[SupportTicket]:
         result = await self.session.execute(
             select(SupportTicket)
-            .options(selectinload(SupportTicket.messages))
+            .options(selectinload(SupportTicket.messages), selectinload(SupportTicket.user))
             .where(SupportTicket.ticket_id == ticket_id)
         )
         return result.scalar_one_or_none()
@@ -35,7 +35,9 @@ class SupportTicketRepository(BaseRepository[SupportTicket]):
     async def get_all_tickets(
         self, *, skip: int = 0, limit: int = 50, status: Optional[str] = None
     ) -> List[SupportTicket]:
-        query = select(SupportTicket).options(selectinload(SupportTicket.messages))
+        query = select(SupportTicket).options(
+            selectinload(SupportTicket.messages), selectinload(SupportTicket.user)
+        ).where(SupportTicket.channel == "email")
         if status:
             query = query.where(SupportTicket.status == status)
         query = query.order_by(
@@ -45,13 +47,21 @@ class SupportTicketRepository(BaseRepository[SupportTicket]):
         return list(result.scalars().all())
 
     async def add_message(
-        self, ticket_id: UUID, sender_type: str, sender_user_id: UUID, text: str
+        self,
+        ticket_id: UUID,
+        sender_type: str,
+        sender_user_id: UUID,
+        text: str,
+        attachment_url: str | None = None,
+        attachment_name: str | None = None,
     ) -> SupportMessage:
         message = SupportMessage(
             ticket_id=ticket_id,
             sender_type=sender_type,
             sender_user_id=sender_user_id,
             text=text,
+            attachment_url=attachment_url,
+            attachment_name=attachment_name,
         )
         self.session.add(message)
         await self.session.flush()
@@ -67,13 +77,26 @@ class SupportTicketRepository(BaseRepository[SupportTicket]):
             self.session.expire(ticket, ["messages"])
         return message
 
+    async def get_chats_by_status(self, status: Optional[str] = None) -> List[SupportTicket]:
+        """All chat tickets (channel='chat'), optionally filtered by status."""
+        q = (
+            select(SupportTicket)
+            .options(selectinload(SupportTicket.messages), selectinload(SupportTicket.user))
+            .where(SupportTicket.channel == "chat")
+        )
+        if status:
+            q = q.where(SupportTicket.status == status)
+        q = q.order_by(SupportTicket.updated_at.desc())
+        result = await self.session.execute(q)
+        return list(result.scalars().all())
+
     async def get_waiting_chats(self) -> List[SupportTicket]:
         """Priority (Premium+) chats first, oldest-first within each tier so
         a steady stream of priority chats can't starve a standard one
         forever — same precedence rule as get_all_tickets's email queue."""
         result = await self.session.execute(
             select(SupportTicket)
-            .options(selectinload(SupportTicket.messages))
+            .options(selectinload(SupportTicket.messages), selectinload(SupportTicket.user))
             .where(SupportTicket.channel == "chat", SupportTicket.status == "Waiting")
             .order_by(SupportTicket.priority.desc(), SupportTicket.created_at.asc())
         )

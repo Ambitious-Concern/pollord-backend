@@ -21,7 +21,7 @@ from seeders.data.distribute import distribute
 from seeders.data.nominee_pool import NomineePicker
 
 STATUS_CYCLE = ["active", "completed", "scheduled", "draft"]
-PLAN_CYCLE = ["standard", "standard", "premium"]  # ~1/3 premium, matching the mock's own ratio
+PLAN_CYCLE = ["voting", "voting", "custom"]
 
 
 def _window_for_status(status: str, now: datetime) -> tuple[datetime, datetime]:

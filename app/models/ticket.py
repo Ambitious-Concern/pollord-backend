@@ -110,13 +110,13 @@ class TicketPurchase(Base):
         UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
     )
     user_id: Mapped[Optional[uuid.UUID]] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("users.user_id"), nullable=True
+        UUID(as_uuid=True), ForeignKey("users.user_id"), nullable=True, index=True
     )
     guest_name: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
     guest_email: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
     guest_phone: Mapped[Optional[str]] = mapped_column(String(50), nullable=True)
     event_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("events.event_id"), nullable=False
+        UUID(as_uuid=True), ForeignKey("events.event_id"), nullable=False, index=True
     )
     total_amount: Mapped[Decimal] = mapped_column(Numeric(10, 2), nullable=False)
     payment_status: Mapped[str] = mapped_column(String(20), default="pending")

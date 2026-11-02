@@ -80,7 +80,7 @@ class Event(TimestampMixin, Base):
     )
 
     # Chosen at launch, locked in until the event closes (see core/plans.py).
-    plan: Mapped[str] = mapped_column(String(20), default="standard", nullable=False)
+    plan: Mapped[str] = mapped_column(String(20), default="ticketing", nullable=False)
     commission_rate_override_bps: Mapped[Optional[int]] = mapped_column(
         Integer, nullable=True
     )

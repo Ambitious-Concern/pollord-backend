@@ -43,6 +43,7 @@ class UserResponse(BaseModel):
     email: str
     full_name: str
     phone_number: Optional[str] = None
+    bio: Optional[str] = None
     email_verified: bool
     account_status: str
     has_organization: bool = False
@@ -50,6 +51,7 @@ class UserResponse(BaseModel):
     avatar_url: Optional[str] = None
     totp_enabled: bool = False
     onboarding_completed_at: Optional[datetime] = None
+    last_login_at: Optional[datetime] = None
     created_at: datetime
     roles: List[str] = []
 
@@ -57,6 +59,7 @@ class UserResponse(BaseModel):
 class UserUpdate(BaseModel):
     full_name: Optional[str] = None
     phone_number: Optional[str] = None
+    bio: Optional[str] = None
 
 
 class SessionResponse(BaseModel):
@@ -68,6 +71,12 @@ class SessionResponse(BaseModel):
     created_at: datetime
     expires_at: datetime
     is_current: bool = False
+
+
+class AdminSessionResponse(SessionResponse):
+    user_id: Optional[UUID] = None
+    user_name: Optional[str] = None
+    user_email: Optional[str] = None
 
 
 class ChangePassword(BaseModel):
@@ -173,6 +182,7 @@ class AuditLogResponse(BaseModel):
 
     log_id: UUID
     user_id: Optional[UUID] = None
+    user_name: Optional[str] = None
     action_type: str
     entity_type: str
     entity_id: Optional[UUID] = None

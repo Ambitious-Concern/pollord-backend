@@ -1,3 +1,5 @@
+from typing import Optional
+
 from pydantic import BaseModel
 
 
@@ -6,4 +8,6 @@ class StartChatRequest(BaseModel):
 
 
 class ChatMessageRequest(BaseModel):
-    text: str
+    text: str = ""
+    attachment_url: Optional[str] = None
+    attachment_name: Optional[str] = None

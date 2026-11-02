@@ -51,7 +51,7 @@ async def seed_organizations(db: AsyncSession) -> tuple[Organization, User, list
     # Fixed password always wins, even if this user was created under the
     # old generic SEED_PASSWORD by a previous run.
     admin.password_hash = hash_password(config.ADMIN_PASSWORD)
-    await user_repo.grant_roles_by_name(admin.user_id, ["Election Administrator", "Event Organizer"])
+    await user_repo.grant_roles_by_name(admin.user_id, ["System Administrator", "Election Administrator", "Event Organizer"])
 
     result = await db.execute(select(Organization).where(Organization.name == config.ORG_NAME))
     org = result.scalar_one_or_none()

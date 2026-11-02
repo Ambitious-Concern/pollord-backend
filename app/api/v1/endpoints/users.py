@@ -62,8 +62,10 @@ async def _user_response(user: User, db: AsyncSession) -> UserResponse:
         has_organization=has_org,
         organization_verified=org_verified,
         avatar_url=user.avatar_url,
+        bio=user.bio,
         totp_enabled=user.totp_enabled,
         onboarding_completed_at=user.onboarding_completed_at,
+        last_login_at=user.last_login_at,
         created_at=user.created_at,
         roles=roles,
     )

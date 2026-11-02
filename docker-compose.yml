@@ -1,6 +1,7 @@
 services:
   db:
     image: postgres:18-alpine
+    command: postgres -c shared_preload_libraries=pg_stat_statements -c pg_stat_statements.track=all
     environment:
       POSTGRES_DB: pollard
       POSTGRES_USER: pollard

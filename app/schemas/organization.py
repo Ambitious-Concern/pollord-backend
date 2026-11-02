@@ -125,6 +125,7 @@ class OrganizationResponse(BaseModel):
     email: Optional[str] = None
     industry: Optional[str] = None
     is_verified: bool
+    rejection_reason: Optional[str] = None
     kyc_document_front: Optional[str] = None
     kyc_document_back: Optional[str] = None
     owner_id: UUID

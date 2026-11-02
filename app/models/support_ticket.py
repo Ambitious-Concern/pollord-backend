@@ -2,7 +2,7 @@ import uuid
 from datetime import datetime
 from typing import List, Optional
 
-from sqlalchemy import Boolean, DateTime, ForeignKey, LargeBinary, String, func
+from sqlalchemy import Boolean, DateTime, ForeignKey, Index, LargeBinary, String, func
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -17,12 +17,15 @@ class SupportTicket(TimestampMixin, Base):
     cadence and a queue/claim workflow on top (see LiveChatService)."""
 
     __tablename__ = "support_tickets"
+    __table_args__ = (
+        Index("ix_support_tickets_channel_status", "channel", "status"),
+    )
 
     ticket_id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
     )
     user_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("users.user_id"), nullable=False
+        UUID(as_uuid=True), ForeignKey("users.user_id"), nullable=False, index=True
     )
     org_id: Mapped[Optional[uuid.UUID]] = mapped_column(
         UUID(as_uuid=True), ForeignKey("organizations.org_id"), nullable=True
@@ -32,13 +35,21 @@ class SupportTicket(TimestampMixin, Base):
     # "email" (the original async ticket flow) or "chat" (live). Status
     # vocabularies differ by channel: email uses Open/Replied/Resolved,
     # chat uses Waiting/Active/Closed — same free-form column, no DB enum.
-    channel: Mapped[str] = mapped_column(String(10), default="email", nullable=False)
-    status: Mapped[str] = mapped_column(String(20), default="Open", nullable=False)
+    channel: Mapped[str] = mapped_column(String(10), default="email", nullable=False, index=True)
+    status: Mapped[str] = mapped_column(String(20), default="Open", nullable=False, index=True)
     priority: Mapped[bool] = mapped_column(Boolean, default=False)
     # Chat only — whichever agent claimed it out of the waiting queue.
     assigned_agent_id: Mapped[Optional[uuid.UUID]] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("users.user_id"), nullable=True
+        UUID(as_uuid=True), ForeignKey("users.user_id"), nullable=True, index=True
     )
+
+    user: Mapped["User"] = relationship(  # type: ignore[name-defined]
+        "User", foreign_keys=[user_id], lazy="select"
+    )
+
+    @property
+    def customer_name(self) -> Optional[str]:
+        return self.user.full_name if self.user is not None else None
 
     messages: Mapped[List["SupportMessage"]] = relationship(
         back_populates="ticket",
@@ -54,7 +65,7 @@ class SupportMessage(Base):
         UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
     )
     ticket_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("support_tickets.ticket_id"), nullable=False
+        UUID(as_uuid=True), ForeignKey("support_tickets.ticket_id"), nullable=False, index=True
     )
     sender_type: Mapped[str] = mapped_column(String(10), nullable=False)  # customer | agent
     sender_user_id: Mapped[uuid.UUID] = mapped_column(
@@ -64,6 +75,8 @@ class SupportMessage(Base):
     # rest, never stored or logged as plaintext. Use the `text` property
     # below rather than this column directly.
     text_encrypted: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
+    attachment_url: Mapped[Optional[str]] = mapped_column(String(2048), nullable=True)
+    attachment_name: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now()
     )

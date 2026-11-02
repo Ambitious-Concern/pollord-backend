@@ -34,7 +34,7 @@ def send_broadcast_chunk(self, broadcast_id: str, recipient_emails: List[str], s
         else:
             failed += 1
 
-    sync_url = settings.DATABASE_URL.replace("+asyncpg", "")
+    sync_url = settings.DATABASE_URL.replace("+asyncpg", "+psycopg2")
     engine = create_engine(sync_url)
     with Session(engine) as session:
         session.execute(

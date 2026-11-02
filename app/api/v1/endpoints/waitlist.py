@@ -21,9 +21,9 @@ from app.schemas.waitlist import (
 )
 from app.services.email_service import (
     launch_announcement_email,
-    send_email,
     waitlist_confirmation_email,
 )
+from app.tasks.email_tasks import send_email_task
 
 logger = logging.getLogger(__name__)
 
@@ -56,7 +56,7 @@ async def subscribe(
         return WaitlistSubscribeResponse(message="You're already on the list!")
 
     subject, html = waitlist_confirmation_email()
-    send_email(email, subject, html)
+    send_email_task.delay(email, subject, html)
 
     return WaitlistSubscribeResponse(
         message="You're on the list! Check your inbox for confirmation."
@@ -85,12 +85,11 @@ async def announce(
 
     subject, html = launch_announcement_email()
     sent = 0
+    now = datetime.now(timezone.utc)
     for subscriber in pending:
-        if send_email(subscriber.email, subject, html):
-            subscriber.notified_at = datetime.now(timezone.utc)
-            sent += 1
-        else:
-            logger.error(f"Launch email failed for {subscriber.email}; left un-notified")
+        send_email_task.delay(subscriber.email, subject, html)
+        subscriber.notified_at = now
+        sent += 1
 
     await AuditLogRepository(AuditLog, db).log_action(
         action_type="ANNOUNCE_LAUNCH",

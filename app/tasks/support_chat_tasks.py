@@ -22,7 +22,7 @@ def purge_closed_chats():
     from app.models.support_ticket import SupportTicket
 
     cutoff = datetime.now(timezone.utc) - timedelta(days=settings.SUPPORT_CHAT_RETENTION_DAYS)
-    sync_url = settings.DATABASE_URL.replace("+asyncpg", "")
+    sync_url = settings.DATABASE_URL.replace("+asyncpg", "+psycopg2")
     engine = create_engine(sync_url)
 
     with Session(engine) as session:

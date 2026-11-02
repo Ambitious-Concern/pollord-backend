@@ -2,7 +2,7 @@ from datetime import datetime
 from typing import Any, Dict, List, Optional
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, EmailStr, field_validator
+from pydantic import BaseModel, ConfigDict, EmailStr, Field, field_validator, model_validator
 
 from app.core.pricing import validate_vote_price
 
@@ -219,7 +219,7 @@ class ElectionResponse(BaseModel):
     tag: Optional[str] = None
     # Chosen at launch, locked in until the election closes (see core/plans.py)
     # — determines the commission rate, not an org-wide setting.
-    plan: str = "standard"
+    plan: str = "voting"
 
 
 class ElectionPublicResponse(BaseModel):
@@ -245,6 +245,14 @@ class ElectionPublicResponse(BaseModel):
     vote_price: Optional[int] = None
     effective_vote_price: int = 100  # resolved price (global or per-election), always set
     fee_payer: str = "organizer"
+    # Internal read — excluded from response; drives requires_access_code below.
+    access_code: Optional[str] = Field(default=None, exclude=True)
+    requires_access_code: bool = False
+
+    @model_validator(mode='after')
+    def _set_requires_access_code(self) -> 'ElectionPublicResponse':
+        self.requires_access_code = bool(self.access_code)
+        return self
 
 
 class ElectionWithCategories(ElectionResponse):

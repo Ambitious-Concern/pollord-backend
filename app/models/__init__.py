@@ -20,6 +20,9 @@ from app.models.report_export_job import ReportExportJob
 from app.models.notification import Notification
 from app.models.event_invitation import EventInvitation
 from app.models.event_broadcast import EventBroadcast
+from app.models.backup_record import BackupRecord
+from app.models.app_log import AppLog
+from app.models.abuse_alert import AbuseAlert, AlertType, AlertSeverity, AlertStatus
 
 __all__ = [
     "User",
@@ -54,4 +57,10 @@ __all__ = [
     "Template",
     "ReportExportJob",
     "Notification",
+    "BackupRecord",
+    "AppLog",
+    "AbuseAlert",
+    "AlertType",
+    "AlertSeverity",
+    "AlertStatus",
 ]

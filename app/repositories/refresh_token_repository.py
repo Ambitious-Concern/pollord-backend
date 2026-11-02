@@ -26,6 +26,22 @@ class RefreshTokenRepository(BaseRepository[RefreshToken]):
         )
         return list(result.scalars().all())
 
+    async def get_all_active(self, skip: int = 0, limit: int = 200) -> List[RefreshToken]:
+        """All active sessions platform-wide, joined with their owner."""
+        from sqlalchemy.orm import joinedload
+        result = await self.session.execute(
+            select(RefreshToken)
+            .options(joinedload(RefreshToken.user))
+            .where(
+                RefreshToken.revoked.is_(False),
+                RefreshToken.expires_at > datetime.now(timezone.utc),
+            )
+            .order_by(RefreshToken.created_at.desc())
+            .offset(skip)
+            .limit(limit)
+        )
+        return list(result.scalars().unique().all())
+
     async def get_by_jti(self, jti: str) -> Optional[RefreshToken]:
         result = await self.session.execute(select(RefreshToken).where(RefreshToken.jti == jti))
         return result.scalar_one_or_none()

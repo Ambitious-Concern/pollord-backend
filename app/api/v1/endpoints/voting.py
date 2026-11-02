@@ -365,6 +365,12 @@ async def request_vote_otp(
     category, parent, parent_kind = await _resolve_category_and_parent(db, data.category_id)
     _assert_open_for_voting(parent, parent_kind)
 
+    if parent_kind == "election":
+        required_code = getattr(parent, "access_code", None)
+        if required_code:
+            if not data.access_code or data.access_code.strip() != required_code:
+                raise HTTPException(status_code=403, detail="Invalid access code")
+
     email = data.email.lower()
     voter_hash = generate_email_voter_hash(email, data.category_id)
     vote_repo = VoteRepository(Vote, db)
@@ -398,7 +404,8 @@ async def request_vote_otp(
         category_name=category.name,
         parent_title=getattr(parent, "title", "the election"),
     )
-    email_service.send_email(email, subject, html_body)
+    from app.tasks.email_tasks import send_email_task
+    send_email_task.delay(email, subject, html_body)
 
     return {"message": "Code sent"}
 
@@ -414,6 +421,12 @@ async def verify_vote_otp_and_cast(
     verified email instead of IP+user-agent."""
     category, parent, parent_kind = await _resolve_category_and_parent(db, data.category_id)
     _assert_open_for_voting(parent, parent_kind)
+
+    if parent_kind == "election":
+        required_code = getattr(parent, "access_code", None)
+        if required_code:
+            if not data.access_code or data.access_code.strip() != required_code:
+                raise HTTPException(status_code=403, detail="Invalid access code")
 
     email = data.email.lower()
     result = await db.execute(

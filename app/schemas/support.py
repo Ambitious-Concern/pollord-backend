@@ -30,6 +30,8 @@ class SupportTicketCreate(BaseModel):
 
 class SupportMessageCreate(BaseModel):
     text: str
+    attachment_url: Optional[str] = None
+    attachment_name: Optional[str] = None
 
 
 class SupportMessageResponse(BaseModel):
@@ -38,6 +40,8 @@ class SupportMessageResponse(BaseModel):
     message_id: UUID
     sender_type: Literal["customer", "agent"]
     text: str
+    attachment_url: Optional[str] = None
+    attachment_name: Optional[str] = None
     created_at: datetime
 
 
@@ -51,9 +55,11 @@ class SupportTicketResponse(BaseModel):
     status: str
     priority: bool
     assigned_agent_id: Optional[UUID] = None
+    customer_name: Optional[str] = None
     created_at: datetime
     updated_at: datetime
     messages: List[SupportMessageResponse] = []
+
 
 
 class UpdateTicketStatus(BaseModel):

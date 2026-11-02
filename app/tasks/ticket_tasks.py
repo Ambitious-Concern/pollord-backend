@@ -19,7 +19,7 @@ def check_expired_tickets():
     from app.models.event import Event
     from app.models.ticket import Ticket
 
-    sync_url = settings.DATABASE_URL.replace("+asyncpg", "")
+    sync_url = settings.DATABASE_URL.replace("+asyncpg", "+psycopg2")
     engine = create_engine(sync_url)
 
     with Session(engine) as session:

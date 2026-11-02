@@ -555,7 +555,8 @@ async def invite_member_by_email(
         role=data.role,
         accept_url=accept_url,
     )
-    email_service.send_email(data.email, subject, html_body)
+    from app.tasks.email_tasks import send_email_task
+    send_email_task.delay(data.email, subject, html_body)
 
     ip, agent = client_ip_and_agent(request)
     await OrgActivityLogRepository(OrgActivityLog, db).log_activity(

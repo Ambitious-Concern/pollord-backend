@@ -46,10 +46,16 @@ class SupportService:
             raise HTTPException(status_code=404, detail="Ticket not found")
         return ticket
 
-    async def reply_as_customer(self, ticket_id: UUID, user_id: UUID, text: str) -> SupportTicket:
+    async def reply_as_customer(
+        self,
+        ticket_id: UUID,
+        user_id: UUID,
+        text: str,
+        attachment_url: str | None = None,
+        attachment_name: str | None = None,
+    ) -> SupportTicket:
         ticket = await self.get_my_ticket(ticket_id, user_id)
-        await self.tickets.add_message(ticket_id, "customer", user_id, text)
-        # A customer reply always reopens the conversation, even a resolved one.
+        await self.tickets.add_message(ticket_id, "customer", user_id, text, attachment_url, attachment_name)
         ticket.status = "Open"
         await self.db.flush()
         self.db.expire(ticket, ["messages"])
@@ -64,9 +70,16 @@ class SupportService:
             raise HTTPException(status_code=404, detail="Ticket not found")
         return ticket
 
-    async def reply_as_agent(self, ticket_id: UUID, agent_user_id: UUID, text: str) -> SupportTicket:
+    async def reply_as_agent(
+        self,
+        ticket_id: UUID,
+        agent_user_id: UUID,
+        text: str,
+        attachment_url: str | None = None,
+        attachment_name: str | None = None,
+    ) -> SupportTicket:
         ticket = await self.get_ticket(ticket_id)
-        await self.tickets.add_message(ticket_id, "agent", agent_user_id, text)
+        await self.tickets.add_message(ticket_id, "agent", agent_user_id, text, attachment_url, attachment_name)
         ticket.status = "Replied"
         await self.db.flush()
         self.db.expire(ticket, ["messages"])

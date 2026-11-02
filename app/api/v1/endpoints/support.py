@@ -96,7 +96,9 @@ async def admin_reply_to_ticket(
     db: AsyncSession = Depends(get_db),
 ):
     service = SupportService(db)
-    return await service.reply_as_agent(ticket_id, current_user.user_id, payload.text)
+    return await service.reply_as_agent(
+        ticket_id, current_user.user_id, payload.text, payload.attachment_url, payload.attachment_name
+    )
 
 
 @router.patch("/admin/tickets/{ticket_id}/status", response_model=SupportTicketResponse)

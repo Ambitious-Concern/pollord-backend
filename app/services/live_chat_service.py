@@ -1,4 +1,4 @@
-from typing import List
+from typing import List, Optional
 from uuid import UUID
 
 from fastapi import HTTPException
@@ -41,12 +41,26 @@ class LiveChatService:
             }
         )
         await self.tickets.add_message(ticket.ticket_id, "customer", user_id, message)
+        # Commit before notifying so WS/SSE handlers see the committed row.
+        await self.db.commit()
         await notify_queue_changed()
         return await self.tickets.get_with_messages(ticket.ticket_id)
 
-    async def send_customer_message(self, ticket_id: UUID, user_id: UUID, text: str) -> SupportTicket:
+    async def send_customer_message(
+        self,
+        ticket_id: UUID,
+        user_id: UUID,
+        text: str,
+        attachment_url: Optional[str] = None,
+        attachment_name: Optional[str] = None,
+    ) -> SupportTicket:
         ticket = await self._get_owned_chat(ticket_id, user_id)
-        await self.tickets.add_message(ticket_id, "customer", user_id, text)
+        await self.tickets.add_message(
+            ticket_id, "customer", user_id, text,
+            attachment_url=attachment_url,
+            attachment_name=attachment_name,
+        )
+        await self.db.commit()
         await notify_new_message(ticket_id)
         return await self.tickets.get_with_messages(ticket_id)
 
@@ -56,17 +70,33 @@ class LiveChatService:
     async def list_waiting(self) -> List[SupportTicket]:
         return await self.tickets.get_waiting_chats()
 
+    async def list_by_status(self, status: Optional[str] = None) -> List[SupportTicket]:
+        return await self.tickets.get_chats_by_status(status)
+
     async def claim(self, ticket_id: UUID, agent_user_id: UUID) -> SupportTicket:
         claimed = await self.tickets.claim_chat(ticket_id, agent_user_id)
         if not claimed:
             raise HTTPException(status_code=409, detail="This chat has already been claimed")
+        await self.db.commit()
         await notify_queue_changed()
         await notify_new_message(ticket_id)
         return await self.tickets.get_with_messages(ticket_id)
 
-    async def send_agent_message(self, ticket_id: UUID, agent_user_id: UUID, text: str) -> SupportTicket:
+    async def send_agent_message(
+        self,
+        ticket_id: UUID,
+        agent_user_id: UUID,
+        text: str,
+        attachment_url: Optional[str] = None,
+        attachment_name: Optional[str] = None,
+    ) -> SupportTicket:
         ticket = await self._get_chat(ticket_id)
-        await self.tickets.add_message(ticket_id, "agent", agent_user_id, text)
+        await self.tickets.add_message(
+            ticket_id, "agent", agent_user_id, text,
+            attachment_url=attachment_url,
+            attachment_name=attachment_name,
+        )
+        await self.db.commit()
         await notify_new_message(ticket_id)
         return await self.tickets.get_with_messages(ticket_id)
 
@@ -74,6 +104,7 @@ class LiveChatService:
         ticket = await self._get_chat(ticket_id)
         ticket.status = "Closed"
         await self.db.flush()
+        await self.db.commit()
         await notify_queue_changed()
         await notify_new_message(ticket_id)
         return await self.tickets.get_with_messages(ticket_id)

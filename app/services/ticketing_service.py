@@ -591,7 +591,12 @@ class TicketingService:
             )
 
         attachments = await self._build_ticket_pdfs(tickets, attendee_name, event_title)
-        sent = send_email(recipient, subject, html, attachments=attachments or None)
+        # send_email is sync/blocking SMTP — run off the event loop so the
+        # purchase response isn't held up by the SMTP round-trip.
+        import asyncio, functools
+        sent = await asyncio.to_thread(
+            functools.partial(send_email, recipient, subject, html, attachments=attachments or None)
+        )
         self._record_email_attempt(purchase, recipient, sent)
         return sent
 
@@ -927,7 +932,8 @@ class TicketingService:
         original_email = message[0] if message else None
         recipient = override_email or original_email
 
-        sent = send_email(recipient, subject, html)
+        import asyncio
+        sent = await asyncio.to_thread(send_email, recipient, subject, html)
         self._record_email_attempt(purchase, recipient, sent)
         await self.purchase_repo.session.flush()
 

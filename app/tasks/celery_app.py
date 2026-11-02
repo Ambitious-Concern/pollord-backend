@@ -2,6 +2,7 @@ from celery import Celery
 from celery.schedules import crontab
 
 from app.core.config import settings
+from app.tasks import signals as _signals  # noqa: F401
 
 celery_app = Celery(
     "pollard",
@@ -29,6 +30,12 @@ celery_app.conf.update(
     worker_max_tasks_per_child=1000,
 )
 
+celery_app.conf.task_routes = {
+    "app.tasks.email_tasks.*": {"queue": "emails"},
+    "app.tasks.event_broadcast_tasks.*": {"queue": "emails"},
+    "app.tasks.report_export_tasks.*": {"queue": "reports"},
+}
+
 celery_app.conf.beat_schedule = {
     "check-election-status": {
         "task": "app.tasks.vote_tally_tasks.check_election_status",
@@ -54,5 +61,9 @@ celery_app.conf.beat_schedule = {
         "task": "app.tasks.backup_tasks.backup_database",
         # 2 AM UTC daily — quiet period between election activity peaks.
         "schedule": crontab(hour=2, minute=0),
+    },
+    "reap-stale-backups": {
+        "task": "app.tasks.backup_tasks.reap_stale_backups",
+        "schedule": 900.0,  # every 15 min
     },
 }

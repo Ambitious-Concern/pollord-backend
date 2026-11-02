@@ -669,7 +669,8 @@ async def add_candidate(
             end_datetime=end_str,
             org_name=org_name,
         )
-        email_service.send_email(candidate.email, subject, html_body)
+        from app.tasks.email_tasks import send_email_task
+        send_email_task.delay(candidate.email, subject, html_body)
 
     return CandidateResponse.model_validate(candidate)
 
@@ -1361,7 +1362,8 @@ async def request_candidate_otp(
             )
         ).scalar_one_or_none() or "the election",
     )
-    email_service.send_email(data.email, subject, html_body)
+    from app.tasks.email_tasks import send_email_task
+    send_email_task.delay(data.email, subject, html_body)
 
     return {"message": "If that email is registered as a candidate, a code has been sent."}
 
@@ -1470,7 +1472,8 @@ async def verify_candidate_otp(
         election_title=election.title,
         results_url=results_url,
     )
-    email_service.send_email(data.email, subj, body)
+    from app.tasks.email_tasks import send_email_task
+    send_email_task.delay(data.email, subj, body)
 
     return CandidateResultResponse(
         candidate_id=str(candidate.candidate_id),

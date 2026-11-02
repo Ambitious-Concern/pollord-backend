@@ -98,7 +98,7 @@ class EventResponse(BaseModel):
     scan_enabled: bool = True
     # Chosen at launch, locked in until the event closes (see core/plans.py)
     # — determines the commission rate, not an org-wide setting.
-    plan: str = "standard"
+    plan: str = "ticketing"
     created_by: UUID
     created_at: datetime
     updated_at: datetime

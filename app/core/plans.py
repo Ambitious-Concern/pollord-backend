@@ -2,32 +2,31 @@
 
 Chosen per election/event at launch, not an org-wide subscription — see
 Pollord_Pricing_Commission_Model_v7.docx.
+
+Plans are now product-based (Voting / Ticketing / Custom) rather than a tier
+ladder. Elections default to "voting"; events default to "ticketing".
 """
 from decimal import Decimal
 from typing import Optional
 
-PLAN_STANDARD = "standard"
-PLAN_PREMIUM = "premium"
+PLAN_VOTING = "voting"
+PLAN_TICKETING = "ticketing"
 PLAN_CUSTOM = "custom"
 
-# Kept distinct from Standard for plan-ordering purposes (Custom still ranks
-# above both), even though the rates below no longer differ between them —
-# the redefined pricing model (matching the flat per-product rate every
-# comparable Ghanaian platform actually ships) dropped the old tiered-rate
-# upsell entirely. Every feature that used to require Premium is now
-# unconditional; see app/api/v1/endpoints/front_desk.py, reports.py,
-# voting.py, organizations.py, payout_service.py, live_chat_service.py and
-# support_service.py.
-PLAN_ORDER = (PLAN_STANDARD, PLAN_PREMIUM, PLAN_CUSTOM)
+# Backward-compat aliases — callers that imported PLAN_STANDARD / PLAN_PREMIUM
+# before the rename continue to work without change.
+PLAN_STANDARD = PLAN_VOTING
+PLAN_PREMIUM = PLAN_TICKETING
 
-# Basis points (1/100 of a percent). Flat 10% on paid votes regardless of
-# Standard/Premium — Custom is still negotiated per deal.
-COMMISSION_RATE_BPS = {PLAN_STANDARD: 1000, PLAN_PREMIUM: 1000}
+# Order matters only for meets_minimum_plan checks; Custom is still the top
+# tier for negotiated volume deals.
+PLAN_ORDER = (PLAN_VOTING, PLAN_TICKETING, PLAN_CUSTOM)
 
-# Ticket commission — a percentage of the ticket price, mirroring the vote
-# commission structure (published pricing page). Flat 8% regardless of
-# Standard/Premium.
-TICKET_COMMISSION_RATE_BPS = {PLAN_STANDARD: 800, PLAN_PREMIUM: 800}
+# 10% on paid votes (Voting plan elections).
+COMMISSION_RATE_BPS = {PLAN_VOTING: 1000, PLAN_TICKETING: 1000}
+
+# 8% on ticket revenue (Ticketing plan events).
+TICKET_COMMISSION_RATE_BPS = {PLAN_VOTING: 800, PLAN_TICKETING: 800}
 
 # Fallback used only when a stored Paystack response predates (or omits)
 # its own `fees` field — a fixed estimate, not a per-provider rate, since

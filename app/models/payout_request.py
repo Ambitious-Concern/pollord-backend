@@ -47,10 +47,10 @@ class PayoutRequest(TimestampMixin, Base):
         UUID(as_uuid=True), ForeignKey("elections.election_id"), nullable=True, index=True
     )
     organizer_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("users.user_id"), nullable=False
+        UUID(as_uuid=True), ForeignKey("users.user_id"), nullable=False, index=True
     )
     amount: Mapped[Decimal] = mapped_column(Numeric(10, 2), nullable=False)
-    status: Mapped[str] = mapped_column(String(20), default="pending", nullable=False)
+    status: Mapped[str] = mapped_column(String(20), default="pending", nullable=False, index=True)
     # Premium+ perk, derived from the parent election/event's plan at request
     # time (see core/plans.py) — sorts first in the admin review queue.
     express: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)

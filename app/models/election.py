@@ -59,7 +59,7 @@ class Election(TimestampMixin, Base):
     )
 
     # Chosen at launch, locked in until the election closes (see core/plans.py).
-    plan: Mapped[str] = mapped_column(String(20), default="standard", nullable=False)
+    plan: Mapped[str] = mapped_column(String(20), default="voting", nullable=False)
     commission_rate_override_bps: Mapped[Optional[int]] = mapped_column(
         Integer, nullable=True
     )
@@ -177,11 +177,11 @@ class Candidate(TimestampMixin, Base):
     # and other election-scoped queries that predate categories.
     election_id: Mapped[Optional[uuid.UUID]] = mapped_column(
         UUID(as_uuid=True), ForeignKey("elections.election_id", ondelete="CASCADE"),
-        nullable=True,
+        nullable=True, index=True,
     )
     event_id: Mapped[Optional[uuid.UUID]] = mapped_column(
         UUID(as_uuid=True), ForeignKey("events.event_id", ondelete="CASCADE"),
-        nullable=True,
+        nullable=True, index=True,
     )
     name: Mapped[str] = mapped_column(String(255), nullable=False)
     short_code: Mapped[Optional[str]] = mapped_column(String(6), nullable=True, index=True)
@@ -287,7 +287,7 @@ class EligibleVoter(Base):
     )
     user_id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), ForeignKey("users.user_id", ondelete="CASCADE"),
-        nullable=False,
+        nullable=False, index=True,
     )
     notified_at: Mapped[Optional[datetime]] = mapped_column(
         DateTime(timezone=True), nullable=True

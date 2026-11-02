@@ -19,7 +19,7 @@ def prune_expired_refresh_tokens():
     from app.core.config import settings
     from app.models.refresh_token import RefreshToken
 
-    sync_url = settings.DATABASE_URL.replace("+asyncpg", "")
+    sync_url = settings.DATABASE_URL.replace("+asyncpg", "+psycopg2")
     engine = create_engine(sync_url)
 
     with Session(engine) as session:

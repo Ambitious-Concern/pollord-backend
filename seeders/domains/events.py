@@ -31,7 +31,7 @@ from seeders.data.copy_bank import EVENT_GENRES, PLACES, TICKET_TIERS, VENUES, u
 from seeders.data.distribute import distribute
 from seeders.data.nominee_pool import NomineePicker
 
-PLAN_CYCLE = ["standard", "standard", "premium"]
+PLAN_CYCLE = ["ticketing", "ticketing", "custom"]
 
 
 def _infer_revenue_ids(events: list[Event]) -> set[UUID]:

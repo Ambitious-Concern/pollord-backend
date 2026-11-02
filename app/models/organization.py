@@ -32,11 +32,12 @@ class Organization(TimestampMixin, Base):
     phone: Mapped[Optional[str]] = mapped_column(String(30), nullable=True)
     email: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
     industry: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
-    is_verified: Mapped[bool] = mapped_column(Boolean, default=False)
+    is_verified: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
+    rejection_reason: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     kyc_document_front: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     kyc_document_back: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     owner_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("users.user_id"), nullable=False
+        UUID(as_uuid=True), ForeignKey("users.user_id"), nullable=False, index=True
     )
     # Soft-delete: "Delete organization" deactivates rather than destroys
     # rows, since elections/events/votes/tickets/payouts underneath it are
@@ -64,11 +65,11 @@ class OrganizationMember(Base):
     )
     org_id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), ForeignKey("organizations.org_id", ondelete="CASCADE"),
-        nullable=False,
+        nullable=False, index=True,
     )
     user_id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), ForeignKey("users.user_id", ondelete="CASCADE"),
-        nullable=False,
+        nullable=False, index=True,
     )
     role: Mapped[str] = mapped_column(
         String(30), default="member"
@@ -114,7 +115,7 @@ class OrgRole(Base):
     )
     org_id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), ForeignKey("organizations.org_id", ondelete="CASCADE"),
-        nullable=False,
+        nullable=False, index=True,
     )
     name: Mapped[str] = mapped_column(String(100), nullable=False)
     permissions: Mapped[list] = mapped_column(JSON, default=list, nullable=False)

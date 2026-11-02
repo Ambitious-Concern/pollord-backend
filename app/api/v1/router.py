@@ -1,6 +1,6 @@
 from fastapi import APIRouter
 
-from app.api.v1.endpoints import admin, admin_detail, admin_tickets, analytics, auth, elections, event_broadcasts, event_invitations, events, files, front_desk, junipay_webhook, live_chat, nominations, nominees, notifications, org_activity, organizations, payments, payouts, promo_codes, report_exports, reports, search, settings, support, templates, ticket_types, tickets, two_factor, users, ussd, voting, waitlist, whatsapp
+from app.api.v1.endpoints import admin, admin_detail, admin_tickets, analytics, app_log_alerts, app_logs, auth, backups, elections, event_broadcasts, event_invitations, events, files, front_desk, junipay_webhook, live_chat, nominations, nominees, notifications, org_activity, organizations, payments, payouts, promo_codes, queue_management, report_exports, reports, search, settings, support, system_health, templates, ticket_types, tickets, two_factor, users, ussd, voting, waitlist, whatsapp
 
 api_router = APIRouter(prefix="/api/v1")
 
@@ -39,3 +39,8 @@ api_router.include_router(support.router)
 api_router.include_router(live_chat.router)
 api_router.include_router(search.router)
 api_router.include_router(notifications.router)
+api_router.include_router(system_health.router)
+api_router.include_router(queue_management.router)
+api_router.include_router(backups.router)
+api_router.include_router(app_logs.router)
+api_router.include_router(app_log_alerts.router)

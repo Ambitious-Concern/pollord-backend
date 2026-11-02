@@ -74,10 +74,10 @@ class VoteReceipt(Base):
         UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
     )
     user_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("users.user_id"), nullable=False
+        UUID(as_uuid=True), ForeignKey("users.user_id"), nullable=False, index=True
     )
     election_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("elections.election_id"), nullable=False
+        UUID(as_uuid=True), ForeignKey("elections.election_id"), nullable=False, index=True
     )
     receipt_code: Mapped[str] = mapped_column(
         String(64), unique=True, nullable=False

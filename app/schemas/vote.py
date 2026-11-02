@@ -16,12 +16,14 @@ class CastVote(BaseModel):
 class RequestVoteOTP(BaseModel):
     category_id: UUID
     email: EmailStr
+    access_code: Optional[str] = None
 
 
 class VerifyVoteOTPAndCast(BaseModel):
     category_id: UUID
     email: EmailStr
     otp: str
+    access_code: Optional[str] = None
     candidate_ids: Optional[List[UUID]] = None
     candidate_short_codes: Optional[List[str]] = None
     # Explicit skip for a category the organizer marked Optional.

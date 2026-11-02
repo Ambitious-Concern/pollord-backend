@@ -33,6 +33,7 @@ from app.db.base import async_session_maker
 from app.db.init_db import init_db
 from seeders import config
 from seeders.data.nominee_pool import NomineePicker, build_identity_pool
+from seeders.domains.abuse_alerts import seed_abuse_alerts
 from seeders.domains.activity_log import seed_activity_log
 from seeders.domains.elections import seed_elections
 from seeders.domains.events import seed_events
@@ -117,6 +118,10 @@ async def main() -> None:
 
         print("- org activity log")
         await seed_activity_log(db, [org])
+        await db.commit()
+
+        print("- abuse alerts")
+        await seed_abuse_alerts(db)
         await db.commit()
 
     elapsed = time.monotonic() - started
