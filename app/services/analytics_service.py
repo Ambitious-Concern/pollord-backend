@@ -194,6 +194,240 @@ class AnalyticsService:
             ],
         }
 
+    async def get_platform_timeline(
+        self,
+        days: int = 30,
+        year: int | None = None,
+        content_id: str | None = None,
+        content_type: str | None = None,
+    ) -> dict:
+        """Zero-filled daily activity for the admin dashboard chart.
+
+        When *year* is provided the series runs Jan 1 – Dec 31 of that year
+        (capped at today for the current year). Otherwise the last *days* days
+        are returned as a rolling window ending today.
+
+        When *content_id* + *content_type* ('election'|'event') are given the
+        four sub-queries are scoped to that single election or event.
+        """
+        bind: dict = {}
+
+        if content_id and content_type == "election":
+            bind["content_id"] = content_id
+            _joins = """
+                LEFT JOIN (
+                    SELECT date_trunc('day', cast_at)::date AS d, SUM(count) AS votes
+                    FROM votes
+                    WHERE election_id = :content_id::uuid
+                    GROUP BY 1
+                ) v ON v.d = bucket
+                LEFT JOIN (SELECT NULL::date AS d, 0 AS tickets WHERE false) t ON t.d = bucket
+                LEFT JOIN (
+                    SELECT date_trunc('day', created_at)::date AS d,
+                           SUM(amount) / 100.0 AS vote_rev
+                    FROM transactions
+                    WHERE status = 'success' AND election_id = :content_id::uuid
+                    GROUP BY 1
+                ) vr ON vr.d = bucket
+                LEFT JOIN (SELECT NULL::date AS d, 0.0 AS ticket_rev WHERE false) tr ON tr.d = bucket
+                ORDER BY bucket
+            """
+        elif content_id and content_type == "event":
+            bind["content_id"] = content_id
+            _joins = """
+                LEFT JOIN (
+                    SELECT date_trunc('day', cast_at)::date AS d, SUM(count) AS votes
+                    FROM votes
+                    WHERE event_id = :content_id::uuid
+                    GROUP BY 1
+                ) v ON v.d = bucket
+                LEFT JOIN (
+                    SELECT date_trunc('day', purchase_date)::date AS d, COUNT(*) AS tickets
+                    FROM tickets
+                    WHERE ticket_status != 'cancelled' AND event_id = :content_id::uuid
+                    GROUP BY 1
+                ) t ON t.d = bucket
+                LEFT JOIN (
+                    SELECT date_trunc('day', created_at)::date AS d,
+                           SUM(amount) / 100.0 AS vote_rev
+                    FROM transactions
+                    WHERE status = 'success' AND event_id = :content_id::uuid
+                    GROUP BY 1
+                ) vr ON vr.d = bucket
+                LEFT JOIN (
+                    SELECT date_trunc('day', purchased_at)::date AS d,
+                           SUM(total_amount) AS ticket_rev
+                    FROM ticket_purchases
+                    WHERE payment_status = 'completed' AND event_id = :content_id::uuid
+                    GROUP BY 1
+                ) tr ON tr.d = bucket
+                ORDER BY bucket
+            """
+        else:
+            _joins = """
+                LEFT JOIN (
+                    SELECT date_trunc('day', cast_at)::date AS d, SUM(count) AS votes
+                    FROM votes
+                    GROUP BY 1
+                ) v ON v.d = bucket
+                LEFT JOIN (
+                    SELECT date_trunc('day', purchase_date)::date AS d, COUNT(*) AS tickets
+                    FROM tickets
+                    WHERE ticket_status != 'cancelled'
+                    GROUP BY 1
+                ) t ON t.d = bucket
+                LEFT JOIN (
+                    SELECT date_trunc('day', created_at)::date AS d,
+                           SUM(amount) / 100.0 AS vote_rev
+                    FROM transactions
+                    WHERE status = 'success'
+                    GROUP BY 1
+                ) vr ON vr.d = bucket
+                LEFT JOIN (
+                    SELECT date_trunc('day', purchased_at)::date AS d,
+                           SUM(total_amount) AS ticket_rev
+                    FROM ticket_purchases
+                    WHERE payment_status = 'completed'
+                    GROUP BY 1
+                ) tr ON tr.d = bucket
+                ORDER BY bucket
+            """
+
+        if year is not None:
+            from datetime import date as _date
+            today = _date.today()
+            start = _date(year, 1, 1).isoformat()
+            end = min(_date(year, 12, 31), today).isoformat()
+            sql = text(f"""
+                SELECT
+                    bucket::date AS date,
+                    COALESCE(v.votes, 0)       AS votes,
+                    COALESCE(t.tickets, 0)     AS tickets,
+                    COALESCE(vr.vote_rev, 0) + COALESCE(tr.ticket_rev, 0) AS revenue_ghs
+                FROM generate_series(
+                    '{start}'::date,
+                    '{end}'::date,
+                    INTERVAL '1 day'
+                ) AS bucket
+                {_joins}
+            """)
+            result = await self.session.execute(sql, bind)
+        else:
+            bind["days"] = days
+            sql = text(f"""
+                SELECT
+                    bucket::date AS date,
+                    COALESCE(v.votes, 0)       AS votes,
+                    COALESCE(t.tickets, 0)     AS tickets,
+                    COALESCE(vr.vote_rev, 0) + COALESCE(tr.ticket_rev, 0) AS revenue_ghs
+                FROM generate_series(
+                    (NOW() - ((:days - 1) * INTERVAL '1 day'))::date,
+                    NOW()::date,
+                    INTERVAL '1 day'
+                ) AS bucket
+                {_joins}
+            """)
+            result = await self.session.execute(sql, bind)
+        return {
+            "days": days,
+            "points": [
+                {
+                    "date": str(row.date),
+                    "votes": int(row.votes),
+                    "tickets": int(row.tickets),
+                    "revenue_ghs": float(row.revenue_ghs),
+                }
+                for row in result.all()
+            ],
+        }
+
+    async def get_content_list(self, search: str = "") -> list[dict]:
+        """Lightweight election+event list for the admin chart's content picker."""
+        like = f"%{search}%"
+        sql = text("""
+            SELECT id, title, 'election' AS type, status, org_name
+            FROM (
+                SELECT e.election_id::text AS id, e.title,
+                       e.status, o.name AS org_name
+                FROM elections e
+                JOIN organizations o ON o.org_id = e.org_id
+            ) el
+            WHERE (:search = '' OR LOWER(title) LIKE LOWER(:like) OR LOWER(org_name) LIKE LOWER(:like))
+            UNION ALL
+            SELECT id, title, 'event' AS type, status, org_name
+            FROM (
+                SELECT ev.event_id::text AS id, ev.title,
+                       ev.status, o.name AS org_name
+                FROM events ev
+                JOIN organizations o ON o.org_id = ev.org_id
+            ) evs
+            WHERE (:search = '' OR LOWER(title) LIKE LOWER(:like) OR LOWER(org_name) LIKE LOWER(:like))
+            ORDER BY title
+            LIMIT 100
+        """)
+        result = await self.session.execute(sql, {"search": search, "like": like})
+        return [
+            {"id": row.id, "title": row.title, "type": row.type, "status": row.status, "org_name": row.org_name}
+            for row in result.all()
+        ]
+
+    async def get_top_organizations(self, sort_by: str = "votes", limit: int = 10) -> list[dict]:
+        """Top organisations ranked by votes, tickets, or revenue.
+
+        Uses org_id from org-owned elections/events (same attribution rule as
+        the org drill-in) so figures reconcile with the detail page.
+        """
+        col_map = {"votes": "votes", "tickets": "tickets", "revenue": "revenue_ghs"}
+        col = col_map.get(sort_by, "votes")
+        sql = text(f"""
+            SELECT
+                o.org_id::text  AS org_id,
+                o.name          AS org_name,
+                o.is_verified   AS verified,
+                COALESCE(v.votes, 0)           AS votes,
+                COALESCE(t.tickets, 0)         AS tickets,
+                COALESCE(r.revenue_ghs, 0)     AS revenue_ghs
+            FROM organizations o
+            LEFT JOIN (
+                SELECT e.org_id, SUM(vo.count) AS votes
+                FROM votes vo
+                JOIN elections e ON e.election_id = vo.election_id
+                GROUP BY e.org_id
+            ) v ON v.org_id = o.org_id
+            LEFT JOIN (
+                SELECT ev.org_id, COUNT(*) AS tickets
+                FROM tickets tk
+                JOIN events ev ON ev.event_id = tk.event_id
+                WHERE tk.ticket_status != 'cancelled'
+                GROUP BY ev.org_id
+            ) t ON t.org_id = o.org_id
+            LEFT JOIN (
+                SELECT COALESCE(e.org_id, ev.org_id) AS org_id,
+                       SUM(tx.amount) / 100.0 AS revenue_ghs
+                FROM transactions tx
+                LEFT JOIN elections e  ON e.election_id  = tx.election_id
+                LEFT JOIN events    ev ON ev.event_id    = tx.event_id
+                WHERE tx.status = 'success'
+                  AND COALESCE(e.org_id, ev.org_id) IS NOT NULL
+                GROUP BY 1
+            ) r ON r.org_id = o.org_id
+            WHERE (v.votes > 0 OR t.tickets > 0 OR r.revenue_ghs > 0)
+            ORDER BY {col} DESC
+            LIMIT :limit
+        """)
+        result = await self.session.execute(sql, {"limit": limit})
+        return [
+            {
+                "org_id": row.org_id,
+                "org_name": row.org_name,
+                "verified": row.verified,
+                "votes": int(row.votes),
+                "tickets": int(row.tickets),
+                "revenue_ghs": float(row.revenue_ghs),
+            }
+            for row in result.all()
+        ]
+
     async def _revenue_by_organization(self) -> list[dict]:
         """Revenue per organisation, mirroring how the org drill-in attributes it.
 

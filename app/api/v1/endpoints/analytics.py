@@ -137,6 +137,47 @@ async def financial_stats(
     )
 
 
+@router.get("/platform-timeline")
+async def platform_timeline(
+    range: Literal["7d", "30d", "90d", "365d"] = "30d",
+    year: Optional[int] = None,
+    content_id: Optional[str] = None,
+    content_type: Optional[str] = None,
+    current_user: User = Depends(require_roles("System Administrator")),
+    db: AsyncSession = Depends(get_db),
+):
+    """Daily votes + tickets + revenue for the admin activity chart."""
+    service = AnalyticsService(db)
+    kwargs = dict(content_id=content_id, content_type=content_type)
+    if year is not None:
+        return await service.get_platform_timeline(year=year, **kwargs)
+    days_map = {"7d": 7, "30d": 30, "90d": 90, "365d": 365}
+    return await service.get_platform_timeline(days=days_map[range], **kwargs)
+
+
+@router.get("/top-organizations")
+async def top_organizations(
+    sort_by: str = "votes",
+    limit: int = 10,
+    current_user: User = Depends(require_roles("System Administrator")),
+    db: AsyncSession = Depends(get_db),
+):
+    """Top organisations ranked by votes, tickets, or revenue."""
+    service = AnalyticsService(db)
+    return await service.get_top_organizations(sort_by=sort_by, limit=min(limit, 20))
+
+
+@router.get("/content-list")
+async def content_list(
+    search: str = "",
+    current_user: User = Depends(require_roles("System Administrator")),
+    db: AsyncSession = Depends(get_db),
+):
+    """Lightweight election+event list for the admin chart's content picker."""
+    service = AnalyticsService(db)
+    return await service.get_content_list(search)
+
+
 @router.get("/system", response_model=SystemAnalyticsResponse)
 async def system_analytics(
     current_user: User = Depends(require_roles("System Administrator")),
