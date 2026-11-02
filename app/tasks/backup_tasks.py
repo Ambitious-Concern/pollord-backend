@@ -26,6 +26,23 @@ KEEP_SCHEDULED = 14
 KEEP_MANUAL = 30
 
 
+def _run_async(coro):
+    """Bridge from sync Celery tasks to async DB helpers.
+
+    asyncio.run() creates a new event loop on every call, but SQLAlchemy's
+    asyncpg pool retains connections bound to the previous (now-closed) loop.
+    Disposing the engine first forces asyncpg to open fresh connections on
+    the new loop, avoiding 'Future attached to a different loop' errors.
+    """
+    from app.db.base import engine
+
+    async def _wrapped():
+        await engine.dispose()
+        return await coro
+
+    return asyncio.run(_wrapped())
+
+
 # ── Helpers ────────────────────────────────────────────────────────────────────
 
 def _sha256(path: Path) -> str:
@@ -97,14 +114,14 @@ def run_backup_task(self, backup_id_str: str) -> dict:
     backup_id = uuid.UUID(backup_id_str)
 
     # Mark running
-    asyncio.run(_update_record(backup_id, status="running"))
+    _run_async(_update_record(backup_id, status="running"))
 
     BACKUP_DIR.mkdir(parents=True, exist_ok=True)
 
     try:
         creds = _parse_db_url(settings.DATABASE_URL)
     except Exception as exc:
-        asyncio.run(_update_record(backup_id, status="failed", error=f"bad DATABASE_URL: {exc}"))
+        _run_async(_update_record(backup_id, status="failed", error=f"bad DATABASE_URL: {exc}"))
         return {"status": "error", "reason": str(exc)}
 
     stamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
@@ -132,14 +149,14 @@ def run_backup_task(self, backup_id_str: str) -> dict:
         if result.returncode != 0:
             dest.unlink(missing_ok=True)
             err = result.stderr.decode(errors="replace").strip()
-            asyncio.run(_update_record(backup_id, status="failed", error=err))
+            _run_async(_update_record(backup_id, status="failed", error=err))
             logger.error("run_backup_task: pg_dump failed (rc=%d): %s", result.returncode, err)
             return {"status": "error", "reason": err}
 
         size_bytes = dest.stat().st_size
         checksum = _sha256(dest)
 
-        asyncio.run(_update_record(
+        _run_async(_update_record(
             backup_id,
             status="completed",
             filename=filename,
@@ -160,8 +177,8 @@ def run_backup_task(self, backup_id_str: str) -> dict:
                     rec = await BackupRepository(db).get(backup_id)
                     return rec.type if rec else "scheduled"
 
-            backup_type = asyncio.run(_get_type())
-            asyncio.run(_prune_old_backups_async(backup_type))
+            backup_type = _run_async(_get_type())
+            _run_async(_prune_old_backups_async(backup_type))
         except Exception as exc:
             logger.warning("run_backup_task: prune failed: %s", exc)
 
@@ -171,12 +188,12 @@ def run_backup_task(self, backup_id_str: str) -> dict:
 
     except subprocess.TimeoutExpired:
         dest.unlink(missing_ok=True)
-        asyncio.run(_update_record(backup_id, status="failed", error="pg_dump timed out after 600s"))
+        _run_async(_update_record(backup_id, status="failed", error="pg_dump timed out after 600s"))
         logger.error("run_backup_task: pg_dump timed out")
         return {"status": "error", "reason": "timeout"}
     except Exception as exc:
         dest.unlink(missing_ok=True)
-        asyncio.run(_update_record(backup_id, status="failed", error=str(exc)))
+        _run_async(_update_record(backup_id, status="failed", error=str(exc)))
         logger.exception("run_backup_task: unexpected error: %s", exc)
         return {"status": "error", "reason": str(exc)}
 
@@ -208,7 +225,7 @@ def reap_stale_backups() -> dict:
                     await db.flush()
         return len(stale)
 
-    count = asyncio.run(_reap())
+    count = _run_async(_reap())
     if count:
         logger.warning("reap_stale_backups: marked %d stale backup(s) as failed", count)
     return {"reaped": count}
@@ -235,5 +252,5 @@ def backup_database() -> dict:
                 )
                 return str(rec.backup_id)
 
-    backup_id_str = asyncio.run(_create())
+    backup_id_str = _run_async(_create())
     return run_backup_task(backup_id_str)
