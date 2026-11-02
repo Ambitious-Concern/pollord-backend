@@ -218,7 +218,7 @@ class AnalyticsService:
                 LEFT JOIN (
                     SELECT date_trunc('day', cast_at)::date AS d, SUM(count) AS votes
                     FROM votes
-                    WHERE election_id = :content_id::uuid
+                    WHERE election_id = CAST(:content_id AS uuid)
                     GROUP BY 1
                 ) v ON v.d = bucket
                 LEFT JOIN (SELECT NULL::date AS d, 0 AS tickets WHERE false) t ON t.d = bucket
@@ -226,7 +226,7 @@ class AnalyticsService:
                     SELECT date_trunc('day', created_at)::date AS d,
                            SUM(amount) / 100.0 AS vote_rev
                     FROM transactions
-                    WHERE status = 'success' AND election_id = :content_id::uuid
+                    WHERE status = 'success' AND election_id = CAST(:content_id AS uuid)
                     GROUP BY 1
                 ) vr ON vr.d = bucket
                 LEFT JOIN (SELECT NULL::date AS d, 0.0 AS ticket_rev WHERE false) tr ON tr.d = bucket
@@ -238,27 +238,27 @@ class AnalyticsService:
                 LEFT JOIN (
                     SELECT date_trunc('day', cast_at)::date AS d, SUM(count) AS votes
                     FROM votes
-                    WHERE event_id = :content_id::uuid
+                    WHERE event_id = CAST(:content_id AS uuid)
                     GROUP BY 1
                 ) v ON v.d = bucket
                 LEFT JOIN (
                     SELECT date_trunc('day', purchase_date)::date AS d, COUNT(*) AS tickets
                     FROM tickets
-                    WHERE ticket_status != 'cancelled' AND event_id = :content_id::uuid
+                    WHERE ticket_status != 'cancelled' AND event_id = CAST(:content_id AS uuid)
                     GROUP BY 1
                 ) t ON t.d = bucket
                 LEFT JOIN (
                     SELECT date_trunc('day', created_at)::date AS d,
                            SUM(amount) / 100.0 AS vote_rev
                     FROM transactions
-                    WHERE status = 'success' AND event_id = :content_id::uuid
+                    WHERE status = 'success' AND event_id = CAST(:content_id AS uuid)
                     GROUP BY 1
                 ) vr ON vr.d = bucket
                 LEFT JOIN (
                     SELECT date_trunc('day', purchased_at)::date AS d,
                            SUM(total_amount) AS ticket_rev
                     FROM ticket_purchases
-                    WHERE payment_status = 'completed' AND event_id = :content_id::uuid
+                    WHERE payment_status = 'completed' AND event_id = CAST(:content_id AS uuid)
                     GROUP BY 1
                 ) tr ON tr.d = bucket
                 ORDER BY bucket
