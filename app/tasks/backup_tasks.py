@@ -128,17 +128,23 @@ def run_backup_task(self, backup_id_str: str) -> dict:
     filename = f"pollard_{stamp}.dump"
     dest = BACKUP_DIR / filename
 
+    # Run pg_dump inside the db container so the client version always
+    # matches the server version (avoids "version mismatch" when the app
+    # image ships an older pg client than the db service).
     cmd = [
+        "docker", "exec",
+        "-e", f"PGPASSWORD={creds['password']}",
+        "pollord-db",
         "pg_dump",
-        "-h", creds["host"],
-        "-p", creds["port"],
+        "-h", "127.0.0.1",
+        "-p", "5432",
         "-U", creds["user"],
         "-d", creds["dbname"],
         "--no-password",
         "--format=custom",
         "--compress=9",
     ]
-    env = {**os.environ, "PGPASSWORD": creds["password"]}
+    env = os.environ.copy()
 
     try:
         with dest.open("wb") as fh:
